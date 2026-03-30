@@ -1,16 +1,22 @@
-[workspace]
-    resolver = "3"
-    members  = ["macho"]
+[package]
+name = "macho"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+description = "Mach-O library and CLI"
 
-[workspace.package]
-    edition      = "2024"
-    rust-version = "1.85"
-    license      = "MIT OR Apache-2.0"
+[lib]
+path = "src/lib.rs"
 
-[workspace.dependencies]
-    zerocopy  = { version = "0.8", features = ["derive"] }
-    thiserror = "2"
-    bitflags  = "2"
-    clap      = { version = "4", features = ["derive"] }
-    memmap2   = "0.9"
-    anyhow    = "1"
+[[bin]]
+name = "macho"
+path = "src/main.rs"
+
+[dependencies]
+zerocopy = { version = "0.8", features = ["derive"] }
+thiserror = "2"
+bitflags = "2"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+anyhow = "1"
