@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/macho-core",
+    "crates/macho-cli",
+    "crates/macho",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+macho-core = { path = "crates/macho-core" }
+macho = { path = "crates/macho" }
+zerocopy = { version = "0.8", features = ["derive"] }
+thiserror = "2"
+bitflags = "2"
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+anyhow = "1"

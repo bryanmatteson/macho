@@ -1,0 +1,17 @@
+[package]
+name = "macho-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CLI inspection tool for Mach-O binaries"
+
+[[bin]]
+name = "macho"
+path = "src/main.rs"
+
+[dependencies]
+macho-core = { workspace = true }
+clap = { workspace = true }
+memmap2 = { workspace = true }
+anyhow = { workspace = true }
