@@ -1,22 +1,26 @@
 [package]
-name = "macho"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.85"
-license = "MIT OR Apache-2.0"
-description = "Mach-O library and CLI"
+    name         = "macho"
+    version      = "0.1.0"
+    edition      = "2024"
+    rust-version = "1.85"
+    license      = "MIT OR Apache-2.0"
+    description  = "Mach-O library and CLI"
+    homepage     = "https://github.com/bryanmatteson/macho"
+    repository   = "https://github.com/bryanmatteson/macho.git"
+    keywords     = ["macho", "binary", "elf", "dylib", "executable", "macos", "ios", "linux"]
+    categories   = ["development-tools::debugging", "development-tools::profiling"]
 
 [lib]
-path = "src/lib.rs"
+    path = "src/lib.rs"
 
 [[bin]]
-name = "macho"
-path = "src/main.rs"
+    name = "macho"
+    path = "src/main.rs"
 
 [dependencies]
-zerocopy = { version = "0.8", features = ["derive"] }
-thiserror = "2"
-bitflags = "2"
-clap = { version = "4", features = ["derive"] }
-memmap2 = "0.9"
-anyhow = "1"
+    zerocopy  = { version = "0.8", features = ["derive"] }
+    thiserror = "2"
+    bitflags  = "2"
+    clap      = { version = "4", features = ["derive"] }
+    memmap2   = "0.9"
+    anyhow    = "1"
