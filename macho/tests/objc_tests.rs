@@ -1,4 +1,4 @@
-use macho_core::objc::{ObjCMetadata, parse_objc_metadata};
+use macho::objc::{ObjCMetadata, parse_objc_metadata};
 
 fn load_plutil() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/plutil").expect("failed to open /usr/bin/plutil");
@@ -8,7 +8,7 @@ fn load_plutil() -> memmap2::Mmap {
 #[test]
 fn parse_objc_classes() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     // plutil has ObjC classes on arm64e
     for mach in container.mach_files() {
@@ -35,7 +35,7 @@ fn parse_objc_classes() {
 #[test]
 fn class_has_superclass() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         if let Ok(meta) = parse_objc_metadata(mach) {
@@ -56,7 +56,7 @@ fn class_has_superclass() {
 #[test]
 fn class_has_ivars() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         if let Ok(meta) = parse_objc_metadata(mach) {
@@ -76,7 +76,7 @@ fn class_has_ivars() {
 #[test]
 fn class_has_properties() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         if let Ok(meta) = parse_objc_metadata(mach) {
@@ -96,12 +96,12 @@ fn class_has_properties() {
 #[test]
 fn header_rendering() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         if let Ok(meta) = parse_objc_metadata(mach) {
             for class in &meta.classes {
-                let header = macho_core::objc::render::render_class_header(class);
+                let header = macho::objc::render::render_class_header(class);
                 assert!(header.contains("@interface"));
                 assert!(header.contains("@end"));
                 assert!(header.contains(&class.name));
@@ -137,7 +137,7 @@ fn no_objc_in_minimal_binary() {
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    let container = macho_core::parse(&data).expect("parse failed");
+    let container = macho::parse(&data).expect("parse failed");
     let mach = container.first_mach();
 
     // Should gracefully handle missing ObjC sections
@@ -151,7 +151,7 @@ fn no_objc_in_minimal_binary() {
 #[test]
 fn objc_metadata_via_ext_trait() {
     let mmap = load_plutil();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         let meta: Result<ObjCMetadata, _> = mach.ext();

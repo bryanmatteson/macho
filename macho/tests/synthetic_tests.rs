@@ -1,6 +1,6 @@
-use macho_core::model::container::MachContainer;
-use macho_core::model::header::{Bitness, FileType};
-use macho_core::model::load_command::LoadCommand;
+use macho::model::container::MachContainer;
+use macho::model::header::{Bitness, FileType};
+use macho::model::load_command::LoadCommand;
 
 /// Build a minimal valid 64-bit LE Mach-O:
 /// - 32-byte header
@@ -40,7 +40,7 @@ fn minimal_thin_64() -> Vec<u8> {
 #[test]
 fn parse_minimal_thin_64() {
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
 
     match container {
         MachContainer::Thin(mach) => {
@@ -73,7 +73,7 @@ fn unknown_load_command_preserved() {
     data.extend_from_slice(&16u32.to_le_bytes()); // cmdsize
     data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]); // payload
 
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
     assert_eq!(mach.load_commands().len(), 1);
@@ -151,7 +151,7 @@ fn minimal_fat_two_arches() {
     fat.resize(arch2_offset as usize, 0);
     fat.extend_from_slice(&thin2);
 
-    let container = macho_core::parse(&fat).expect("failed to parse fat binary");
+    let container = macho::parse(&fat).expect("failed to parse fat binary");
     match container {
         MachContainer::Fat(ref fb) => {
             assert_eq!(fb.arches().len(), 2);
@@ -165,7 +165,7 @@ fn minimal_fat_two_arches() {
 #[test]
 fn image_base_is_text_vmaddr() {
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
     assert_eq!(mach.image_base().0, 0x100000000);
 }
@@ -175,13 +175,13 @@ fn image_base_is_text_vmaddr() {
 #[test]
 fn too_small_for_magic() {
     let data = [0u8; 3];
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
 fn bad_magic() {
     let data = [0xDE, 0xAD, 0xBE, 0xEF, 0, 0, 0, 0];
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
@@ -200,7 +200,7 @@ fn cmdsize_too_small() {
     data.extend_from_slice(&1u32.to_le_bytes()); // cmd
     data.extend_from_slice(&4u32.to_le_bytes()); // cmdsize (too small)
 
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn cmdsize_not_aligned() {
     data.extend_from_slice(&10u32.to_le_bytes());
     data.extend_from_slice(&[0u8; 2]); // pad
 
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
@@ -239,7 +239,7 @@ fn load_command_extends_past_file() {
     data.extend_from_slice(&1u32.to_le_bytes());
     data.extend_from_slice(&256u32.to_le_bytes());
 
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
@@ -248,7 +248,7 @@ fn fat_zero_arches_rejected() {
     data.extend_from_slice(&0xCAFEBABEu32.to_be_bytes()); // FAT_MAGIC
     data.extend_from_slice(&0u32.to_be_bytes()); // nfat_arch = 0
 
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 #[test]
@@ -263,15 +263,15 @@ fn fat_arch_extends_past_file() {
     data.extend_from_slice(&0x100u32.to_be_bytes()); // size
     data.extend_from_slice(&12u32.to_be_bytes()); // align
 
-    assert!(macho_core::parse(&data).is_err());
+    assert!(macho::parse(&data).is_err());
 }
 
 // --- New API tests ---
 
 #[test]
 fn cpu_subtype_masking() {
-    use macho_core::constants::*;
-    use macho_core::model::header::{CpuSubtype, CpuType};
+    use macho::constants::*;
+    use macho::model::header::{CpuSubtype, CpuType};
 
     // Simulate arm64e with capability bits set (0x80000002)
     let sub = CpuSubtype(0x80000002u32 as i32);
@@ -286,9 +286,9 @@ fn cpu_subtype_masking() {
 
 #[test]
 fn arch_spec_arm64e_with_cap_bits() {
-    use macho_core::constants::*;
-    use macho_core::model::fat::ArchSpec;
-    use macho_core::model::header::{CpuSubtype, CpuType};
+    use macho::constants::*;
+    use macho::model::fat::ArchSpec;
+    use macho::model::header::{CpuSubtype, CpuType};
 
     let spec = ArchSpec {
         cpu_type: CpuType(CPU_TYPE_ARM64),
@@ -302,7 +302,7 @@ fn arch_spec_arm64e_with_cap_bits() {
 #[test]
 fn container_predicates() {
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     assert!(container.is_thin());
     assert!(!container.is_fat());
 }
@@ -310,7 +310,7 @@ fn container_predicates() {
 #[test]
 fn mach_file_convenience_methods() {
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
     assert!(mach.is_64bit());
@@ -325,7 +325,7 @@ fn mach_file_convenience_methods() {
 #[test]
 fn load_command_typed_accessors() {
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
     let lc = &mach.load_commands()[0].kind;
@@ -336,10 +336,10 @@ fn load_command_typed_accessors() {
 
 #[test]
 fn validation_detects_malformed() {
-    use macho_core::validate::{self, Severity};
+    use macho::validate::{self, Severity};
 
     let data = minimal_thin_64();
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
     // Minimal valid binary should pass
@@ -353,7 +353,7 @@ fn validation_detects_malformed() {
 
 #[test]
 fn dyld_info_only_preserved() {
-    use macho_core::model::load_command::LoadCommand;
+    use macho::model::load_command::LoadCommand;
 
     // Build a thin binary with LC_DYLD_INFO_ONLY
     let mut data = Vec::new();
@@ -371,7 +371,7 @@ fn dyld_info_only_preserved() {
     data.extend_from_slice(&48u32.to_le_bytes()); // cmdsize
     data.extend_from_slice(&[0u8; 40]); // remaining fields
 
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
     assert_eq!(mach.load_commands().len(), 1);
 
@@ -399,7 +399,7 @@ fn huge_ncmds_does_not_oom() {
     data.extend_from_slice(&8u32.to_le_bytes()); // cmdsize
 
     // Should not panic or OOM — the capacity is capped
-    let result = macho_core::parse(&data);
+    let result = macho::parse(&data);
     // It will either parse successfully (stopping after the command region) or
     // error on sizeofcmds mismatch. Either way, no OOM.
     if let Ok(container) = result {
@@ -422,7 +422,7 @@ fn huge_sizeofcmds_overflow() {
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    let result = macho_core::parse(&data);
+    let result = macho::parse(&data);
     // On 64-bit: checked_add succeeds but cmd_end > data.len() → error on first read
     // On 32-bit: checked_add itself would succeed (usize is u32, but
     //            32 + 0xFFFFFFFF overflows) → error
@@ -431,10 +431,10 @@ fn huge_sizeofcmds_overflow() {
 
 #[test]
 fn fat_arch_thin_offset_translation() {
-    use macho_core::addr::{FatFileOffset, ThinFileOffset};
+    use macho::addr::{FatFileOffset, ThinFileOffset};
 
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     if let MachContainer::Fat(ref fat) = container {
         let arch = &fat.arches()[0];

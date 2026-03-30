@@ -1,17 +1,22 @@
 [package]
-name = "macho-cli"
+name = "macho"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "CLI inspection tool for Mach-O binaries"
+description = "Mach-O library and CLI"
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "macho"
 path = "src/main.rs"
 
 [dependencies]
-macho-core = { workspace = true }
+zerocopy = { workspace = true }
+thiserror = { workspace = true }
+bitflags = { workspace = true }
 clap = { workspace = true }
 memmap2 = { workspace = true }
 anyhow = { workspace = true }

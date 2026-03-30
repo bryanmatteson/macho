@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
-use macho_core::constants::VmProtection;
-use macho_core::model::container::MachContainer;
-use macho_core::model::load_command::format_uuid;
-use macho_core::model::mach::MachFile;
-use macho_core::validate;
+use macho::constants::VmProtection;
+use macho::model::container::MachContainer;
+use macho::model::load_command::format_uuid;
+use macho::model::mach::MachFile;
+use macho::validate;
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
@@ -25,8 +25,8 @@ pub fn run(args: InspectArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", args.path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-    let container = macho_core::parse(&mmap)
-        .with_context(|| format!("failed to parse {}", args.path.display()))?;
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
     match &container {
         MachContainer::Thin(mach) => {
@@ -88,7 +88,7 @@ pub fn run(args: InspectArgs) -> Result<()> {
 }
 
 fn arch_name_for_mach(mach: &MachFile<'_>) -> String {
-    use macho_core::model::fat::ArchSpec;
+    use macho::model::fat::ArchSpec;
     let spec = ArchSpec {
         cpu_type: mach.header().cpu_type,
         cpu_subtype: mach.header().cpu_subtype,
@@ -194,14 +194,14 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
     }
 
     // Dyld summary
-    if let Ok(fixups) = macho_core::dyld::parse_chained_fixups(mach) {
+    if let Ok(fixups) = macho::dyld::parse_chained_fixups(mach) {
         println!(
             "Chained Fixups: {} imports, {} fixups",
             fixups.imports.len(),
             fixups.fixups.len()
         );
     }
-    if let Ok(exports) = macho_core::dyld::parse_exports(mach) {
+    if let Ok(exports) = macho::dyld::parse_exports(mach) {
         if !exports.is_empty() {
             println!("Exports Trie: {} exports", exports.len());
         }
@@ -245,8 +245,8 @@ fn format_prot(prot: VmProtection) -> String {
     format!("{r}{w}{x}")
 }
 
-fn format_section_extras(sect: &macho_core::model::section::Section) -> String {
-    use macho_core::model::section::SectionType;
+fn format_section_extras(sect: &macho::model::section::Section) -> String {
+    use macho::model::section::SectionType;
     match sect.section_type {
         SectionType::SymbolStubs if sect.reserved2 > 0 => {
             format!("  stub_size={}", sect.reserved2)

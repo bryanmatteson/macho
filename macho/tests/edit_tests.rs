@@ -1,5 +1,5 @@
-use macho_core::edit::MachEditor;
-use macho_core::model::load_command::LoadCommand;
+use macho::edit::MachEditor;
+use macho::model::load_command::LoadCommand;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -9,14 +9,14 @@ fn load_true() -> memmap2::Mmap {
 #[test]
 fn round_trip_identity() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let editor = MachEditor::new(mach);
     let rebuilt = editor.build().expect("build failed");
 
     // Re-parse the rebuilt binary
-    let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
     // Verify header fields match
@@ -34,7 +34,7 @@ fn round_trip_identity() {
 #[test]
 fn add_rpath() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let original_ncmds = mach.header().ncmds;
@@ -43,7 +43,7 @@ fn add_rpath() {
     editor.add_rpath("@executable_path/../Frameworks");
 
     let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
     assert_eq!(rm.header().ncmds, original_ncmds + 1);
@@ -62,7 +62,7 @@ fn add_rpath() {
 #[test]
 fn remove_command() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let original_ncmds = mach.header().ncmds;
@@ -78,7 +78,7 @@ fn remove_command() {
         editor.remove_command(idx).expect("remove failed");
 
         let rebuilt = editor.build().expect("build failed");
-        let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+        let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
         let rm = reparsed.first_mach();
 
         assert_eq!(rm.header().ncmds, original_ncmds - 1);
@@ -89,7 +89,7 @@ fn remove_command() {
 #[test]
 fn segments_still_valid_after_add() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut editor = MachEditor::new(mach);
@@ -97,7 +97,7 @@ fn segments_still_valid_after_add() {
     editor.add_rpath("/another/path");
 
     let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
     // All segments should still be parseable
@@ -108,10 +108,10 @@ fn segments_still_valid_after_add() {
     assert!(text.is_some(), "expected __TEXT segment");
 
     // Validation should pass
-    let diags = macho_core::validate::validate(rm);
+    let diags = macho::validate::validate(rm);
     let errors: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == macho_core::validate::Severity::Error)
+        .filter(|d| d.severity == macho::validate::Severity::Error)
         .collect();
     assert!(
         errors.is_empty(),
@@ -122,14 +122,14 @@ fn segments_still_valid_after_add() {
 #[test]
 fn add_load_dylib() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut editor = MachEditor::new(mach);
     editor.add_load_dylib("/usr/lib/libfoo.dylib", 0x10000, 0x10000);
 
     let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
     let has_foo = rm.load_commands().iter().any(|lc| {
@@ -145,14 +145,14 @@ fn add_load_dylib() {
 #[test]
 fn remove_code_signature() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut editor = MachEditor::new(mach);
     editor.remove_code_signature();
 
     let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho_core::parse(&rebuilt).expect("re-parse failed");
+    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
     let has_sig = rm

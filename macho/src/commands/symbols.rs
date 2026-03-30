@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
-use macho_core::ext::MachExt;
-use macho_core::model::container::MachContainer;
-use macho_core::model::mach::MachFile;
-use macho_core::model::symbol::SymbolTable;
+use macho::ext::MachExt;
+use macho::model::container::MachContainer;
+use macho::model::mach::MachFile;
+use macho::model::symbol::SymbolTable;
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
@@ -36,8 +36,8 @@ pub fn run(args: SymbolsArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", args.path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-    let container = macho_core::parse(&mmap)
-        .with_context(|| format!("failed to parse {}", args.path.display()))?;
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
     match &container {
         MachContainer::Thin(mach) => {

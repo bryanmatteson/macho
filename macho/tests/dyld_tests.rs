@@ -1,7 +1,7 @@
-use macho_core::dyld::chained::parse_chained_fixups;
-use macho_core::dyld::exports::{find_export, parse_exports};
-use macho_core::dyld::types::{ExportKind, FixupKind};
-use macho_core::model::container::MachContainer;
+use macho::dyld::chained::parse_chained_fixups;
+use macho::dyld::exports::{find_export, parse_exports};
+use macho::dyld::types::{ExportKind, FixupKind};
+use macho::model::container::MachContainer;
 
 fn load_binary(path: &str) -> memmap2::Mmap {
     let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
@@ -17,7 +17,7 @@ fn load_tar() -> memmap2::Mmap {
 #[test]
 fn parse_chained_fixups_tar() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     // tar has arm64e with chained fixups
     for mach in container.mach_files() {
@@ -39,7 +39,7 @@ fn parse_chained_fixups_tar() {
 #[test]
 fn chained_fixups_import_names() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     // The arm64e arch should have archive_* imports
     if let MachContainer::Fat(ref fat) = container {
@@ -61,7 +61,7 @@ fn chained_fixups_import_names() {
 #[test]
 fn chained_fixups_have_bind_or_rebase() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         if let Ok(fixups) = parse_chained_fixups(mach) {
@@ -91,7 +91,7 @@ fn chained_fixups_have_bind_or_rebase() {
 #[test]
 fn parse_exports_tar() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let exports = parse_exports(mach).expect("failed to parse exports");
@@ -107,7 +107,7 @@ fn parse_exports_tar() {
 #[test]
 fn find_export_by_name() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let result = find_export(mach, "__mh_execute_header").expect("failed to find export");
@@ -120,7 +120,7 @@ fn find_export_by_name() {
 #[test]
 fn find_export_nonexistent() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let result = find_export(mach, "_this_does_not_exist").expect("lookup failed");
@@ -130,7 +130,7 @@ fn find_export_nonexistent() {
 #[test]
 fn exports_all_have_names() {
     let mmap = load_tar();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         let exports = parse_exports(mach).expect("failed to parse exports");
@@ -159,7 +159,7 @@ fn no_chained_fixups_returns_error() {
     data.extend_from_slice(&72u32.to_le_bytes());
     data.extend_from_slice(&[0u8; 64]); // segment data
 
-    let container = macho_core::parse(&data).expect("parse failed");
+    let container = macho::parse(&data).expect("parse failed");
     let mach = container.first_mach();
     assert!(parse_chained_fixups(mach).is_err());
 }
@@ -231,7 +231,7 @@ fn synthetic_exports_trie() {
     // Append trie data
     data.extend_from_slice(&trie);
 
-    let container = macho_core::parse(&data).expect("parse failed");
+    let container = macho::parse(&data).expect("parse failed");
     let mach = container.first_mach();
 
     let exports = parse_exports(mach).expect("export parse failed");

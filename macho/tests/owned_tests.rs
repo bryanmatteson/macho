@@ -1,6 +1,6 @@
-use macho_core::addr::ThinFileOffset;
-use macho_core::model::container::MachContainer;
-use macho_core::model::owned::OwnedFatBinary;
+use macho::addr::ThinFileOffset;
+use macho::model::container::MachContainer;
+use macho::model::owned::OwnedFatBinary;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -10,7 +10,7 @@ fn load_true() -> memmap2::Mmap {
 #[test]
 fn owned_from_thin() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let owned = mach.to_owned_mach();
@@ -23,7 +23,7 @@ fn owned_from_thin() {
 #[test]
 fn owned_re_parse() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let owned = mach.to_owned_mach();
@@ -35,7 +35,7 @@ fn owned_re_parse() {
 #[test]
 fn write_bytes_at_offset() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut owned = mach.to_owned_mach();
@@ -57,7 +57,7 @@ fn write_bytes_at_offset() {
 #[test]
 fn write_bytes_at_va() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut owned = mach.to_owned_mach();
@@ -92,7 +92,7 @@ fn write_bytes_at_va() {
 #[test]
 fn write_pod_at() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut owned = mach.to_owned_mach();
@@ -101,15 +101,14 @@ fn write_pod_at() {
         .write_pod_at(ThinFileOffset(0x200), &val)
         .expect("write_pod_at failed");
 
-    let read_back: u32 =
-        macho_core::io::pod::read_pod(owned.bytes(), 0x200).expect("read_pod failed");
+    let read_back: u32 = macho::io::pod::read_pod(owned.bytes(), 0x200).expect("read_pod failed");
     assert_eq!(read_back, val);
 }
 
 #[test]
 fn write_bounds_check() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let mut owned = mach.to_owned_mach();
@@ -121,7 +120,7 @@ fn write_bounds_check() {
 #[test]
 fn save_to_vec() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let owned = mach.to_owned_mach();
@@ -134,7 +133,7 @@ fn save_to_vec() {
 #[test]
 fn into_bytes() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let owned = mach.to_owned_mach();
@@ -145,7 +144,7 @@ fn into_bytes() {
 #[test]
 fn owned_fat_binary() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     if let MachContainer::Fat(ref fat) = container {
         let owned = OwnedFatBinary::from_fat(fat, &mmap);
@@ -162,7 +161,7 @@ fn owned_fat_binary() {
 #[test]
 fn owned_fat_arch_mut() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     if let MachContainer::Fat(ref fat) = container {
         let mut owned = OwnedFatBinary::from_fat(fat, &mmap);

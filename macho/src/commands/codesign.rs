@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use macho_core::codesign::parse_code_signature;
-use macho_core::model::container::MachContainer;
-use macho_core::model::mach::MachFile;
+use macho::codesign::parse_code_signature;
+use macho::model::container::MachContainer;
+use macho::model::mach::MachFile;
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
@@ -19,8 +19,8 @@ pub fn run(args: CodesignArgs) -> Result<()> {
     let file = std::fs::File::open(&args.path)
         .with_context(|| format!("failed to open {}", args.path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
-    let container = macho_core::parse(&mmap)
-        .with_context(|| format!("failed to parse {}", args.path.display()))?;
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
     match &container {
         MachContainer::Thin(mach) => print_codesign(mach, &args),
@@ -96,7 +96,7 @@ fn print_codesign(mach: &MachFile<'_>, args: &CodesignArgs) {
         let cms_size = sig
             .blobs()
             .iter()
-            .find(|b| b.blob_type == macho_core::codesign::BlobType::Signature)
+            .find(|b| b.blob_type == macho::codesign::BlobType::Signature)
             .map(|b| b.size)
             .unwrap_or(0);
         println!("  CMS Signature: present ({cms_size} bytes)");

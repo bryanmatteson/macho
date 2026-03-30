@@ -1,4 +1,4 @@
-use macho_core::codesign::{HashType, parse_code_signature};
+use macho::codesign::{HashType, parse_code_signature};
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -8,7 +8,7 @@ fn load_true() -> memmap2::Mmap {
 #[test]
 fn parse_code_signature_true() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         let sig = parse_code_signature(mach).expect("failed to parse signature");
@@ -23,7 +23,7 @@ fn parse_code_signature_true() {
 #[test]
 fn code_directory_has_identifier() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let sig = parse_code_signature(mach).expect("failed to parse signature");
@@ -38,7 +38,7 @@ fn code_directory_has_identifier() {
 #[test]
 fn code_directory_hash_type() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let sig = parse_code_signature(mach).expect("failed to parse signature");
@@ -56,7 +56,7 @@ fn code_directory_hash_type() {
 #[test]
 fn cms_signature_present() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let sig = parse_code_signature(mach).expect("failed to parse signature");
@@ -66,7 +66,7 @@ fn cms_signature_present() {
 #[test]
 fn blob_types_are_valid() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let sig = parse_code_signature(mach).expect("failed to parse signature");
@@ -92,17 +92,17 @@ fn no_signature_graceful() {
     data.extend_from_slice(&72u32.to_le_bytes());
     data.extend_from_slice(&[0u8; 64]);
 
-    let container = macho_core::parse(&data).expect("parse failed");
+    let container = macho::parse(&data).expect("parse failed");
     let mach = container.first_mach();
     assert!(parse_code_signature(mach).is_err());
 }
 
 #[test]
 fn code_signature_via_ext_trait() {
-    use macho_core::codesign::CodeSignature;
+    use macho::codesign::CodeSignature;
 
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let sig: CodeSignature = mach.ext().expect("ext failed");

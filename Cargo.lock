@@ -132,24 +132,9 @@ checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
 name = "macho"
 version = "0.1.0"
 dependencies = [
- "macho-core",
-]
-
-[[package]]
-name = "macho-cli"
-version = "0.1.0"
-dependencies = [
  "anyhow",
- "clap",
- "macho-core",
- "memmap2",
-]
-
-[[package]]
-name = "macho-core"
-version = "0.1.0"
-dependencies = [
  "bitflags",
+ "clap",
  "memmap2",
  "thiserror",
  "zerocopy",

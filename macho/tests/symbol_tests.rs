@@ -1,5 +1,5 @@
-use macho_core::model::symbol::{SymbolTable, SymbolType};
-use macho_core::parse::relocations::relocations_for_section;
+use macho::model::symbol::{SymbolTable, SymbolType};
+use macho::parse::relocations::relocations_for_section;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -9,7 +9,7 @@ fn load_true() -> memmap2::Mmap {
 #[test]
 fn parse_symbol_table_via_ext() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let symtab = mach
@@ -28,7 +28,7 @@ fn parse_symbol_table_via_ext() {
 #[test]
 fn symbol_names_are_valid_str() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         let symtab = mach
@@ -44,7 +44,7 @@ fn symbol_names_are_valid_str() {
 #[test]
 fn has_defined_symbol() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let symtab = mach
@@ -57,7 +57,7 @@ fn has_defined_symbol() {
 #[test]
 fn find_by_name() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let symtab = mach
@@ -75,7 +75,7 @@ fn find_by_name() {
 #[test]
 fn string_table_accessible() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let symtab = mach
@@ -90,7 +90,7 @@ fn string_table_accessible() {
 #[test]
 fn relocations_empty_for_linked_binary() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     // Linked executables typically have zero relocations per section
@@ -111,10 +111,10 @@ fn relocations_empty_for_linked_binary() {
 #[test]
 fn parse_symbol_table_standalone() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
-    let symtab = macho_core::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
+    let symtab = macho::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
     assert!(!symtab.is_empty());
 }
 
@@ -145,10 +145,10 @@ fn missing_symtab_returns_error() {
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
 
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
-    let result = macho_core::parse::parse_symbol_table(mach);
+    let result = macho::parse::parse_symbol_table(mach);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -160,11 +160,11 @@ fn missing_symtab_returns_error() {
 #[test]
 fn stab_symbols_have_stab_type() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     // Check all arches — some may have stab symbols from debug info
     for mach in container.mach_files() {
-        let symtab = match macho_core::parse::parse_symbol_table(mach) {
+        let symtab = match macho::parse::parse_symbol_table(mach) {
             Ok(st) => st,
             Err(_) => continue,
         };
@@ -232,10 +232,10 @@ fn synthetic_symtab_parsing() {
     // String table at offset 88
     data.extend_from_slice(strtab);
 
-    let container = macho_core::parse(&data).expect("failed to parse");
+    let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
-    let symtab = macho_core::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
+    let symtab = macho::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
 
     assert_eq!(symtab.len(), 2);
 

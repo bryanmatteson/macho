@@ -1,6 +1,6 @@
-use macho_core::model::container::MachContainer;
-use macho_core::model::header::{Bitness, FileType};
-use macho_core::model::load_command::LoadCommand;
+use macho::model::container::MachContainer;
+use macho::model::header::{Bitness, FileType};
+use macho::model::load_command::LoadCommand;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -10,7 +10,7 @@ fn load_true() -> memmap2::Mmap {
 #[test]
 fn parse_fat_binary() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     match &container {
         MachContainer::Fat(fat) => {
@@ -34,7 +34,7 @@ fn parse_fat_binary() {
 #[test]
 fn parse_thin_from_fat_arch() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     assert_eq!(mach.bitness(), Bitness::Bits64);
@@ -54,7 +54,7 @@ fn parse_thin_from_fat_arch() {
 #[test]
 fn address_translation_round_trip() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     // Find a non-zerofill section with data
@@ -88,7 +88,7 @@ fn address_translation_round_trip() {
 #[test]
 fn segments_contain_correct_sections() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
         for seg in mach.segments() {
@@ -121,7 +121,7 @@ fn segments_contain_correct_sections() {
 #[test]
 fn uuid_present() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
     assert!(mach.uuid().is_some(), "expected UUID to be present");
 }
@@ -129,7 +129,7 @@ fn uuid_present() {
 #[test]
 fn build_version_present() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let has_build_version = mach
@@ -143,7 +143,7 @@ fn build_version_present() {
 #[test]
 fn read_bytes_at_va() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     // Read some bytes from the text section
@@ -159,7 +159,7 @@ fn read_bytes_at_va() {
 #[test]
 fn section_bytes_accessor() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
     let bytes = mach
@@ -171,13 +171,13 @@ fn section_bytes_accessor() {
 #[test]
 fn validation_passes_for_system_binary() {
     let mmap = load_true();
-    let container = macho_core::parse(&mmap).expect("failed to parse");
+    let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
-        let diags = macho_core::validate::validate(mach);
+        let diags = macho::validate::validate(mach);
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| d.severity == macho_core::validate::Severity::Error)
+            .filter(|d| d.severity == macho::validate::Severity::Error)
             .collect();
         assert!(
             errors.is_empty(),

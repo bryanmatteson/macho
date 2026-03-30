@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
-use macho_core::model::container::MachContainer;
-use macho_core::model::mach::MachFile;
-use macho_core::parse::relocations::relocations_for_section;
+use macho::model::container::MachContainer;
+use macho::model::mach::MachFile;
+use macho::parse::relocations::relocations_for_section;
 use std::path::PathBuf;
 
 #[derive(clap::Args)]
@@ -23,8 +23,8 @@ pub fn run(args: RelocationsArgs) -> Result<()> {
         .with_context(|| format!("failed to open {}", args.path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
 
-    let container = macho_core::parse(&mmap)
-        .with_context(|| format!("failed to parse {}", args.path.display()))?;
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
     match &container {
         MachContainer::Thin(mach) => {
