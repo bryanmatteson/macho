@@ -15,6 +15,7 @@ pub struct ResignPlan {
     pub hash_type: Option<String>,
     pub signature_parse_error: Option<String>,
     pub suggested_command: String,
+    pub manual_steps: Vec<String>,
 }
 
 impl ResignPlan {
@@ -62,7 +63,13 @@ impl ResignPlan {
         };
 
         let has_entitlements = entitlements_xml.is_some() || entitlements_der_present;
-        let suggested_command = build_resign_command(identifier.as_deref(), has_entitlements);
+        let suggested_command =
+            build_resign_command(identifier.as_deref(), entitlements_xml.is_some());
+        let manual_steps = build_manual_steps(
+            entitlements_xml.is_some(),
+            entitlements_der_present,
+            signature_parse_error.as_deref(),
+        );
 
         Self {
             was_signed,
@@ -75,20 +82,49 @@ impl ResignPlan {
             hash_type,
             signature_parse_error,
             suggested_command,
+            manual_steps,
         }
     }
 }
 
-fn build_resign_command(identifier: Option<&str>, has_entitlements: bool) -> String {
+fn build_resign_command(identifier: Option<&str>, has_xml_entitlements: bool) -> String {
     let mut cmd = "codesign -f -s <identity>".to_string();
     if let Some(id) = identifier {
         cmd.push_str(&format!(" --identifier {id}"));
     }
-    if has_entitlements {
+    if has_xml_entitlements {
         cmd.push_str(" --entitlements <entitlements.plist>");
     }
     cmd.push_str(" <binary>");
     cmd
+}
+
+fn build_manual_steps(
+    has_xml_entitlements: bool,
+    has_der_entitlements: bool,
+    signature_parse_error: Option<&str>,
+) -> Vec<String> {
+    let mut steps = Vec::new();
+
+    if has_xml_entitlements {
+        steps.push(
+            "Extract the embedded XML entitlements into a plist before re-signing.".to_string(),
+        );
+    } else if has_der_entitlements {
+        steps.push(
+            "Original signature carries DER entitlements only; export or reconstruct a plist if entitlements must be preserved."
+                .to_string(),
+        );
+    }
+
+    if signature_parse_error.is_some() {
+        steps.push(
+            "Inspect the original LC_CODE_SIGNATURE before patching if identifier, entitlements, or CMS state must be preserved."
+                .to_string(),
+        );
+    }
+
+    steps
 }
 
 impl std::fmt::Display for ResignPlan {
@@ -121,6 +157,10 @@ impl std::fmt::Display for ResignPlan {
         if self.has_cms_signature {
             writeln!(f, "  CMS signature present")?;
         }
-        writeln!(f, "  Command:    {}", self.suggested_command)
+        writeln!(f, "  Command:    {}", self.suggested_command)?;
+        for step in &self.manual_steps {
+            writeln!(f, "  Note:       {step}")?;
+        }
+        Ok(())
     }
 }

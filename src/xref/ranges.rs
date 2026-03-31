@@ -84,13 +84,15 @@ impl SymbolRangeIndex {
             }
         }
 
-        // Collect exports with addresses (only add if not already covered by nlist)
+        // Collect exports with addresses (only add if not already covered by nlist).
+        // Skip Absolute exports — they are linker-defined constants not backed
+        // by any file section, so they have no meaningful ownership range.
         if let Ok(exports) = parse_exports(mach) {
             for exp in &exports {
                 let addr = match &exp.kind {
                     ExportKind::Regular { address } => *address,
                     ExportKind::ThreadLocal { address } => *address,
-                    ExportKind::Absolute { address } => *address,
+                    ExportKind::Absolute { .. } => continue,
                     _ => continue,
                 };
                 if addr == 0 {

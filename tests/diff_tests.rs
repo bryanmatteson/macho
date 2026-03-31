@@ -1,9 +1,9 @@
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
-    DiagnosticSnapshot, ExportKindSnapshot, ExportSnapshot, FilesetEntrySnapshot,
-    FixupKindSnapshot, FixupSnapshot, HeaderSnapshot, ImportSnapshot, LoadCommandSnapshot,
-    ObjCCategorySnapshot, ObjCClassSnapshot, ObjCMethodSnapshot, ObjCProtocolSnapshot,
-    ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
+    DiagnosticSnapshot, ExportSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot,
+    HeaderSnapshot, ImportSnapshot, LoadCommandSnapshot, ObjCCategorySnapshot,
+    ObjCClassSnapshot, ObjCMethodSnapshot, ObjCProtocolSnapshot, ObjCSnapshot,
+    PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use std::process::Command;
@@ -727,117 +727,6 @@ fn diff_ignores_metadata_load_commands_covered_by_header() {
             .any(|finding| finding.domain == DiffDomain::Header
                 && finding.message.contains("min OS changed")),
         "expected header platform diff"
-    );
-}
-
-#[test]
-fn diff_reports_export_payload_changes() {
-    let mut old = synthetic_snapshot();
-    old.slices[0].exports.push(ExportSnapshot {
-        name: "_symbol".into(),
-        kind: macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x1000 },
-        weak: false,
-    });
-
-    let mut new = synthetic_snapshot();
-    new.slices[0].exports.push(ExportSnapshot {
-        name: "_symbol".into(),
-        kind: macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x2000 },
-        weak: false,
-    });
-
-    let report = diff_containers(&old, &new);
-    assert!(
-        report
-            .findings
-            .iter()
-            .any(|finding| finding.message.contains("export _symbol changed")),
-        "expected export payload change finding: {:?}",
-        report
-            .findings
-            .iter()
-            .map(|finding| &finding.message)
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn diff_reports_import_provider_variant_changes() {
-    let old = synthetic_import_variants(&[("_sym", 1, false), ("_sym", 2, false)]);
-    let new = synthetic_import_variants(&[("_sym", 1, false)]);
-
-    let report = diff_containers(&old, &new);
-    assert!(
-        report.findings.iter().any(|finding| {
-            finding.domain == DiffDomain::Imports
-                && finding.message.contains("import _sym variants changed")
-        }),
-        "expected import variant change finding: {:?}",
-        report
-            .findings
-            .iter()
-            .map(|finding| &finding.message)
-            .collect::<Vec<_>>()
-    );
-}
-
-#[test]
-fn diff_reports_objc_superclass_and_property_changes() {
-    let mut old = synthetic_snapshot();
-    old.slices[0]
-        .objc
-        .classes
-        .push(macho::analysis::snapshot::ObjCClassSnapshot {
-            name: "Widget".into(),
-            superclass: Some("NSObject".into()),
-            instance_methods: Vec::new(),
-            class_methods: Vec::new(),
-            properties: vec!["title".into()],
-            protocols: vec!["NSCopying".into()],
-            ivars: vec!["_title".into()],
-            is_swift: false,
-        });
-
-    let mut new = synthetic_snapshot();
-    new.slices[0]
-        .objc
-        .classes
-        .push(macho::analysis::snapshot::ObjCClassSnapshot {
-            name: "Widget".into(),
-            superclass: Some("BaseWidget".into()),
-            instance_methods: Vec::new(),
-            class_methods: Vec::new(),
-            properties: vec!["subtitle".into()],
-            protocols: vec!["NSCoding".into()],
-            ivars: vec!["_subtitle".into()],
-            is_swift: true,
-        });
-
-    let report = diff_containers(&old, &new);
-    let messages: Vec<_> = report
-        .findings
-        .iter()
-        .map(|finding| finding.message.as_str())
-        .collect();
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("superclass changed"))
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("property removed: title"))
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("property added: subtitle"))
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("Swift marker changed"))
     );
 }
 

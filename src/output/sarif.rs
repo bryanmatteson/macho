@@ -37,6 +37,10 @@ pub(crate) struct SarifRuleDescriptor {
     id: String,
     #[serde(rename = "shortDescription")]
     short_description: SarifMessage,
+    #[serde(rename = "fullDescription", skip_serializing_if = "Option::is_none")]
+    full_description: Option<SarifMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    help: Option<SarifMessage>,
 }
 
 #[derive(Serialize)]
@@ -85,6 +89,12 @@ pub fn render(path: &Path, reports: &[AuditReport]) -> Result<String> {
                     short_description: SarifMessage {
                         text: finding.title.clone(),
                     },
+                    full_description: Some(SarifMessage {
+                        text: finding.body.clone(),
+                    }),
+                    help: finding.remediation.as_ref().map(|remediation| SarifMessage {
+                        text: remediation.clone(),
+                    }),
                 });
             }
 

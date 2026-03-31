@@ -5,8 +5,9 @@ use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::types::FixupKind;
 use crate::error::Result;
 use crate::model::mach::MachFile;
+use crate::model::relocation::Relocation;
 use crate::model::section::SectionType;
-use crate::parse::parse_symbol_table;
+use crate::parse::{parse_symbol_table, relocations_for_section};
 
 #[derive(Debug, Clone)]
 pub struct XrefIndex {
@@ -49,7 +50,10 @@ impl XrefIndex {
         // 3. Extract legacy bind references
         collect_legacy_bind_refs(mach, &mut refs);
 
-        // 4. Scan for arm64 direct branches in executable sections
+        // 4. Extract relocation-backed references (object files, kexts)
+        collect_relocation_refs(mach, &mut refs);
+
+        // 5. Scan for arm64 direct branches in executable sections
         collect_direct_branches(mach, &mut refs);
 
         // Sort by source address
@@ -172,11 +176,8 @@ fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
                 indirect_data[table_offset + 3],
             ]));
 
-            // Skip INDIRECT_SYMBOL_LOCAL and INDIRECT_SYMBOL_ABS
-            if raw_index == 0x80000000 || raw_index == 0x40000000 {
-                continue;
-            }
-            // Also skip combined flags
+            // Skip INDIRECT_SYMBOL_LOCAL (0x80000000), INDIRECT_SYMBOL_ABS
+            // (0x40000000), and any combination of these flag bits.
             if raw_index & 0xC0000000 != 0 {
                 continue;
             }
@@ -265,10 +266,61 @@ fn collect_legacy_bind_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
             source: source_va,
             target: XrefTarget::Import {
                 name: bind.symbol_name.to_string(),
-                ordinal: bind.lib_ordinal as i32,
+                ordinal: bind.lib_ordinal.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
             },
             kind: XrefKind::LegacyBind,
         });
+    }
+}
+
+fn collect_relocation_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
+    let symtab = match parse_symbol_table(mach) {
+        Ok(st) => st,
+        Err(_) => return,
+    };
+
+    for sect in mach.all_sections() {
+        if sect.nreloc == 0 {
+            continue;
+        }
+        let relocs = match relocations_for_section(mach, &sect) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        for reloc in &relocs {
+            match reloc {
+                Relocation::Standard(sr) => {
+                    let source_va = Va(sect.addr.0 + sr.address as u64);
+                    if sr.is_extern {
+                        if let Some(sym) = symtab.get(sr.symbol_num as usize) {
+                            let target = if sym.is_undefined() {
+                                XrefTarget::Import {
+                                    name: sym.name.to_string(),
+                                    ordinal: sym.library_ordinal() as i32,
+                                }
+                            } else {
+                                XrefTarget::Internal(Va(sym.value))
+                            };
+                            refs.push(Xref {
+                                source: source_va,
+                                target,
+                                kind: XrefKind::Relocation,
+                            });
+                        }
+                    } else {
+                        // Non-extern: symbol_num is a section ordinal, target
+                        // is an internal VA. We can't easily resolve the exact
+                        // target without addend decoding, so skip these.
+                    }
+                }
+                Relocation::Scattered(_) => {
+                    // Scattered relocations are 32-bit only and carry an
+                    // internal value field. Skip for now as they are rare
+                    // in modern binaries.
+                }
+            }
+        }
     }
 }
 

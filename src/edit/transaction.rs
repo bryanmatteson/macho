@@ -1,4 +1,7 @@
+use crate::analysis::snapshot::SliceSnapshot;
+use crate::diff::{DiffReport, diff_slice_snapshots};
 use crate::edit::MachEditor;
+use crate::edit::resign::ResignPlan;
 pub use crate::edit::ops::PatchOp;
 use crate::error::{Error, Result};
 use crate::model::load_command::LoadCommand;
@@ -14,7 +17,9 @@ pub struct PatchPreview {
     pub new_command_count: usize,
     pub validation_errors: Vec<String>,
     pub validation_warnings: Vec<String>,
+    pub semantic_diff: DiffReport,
     pub signature_outcome: SignatureOutcome,
+    pub resign_plan: Option<ResignPlan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -23,6 +28,12 @@ pub enum SignatureOutcome {
     Unchanged,
     Invalidated,
     Removed,
+}
+
+#[derive(Debug, Clone)]
+pub struct PreparedPatch {
+    pub preview: PatchPreview,
+    pub bytes: Vec<u8>,
 }
 
 pub struct PatchTransaction<'data> {
@@ -79,6 +90,10 @@ impl<'data> PatchTransaction<'data> {
     }
 
     pub fn preview(&self) -> Result<PatchPreview> {
+        Ok(self.prepare()?.preview)
+    }
+
+    pub fn prepare(&self) -> Result<PreparedPatch> {
         let mut editor = MachEditor::new(self.mach);
         let old_count = editor.command_count();
         let original_commands: Vec<LoadCommand> = self
@@ -95,6 +110,10 @@ impl<'data> PatchTransaction<'data> {
         apply_byte_patches(&mut candidate, &self.ops)?;
         let reparsed = crate::parse::parse(&candidate)?;
         let reparsed_mach = reparsed.first_mach();
+        let semantic_diff = diff_slice_snapshots(
+            &SliceSnapshot::from_mach(self.mach),
+            &SliceSnapshot::from_mach(reparsed_mach),
+        );
         let diags = validate::validate(reparsed_mach);
 
         let errors: Vec<String> = diags
@@ -120,13 +139,27 @@ impl<'data> PatchTransaction<'data> {
             SignatureOutcome::Unchanged
         };
 
-        Ok(PatchPreview {
-            operations: self.ops.iter().map(|op| op.to_string()).collect(),
-            old_command_count: old_count,
-            new_command_count: new_count,
-            validation_errors: errors,
-            validation_warnings: warnings,
+        let resign_plan = if matches!(
             signature_outcome,
+            SignatureOutcome::Invalidated | SignatureOutcome::Removed
+        ) {
+            Some(ResignPlan::from_mach(self.mach))
+        } else {
+            None
+        };
+
+        Ok(PreparedPatch {
+            preview: PatchPreview {
+                operations: self.ops.iter().map(|op| op.to_string()).collect(),
+                old_command_count: old_count,
+                new_command_count: new_count,
+                validation_errors: errors,
+                validation_warnings: warnings,
+                semantic_diff,
+                signature_outcome,
+                resign_plan,
+            },
+            bytes: candidate,
         })
     }
 
@@ -144,26 +177,16 @@ impl<'data> PatchTransaction<'data> {
 
     /// Build the candidate, reparse, validate, and return bytes only if valid.
     pub fn commit(&self) -> Result<Vec<u8>> {
-        let candidate = self.build_unchecked()?;
+        let prepared = self.prepare()?;
 
-        // Reparse and validate
-        let reparsed = crate::parse::parse(&candidate)?;
-        let reparsed_mach = reparsed.first_mach();
-        let diags = validate::validate(reparsed_mach);
-        let errors: Vec<String> = diags
-            .iter()
-            .filter(|d| d.severity == validate::Severity::Error)
-            .map(|d| format!("{}: {}", d.code.0, d.message))
-            .collect();
-
-        if !errors.is_empty() {
+        if !prepared.preview.validation_errors.is_empty() {
             return Err(Error::Format(format!(
                 "candidate binary failed validation:\n  {}",
-                errors.join("\n  ")
+                prepared.preview.validation_errors.join("\n  ")
             )));
         }
 
-        Ok(candidate)
+        Ok(prepared.bytes)
     }
 }
 

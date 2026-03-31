@@ -287,22 +287,103 @@ fn check_segment_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergenc
 }
 
 fn check_codesign_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence>) {
-    let signed: Vec<bool> = slices.iter().map(|s| s.codesign.is_some()).collect();
-    if signed.iter().any(|s| *s) && signed.iter().any(|s| !s) {
-        let mut per_arch = BTreeMap::new();
-        for (s, sig) in slices.iter().zip(signed.iter()) {
-            per_arch.insert(
-                s.arch.clone(),
-                if *sig {
-                    "signed".into()
-                } else {
-                    "unsigned".into()
-                },
-            );
-        }
+    push_codesign_divergence(
+        slices,
+        divs,
+        "signing status differs across arches",
+        |slice| {
+            if slice.codesign.is_some() {
+                "signed".to_string()
+            } else {
+                "unsigned".to_string()
+            }
+        },
+    );
+    push_codesign_divergence(
+        slices,
+        divs,
+        "code signature identifier differs across arches",
+        |slice| {
+            slice
+                .codesign
+                .as_ref()
+                .and_then(|cs| cs.identifier.clone())
+                .unwrap_or_else(|| "none".to_string())
+        },
+    );
+    push_codesign_divergence(
+        slices,
+        divs,
+        "code signature team ID differs across arches",
+        |slice| {
+            slice
+                .codesign
+                .as_ref()
+                .and_then(|cs| cs.team_id.clone())
+                .unwrap_or_else(|| "none".to_string())
+        },
+    );
+    push_codesign_divergence(
+        slices,
+        divs,
+        "code signature hash type differs across arches",
+        |slice| {
+            slice
+                .codesign
+                .as_ref()
+                .map(|cs| cs.hash_type.clone())
+                .unwrap_or_else(|| "none".to_string())
+        },
+    );
+    push_codesign_divergence(
+        slices,
+        divs,
+        "entitlement keys differ across arches",
+        |slice| {
+            slice
+                .codesign
+                .as_ref()
+                .map(|cs| {
+                    if cs.entitlement_keys.is_empty() {
+                        "none".to_string()
+                    } else {
+                        cs.entitlement_keys.join(", ")
+                    }
+                })
+                .unwrap_or_else(|| "none".to_string())
+        },
+    );
+    push_codesign_divergence(
+        slices,
+        divs,
+        "DER entitlements fingerprint differs across arches",
+        |slice| {
+            slice
+                .codesign
+                .as_ref()
+                .and_then(|cs| cs.entitlements_der_fingerprint.clone())
+                .unwrap_or_else(|| "none".to_string())
+        },
+    );
+}
+
+fn push_codesign_divergence<F>(
+    slices: &[SliceSnapshot],
+    divs: &mut Vec<ParityDivergence>,
+    description: &str,
+    mut value_for: F,
+) where
+    F: FnMut(&SliceSnapshot) -> String,
+{
+    let per_arch: BTreeMap<String, String> = slices
+        .iter()
+        .map(|slice| (slice.arch.clone(), value_for(slice)))
+        .collect();
+    let unique: BTreeSet<&str> = per_arch.values().map(String::as_str).collect();
+    if unique.len() > 1 {
         divs.push(ParityDivergence {
             domain: ParityDomain::Codesign,
-            description: "signing status differs across arches".into(),
+            description: description.into(),
             per_arch,
         });
     }

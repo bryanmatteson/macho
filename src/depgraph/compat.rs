@@ -1,24 +1,27 @@
+use serde::Serialize;
+
+use crate::constants::MachHeaderFlags;
 use crate::depgraph::graph::DepGraph;
 use crate::error::Result;
 use crate::model::header::FileType;
-use crate::model::load_command::LoadCommand;
+use crate::model::load_command::{LoadCommand, Platform};
 use crate::model::mach::MachFile;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CompatReport {
     pub target_path: String,
     pub provider_path: Option<String>,
     pub findings: Vec<CompatFinding>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct CompatFinding {
     pub category: CompatCategory,
     pub severity: CompatSeverity,
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CompatCategory {
     Architecture,
     Platform,
@@ -27,6 +30,8 @@ pub enum CompatCategory {
     DylibVersion,
     ImportCoverage,
     WeakImport,
+    Rpath,
+    NamespaceMode,
 }
 
 impl std::fmt::Display for CompatCategory {
@@ -39,11 +44,13 @@ impl std::fmt::Display for CompatCategory {
             Self::DylibVersion => write!(f, "dylib-version"),
             Self::ImportCoverage => write!(f, "import-coverage"),
             Self::WeakImport => write!(f, "weak-import"),
+            Self::Rpath => write!(f, "rpath"),
+            Self::NamespaceMode => write!(f, "namespace-mode"),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum CompatSeverity {
     Incompatible,
     Warning,
@@ -94,6 +101,12 @@ impl CompatReport {
             }
         }
 
+        // Namespace mode check (target only, no provider needed)
+        check_namespace_mode(target, &mut findings);
+
+        // Rpath check (target only)
+        check_rpaths(target, &mut findings);
+
         if let Some(prov) = provider {
             check_arch(target, prov, &mut findings);
             check_platform(target, prov, &mut findings);
@@ -142,23 +155,23 @@ fn check_arch(target: &MachFile<'_>, provider: &MachFile<'_>, findings: &mut Vec
 fn get_platform(
     mach: &MachFile<'_>,
 ) -> Option<(
-    crate::model::load_command::Platform,
+    Platform,
     crate::model::load_command::PackedVersion,
 )> {
     for lc in mach.load_commands() {
         match &lc.kind {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),
             LoadCommand::VersionMinMacOS(d) => {
-                return Some((crate::model::load_command::Platform(1), d.version));
+                return Some((Platform::MACOS, d.version));
             }
             LoadCommand::VersionMinIOS(d) => {
-                return Some((crate::model::load_command::Platform(2), d.version));
+                return Some((Platform::IOS, d.version));
             }
             LoadCommand::VersionMinTvOS(d) => {
-                return Some((crate::model::load_command::Platform(3), d.version));
+                return Some((Platform::TVOS, d.version));
             }
             LoadCommand::VersionMinWatchOS(d) => {
-                return Some((crate::model::load_command::Platform(4), d.version));
+                return Some((Platform::WATCHOS, d.version));
             }
             _ => {}
         }

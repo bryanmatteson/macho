@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
-use macho::edit::resign::ResignPlan;
-use macho::edit::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
+use macho::edit::transaction::{
+    PatchOp, PatchTransaction, PreparedPatch, SignatureOutcome,
+};
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::owned::OwnedFatBinary;
@@ -371,28 +372,13 @@ fn temp_path_for(path: &Path) -> PathBuf {
     parent.join(format!(".{stem}.{pid}.{nanos}.tmp"))
 }
 
-struct PreparedPatch {
-    preview: macho::edit::transaction::PatchPreview,
-    resign_plan: ResignPlan,
-    bytes: Vec<u8>,
-}
-
 fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> {
-    let resign_plan = ResignPlan::from_mach(mach);
-
     let mut txn = PatchTransaction::new(mach);
     for op in ops {
         txn.add_op(op.clone());
     }
 
-    let preview = txn.preview()?;
-    let bytes = txn.build_unchecked()?;
-
-    Ok(PreparedPatch {
-        preview,
-        resign_plan,
-        bytes,
-    })
+    txn.prepare().map_err(Into::into)
 }
 
 fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
@@ -415,6 +401,15 @@ fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
             "Load commands: {} -> {}",
             prepared.preview.old_command_count, prepared.preview.new_command_count
         );
+        if !prepared.preview.semantic_diff.findings.is_empty() {
+            println!("Semantic changes:");
+            for finding in &prepared.preview.semantic_diff.findings {
+                println!(
+                    "  [{}:{}] {}",
+                    finding.severity, finding.domain, finding.message
+                );
+            }
+        }
         if !prepared.preview.validation_errors.is_empty() {
             println!("Validation errors:");
             for e in &prepared.preview.validation_errors {
@@ -431,11 +426,15 @@ fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
             SignatureOutcome::Unchanged => {}
             SignatureOutcome::Invalidated => {
                 println!("\nWarning: code signature will be invalidated.");
-                print!("{}", prepared.resign_plan);
+                if let Some(plan) = &prepared.preview.resign_plan {
+                    print!("{plan}");
+                }
             }
             SignatureOutcome::Removed => {
                 println!("\nCode signature will be removed; output will be unsigned.");
-                print!("{}", prepared.resign_plan);
+                if let Some(plan) = &prepared.preview.resign_plan {
+                    print!("{plan}");
+                }
             }
         }
     }
