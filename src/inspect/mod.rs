@@ -5,7 +5,9 @@ use std::sync::OnceLock;
 use serde::Serialize;
 
 use crate::addr::map::AddressMap;
+use crate::analysis::snapshot::ImportSnapshot;
 use crate::codesign::{CodeSignature, parse_code_signature};
+use crate::dyld::bind::parse_bind_entries;
 use crate::dyld::chained::{ChainedFixups, parse_chained_fixups};
 use crate::dyld::exports::parse_exports;
 use crate::dyld::types::Export;
@@ -17,17 +19,22 @@ use crate::objc::graph::ObjCGraph;
 use crate::objc::{ObjCMetadata, parse_objc_metadata};
 use crate::parse::parse_symbol_table;
 use crate::swift::SwiftTypeIndex;
+use crate::xref::ranges::SymbolRangeIndex;
+use crate::xref::refs::XrefIndex;
 
 pub struct ImageInspector<'data> {
     mach: &'data MachFile<'data>,
     info: ImageInfo,
     symbols: OnceLock<Result<SymbolTable<'data>>>,
     exports: OnceLock<Result<Vec<Export>>>,
+    imports: OnceLock<Result<Vec<ImportSnapshot>>>,
     fixups: OnceLock<Result<ChainedFixups<'data>>>,
     objc: OnceLock<Result<ObjCMetadata>>,
     codesign: OnceLock<Result<CodeSignature<'data>>>,
     objc_graph: OnceLock<Result<ObjCGraph>>,
     swift_types: OnceLock<Result<SwiftTypeIndex>>,
+    range_index: OnceLock<Result<SymbolRangeIndex>>,
+    xref_index: OnceLock<Result<XrefIndex>>,
 }
 
 impl<'data> ImageInspector<'data> {
@@ -38,11 +45,14 @@ impl<'data> ImageInspector<'data> {
             info,
             symbols: OnceLock::new(),
             exports: OnceLock::new(),
+            imports: OnceLock::new(),
             fixups: OnceLock::new(),
             objc: OnceLock::new(),
             codesign: OnceLock::new(),
             objc_graph: OnceLock::new(),
             swift_types: OnceLock::new(),
+            range_index: OnceLock::new(),
+            xref_index: OnceLock::new(),
         }
     }
 
@@ -68,6 +78,13 @@ impl<'data> ImageInspector<'data> {
     pub fn exports(&self) -> Result<&Vec<Export>> {
         self.exports
             .get_or_init(|| parse_exports(self.mach))
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn imports(&self) -> Result<&Vec<ImportSnapshot>> {
+        self.imports
+            .get_or_init(|| extract_imports_cached(self.mach))
             .as_ref()
             .map_err(|e| e.clone())
     }

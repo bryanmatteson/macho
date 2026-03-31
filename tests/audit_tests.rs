@@ -1,6 +1,6 @@
 use macho::analysis::snapshot::{
     CodesignSnapshot, ContainerFormat, ContainerSnapshot, FixupSnapshot, HeaderSnapshot,
-    ObjCSnapshot, SegmentSnapshot, SliceSnapshot,
+    LoadCommandSnapshot, ObjCSnapshot, SegmentSnapshot, SliceSnapshot,
 };
 use macho::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use std::path::PathBuf;
@@ -128,6 +128,60 @@ fn malformed_codesign_snapshot() -> ContainerSnapshot {
     let data = malformed_codesign_binary();
     let container = macho::parse(&data).expect("parse malformed codesign binary");
     ContainerSnapshot::from_container(&container)
+}
+
+fn dylib_path_snapshot(command: &str, path: &str) -> SliceSnapshot {
+    SliceSnapshot {
+        arch: "arm64".into(),
+        header: HeaderSnapshot {
+            cpu_type: "arm64".into(),
+            cpu_subtype: "all".into(),
+            file_type: "MH_EXECUTE".into(),
+            flags: vec!["PIE".into()],
+            ncmds: 1,
+            uuid: None,
+            platform: None,
+        },
+        load_commands: vec![LoadCommandSnapshot {
+            name: command.into(),
+            summary: path.into(),
+            fileset_entry: None,
+        }],
+        segments: vec![
+            SegmentSnapshot {
+                name: "__PAGEZERO".into(),
+                vm_addr: 0,
+                vm_size: 0x1000,
+                file_offset: 0,
+                file_size: 0,
+                max_prot: "---".into(),
+                init_prot: "---".into(),
+                sections: Vec::new(),
+            },
+            SegmentSnapshot {
+                name: "__TEXT".into(),
+                vm_addr: 0x1000_0000,
+                vm_size: 0x1000,
+                file_offset: 0,
+                file_size: 0x1000,
+                max_prot: "r-x".into(),
+                init_prot: "r-x".into(),
+                sections: Vec::new(),
+            },
+        ],
+        symbols: Vec::new(),
+        exports: Vec::new(),
+        imports: Vec::new(),
+        fixups: Vec::<FixupSnapshot>::new(),
+        objc: ObjCSnapshot {
+            classes: Vec::new(),
+            categories: Vec::new(),
+            protocols: Vec::new(),
+        },
+        codesign: None,
+        analysis_issues: Vec::new(),
+        diagnostics: Vec::new(),
+    }
 }
 
 fn write_malformed_codesign_fixture() -> PathBuf {
@@ -460,6 +514,9 @@ fn audit_sarif_cli_encodes_file_uri() {
         ["artifactLocation"]["uri"]
         .as_str()
         .expect("uri string");
+    let message = sarif["runs"][0]["results"][0]["message"]["text"]
+        .as_str()
+        .expect("message text");
 
     assert!(
         uri.starts_with("file:///"),
@@ -472,6 +529,10 @@ fn audit_sarif_cli_encodes_file_uri() {
     assert!(
         uri.contains("%20"),
         "expected spaces to be percent-encoded in SARIF URI, got {uri}"
+    );
+    assert!(
+        message.contains("Evidence:"),
+        "expected SARIF message to preserve finding evidence, got {message}"
     );
 }
 
@@ -558,5 +619,23 @@ fn audit_snapshot_reports_cross_arch_security_drift() {
             .any(|evidence| evidence.contains("code signature differs")),
         "expected code-signature drift evidence: {:?}",
         container_report.findings[0].evidence
+    );
+}
+
+#[test]
+fn audit_flags_absolute_reexport_dylib_paths() {
+    let report = audit_slice(&dylib_path_snapshot(
+        "LC_REEXPORT_DYLIB",
+        "/opt/acme/libWidget.dylib",
+    ));
+
+    assert!(
+        report.findings.iter().any(|finding| finding.rule_id == "LP003"),
+        "expected LP003 for reexport dylib path, got: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|finding| (&finding.rule_id, &finding.title))
+            .collect::<Vec<_>>()
     );
 }

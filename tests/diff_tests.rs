@@ -1,7 +1,9 @@
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
-    DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
-    LoadCommandSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
+    DiagnosticSnapshot, ExportKindSnapshot, ExportSnapshot, FilesetEntrySnapshot,
+    FixupKindSnapshot, FixupSnapshot, HeaderSnapshot, ImportSnapshot, LoadCommandSnapshot,
+    ObjCCategorySnapshot, ObjCClassSnapshot, ObjCMethodSnapshot, ObjCProtocolSnapshot,
+    ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use std::process::Command;
@@ -72,6 +74,19 @@ fn synthetic_load_command_snapshot(name: &str, summary: &str) -> ContainerSnapsh
     snap
 }
 
+fn synthetic_import_variants(imports: &[(&str, i32, bool)]) -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].imports = imports
+        .iter()
+        .map(|(name, lib_ordinal, weak)| ImportSnapshot {
+            name: (*name).into(),
+            lib_ordinal: *lib_ordinal,
+            weak: *weak,
+        })
+        .collect();
+    snap
+}
+
 fn synthetic_signed_snapshot() -> ContainerSnapshot {
     let mut snap = synthetic_snapshot();
     snap.slices[0].codesign = Some(CodesignSnapshot {
@@ -90,6 +105,41 @@ fn synthetic_signed_snapshot() -> ContainerSnapshot {
         summary: "off=0x100 size=0x40".into(),
         fileset_entry: None,
     });
+    snap
+}
+
+fn synthetic_objc_snapshot() -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].objc = ObjCSnapshot {
+        classes: vec![ObjCClassSnapshot {
+            name: "Widget".into(),
+            superclass: Some("NSObject".into()),
+            instance_methods: vec![ObjCMethodSnapshot {
+                name: "render".into(),
+                type_encoding: "v16@0:8".into(),
+            }],
+            class_methods: Vec::new(),
+            properties: vec!["title".into()],
+            protocols: vec!["WidgetProtocol".into()],
+            ivars: vec!["_title".into()],
+            is_swift: false,
+        }],
+        categories: vec![ObjCCategorySnapshot {
+            name: "Debug".into(),
+            class_name: "Widget".into(),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            protocols: vec!["Debuggable".into()],
+        }],
+        protocols: vec![ObjCProtocolSnapshot {
+            name: "WidgetProtocol".into(),
+            instance_methods: vec!["render".into()],
+            class_methods: Vec::new(),
+            optional_instance_methods: Vec::new(),
+            optional_class_methods: Vec::new(),
+            adopted_protocols: vec!["NSObject".into()],
+        }],
+    };
     snap
 }
 
@@ -487,14 +537,138 @@ fn diff_reports_import_metadata_changes() {
     assert!(
         import_findings
             .iter()
-            .any(|finding| finding.message.contains("library ordinal changed")),
-        "missing ordinal-change finding: {import_findings:?}"
+            .any(|finding| finding.message.contains("variants changed")),
+        "missing import-variant finding: {import_findings:?}"
+    );
+}
+
+#[test]
+fn diff_ignores_layout_only_linkedit_load_command_churn() {
+    let old = synthetic_load_command_snapshot("LC_FUNCTION_STARTS", "off=0x100 size=0x20");
+    let new = synthetic_load_command_snapshot("LC_FUNCTION_STARTS", "off=0x140 size=0x20");
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.domain != DiffDomain::LoadCommands),
+        "layout-only LINKEDIT offsets should not produce semantic load-command diffs: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn diff_reports_export_payload_changes() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].exports.push(ExportSnapshot {
+        name: "_widget".into(),
+        kind: ExportKindSnapshot::Regular { address: 0x1000 },
+        weak: false,
+    });
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].exports.push(ExportSnapshot {
+        name: "_widget".into(),
+        kind: ExportKindSnapshot::Regular { address: 0x2000 },
+        weak: false,
+    });
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.domain == DiffDomain::Exports
+                && finding.message.contains("export _widget changed")
+                && finding.message.contains("0x1000")
+                && finding.message.contains("0x2000")
+        }),
+        "missing export payload diff: {:?}",
+        report.findings
+    );
+}
+
+#[test]
+fn diff_reports_import_variant_changes_for_duplicate_names() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].imports.extend([
+        ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 1,
+            weak: false,
+        },
+        ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 2,
+            weak: false,
+        },
+    ]);
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].imports.extend([
+        ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 1,
+            weak: false,
+        },
+        ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 3,
+            weak: true,
+        },
+    ]);
+
+    let report = diff_containers(&old, &new);
+    let findings: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::Imports)
+        .collect();
+
+    assert_eq!(findings.len(), 1, "unexpected import findings: {findings:?}");
+    assert!(findings[0].message.contains("variants changed"));
+    assert!(findings[0].message.contains("ordinal=2 weak=false"));
+    assert!(findings[0].message.contains("ordinal=3 weak=true"));
+}
+
+#[test]
+fn diff_reports_objc_surface_changes_beyond_methods() {
+    let old = synthetic_objc_snapshot();
+    let mut new = synthetic_objc_snapshot();
+    let class = &mut new.slices[0].objc.classes[0];
+    class.superclass = Some("UIResponder".into());
+    class.is_swift = true;
+    class.properties.push("subtitle".into());
+    class.ivars.push("_subtitle".into());
+    class.protocols.push("Serializable".into());
+    new.slices[0].objc.categories[0]
+        .protocols
+        .push("Inspectable".into());
+    new.slices[0].objc.protocols[0]
+        .adopted_protocols
+        .push("NSCopying".into());
+
+    let report = diff_containers(&old, &new);
+    let objc_messages: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::ObjC)
+        .map(|finding| finding.message.as_str())
+        .collect();
+
+    assert!(objc_messages.iter().any(|message| message.contains("superclass changed")));
+    assert!(objc_messages.iter().any(|message| message.contains("Swift marker changed")));
+    assert!(objc_messages.iter().any(|message| message.contains("property added: subtitle")));
+    assert!(objc_messages.iter().any(|message| message.contains("ivar added: _subtitle")));
+    assert!(objc_messages.iter().any(|message| message.contains("protocol added: Serializable")));
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("category Debug on Widget protocol added: Inspectable"))
     );
     assert!(
-        import_findings
+        objc_messages
             .iter()
-            .any(|finding| finding.message.contains("weakness changed")),
-        "missing weak-import finding: {import_findings:?}"
+            .any(|message| message.contains("adopted protocol added: NSCopying"))
     );
 }
 
@@ -557,6 +731,91 @@ fn diff_ignores_metadata_load_commands_covered_by_header() {
                 && finding.message.contains("min OS changed")),
         "expected header platform diff"
     );
+}
+
+#[test]
+fn diff_reports_export_payload_changes() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].exports.push(ExportSnapshot {
+        name: "_symbol".into(),
+        kind: macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x1000 },
+        weak: false,
+    });
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].exports.push(ExportSnapshot {
+        name: "_symbol".into(),
+        kind: macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x2000 },
+        weak: false,
+    });
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("export _symbol changed")),
+        "expected export payload change finding: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|finding| &finding.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn diff_reports_import_provider_variant_changes() {
+    let old = synthetic_import_variants(&[("_sym", 1, false), ("_sym", 2, false)]);
+    let new = synthetic_import_variants(&[("_sym", 1, false)]);
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report.findings.iter().any(|finding| {
+            finding.domain == DiffDomain::Imports
+                && finding.message.contains("import _sym variants changed")
+        }),
+        "expected import variant change finding: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|finding| &finding.message)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn diff_reports_objc_superclass_and_property_changes() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].objc.classes.push(macho::analysis::snapshot::ObjCClassSnapshot {
+        name: "Widget".into(),
+        superclass: Some("NSObject".into()),
+        instance_methods: Vec::new(),
+        class_methods: Vec::new(),
+        properties: vec!["title".into()],
+        protocols: vec!["NSCopying".into()],
+        ivars: vec!["_title".into()],
+        is_swift: false,
+    });
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].objc.classes.push(macho::analysis::snapshot::ObjCClassSnapshot {
+        name: "Widget".into(),
+        superclass: Some("BaseWidget".into()),
+        instance_methods: Vec::new(),
+        class_methods: Vec::new(),
+        properties: vec!["subtitle".into()],
+        protocols: vec!["NSCoding".into()],
+        ivars: vec!["_subtitle".into()],
+        is_swift: true,
+    });
+
+    let report = diff_containers(&old, &new);
+    let messages: Vec<_> = report.findings.iter().map(|finding| finding.message.as_str()).collect();
+    assert!(messages.iter().any(|message| message.contains("superclass changed")));
+    assert!(messages.iter().any(|message| message.contains("property removed: title")));
+    assert!(messages.iter().any(|message| message.contains("property added: subtitle")));
+    assert!(messages.iter().any(|message| message.contains("Swift marker changed")));
 }
 
 #[test]

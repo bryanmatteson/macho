@@ -1,4 +1,4 @@
-use macho::edit::transaction::{PatchOp, PatchTransaction};
+use macho::edit::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
 use macho::model::container::MachContainer;
 use macho::model::load_command::LoadCommand;
 use macho::model::mach::MachFile;
@@ -77,7 +77,7 @@ fn transaction_signature_invalidation_detected() {
 
         // System binaries are signed, so modifying them should flag invalidation
         assert!(
-            preview.signature_invalidated,
+            preview.signature_outcome == SignatureOutcome::Invalidated,
             "adding rpath to signed binary should invalidate signature"
         );
     });
@@ -119,9 +119,20 @@ fn transaction_noop_edit_does_not_invalidate_signature() {
         let preview = txn.preview().expect("preview");
 
         assert!(
-            !preview.signature_invalidated,
+            preview.signature_outcome == SignatureOutcome::Unchanged,
             "no-op edits should not be treated as signature invalidation"
         );
+    });
+}
+
+#[test]
+fn transaction_remove_code_signature_reports_removed_outcome() {
+    with_thin_mach(|mach| {
+        let mut txn = PatchTransaction::new(mach);
+        txn.remove_code_signature();
+        let preview = txn.preview().expect("preview");
+
+        assert_eq!(preview.signature_outcome, SignatureOutcome::Removed);
     });
 }
 

@@ -91,11 +91,13 @@ pub fn inspect_fileset_entry(
     entry_id: &str,
 ) -> Vec<FilesetEntryInspection> {
     match container {
-        MachContainer::Thin(mach) => inspect_fileset_entry_in_mach(mach, entry_id),
+        MachContainer::Thin(mach) => {
+            inspect_fileset_entry_in_mach(mach, &mach.header().cpu_type.name().to_string(), entry_id)
+        }
         MachContainer::Fat(fat) => fat
             .arches()
             .iter()
-            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, entry_id))
+            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, &arch.spec.name(), entry_id))
             .collect(),
     }
 }
@@ -131,9 +133,9 @@ fn extract_fileset(snap: &ContainerSnapshot) -> Option<FilesetReport> {
 
 pub(crate) fn inspect_fileset_entry_in_mach(
     mach: &crate::model::mach::MachFile<'_>,
+    arch: &str,
     entry_id: &str,
 ) -> Vec<FilesetEntryInspection> {
-    let arch = mach.header().cpu_type.name().to_string();
     let mut inspections = Vec::new();
 
     for data in mach.load_commands().iter().filter_map(|lc| match &lc.kind {
@@ -142,7 +144,7 @@ pub(crate) fn inspect_fileset_entry_in_mach(
     }) {
         let (member, parse_error) = inspect_fileset_member(mach, data.file_offset);
         inspections.push(FilesetEntryInspection {
-            arch: arch.clone(),
+            arch: arch.to_string(),
             entry_id: data.entry_id.clone(),
             vm_addr: data.vm_addr,
             file_offset: data.file_offset,

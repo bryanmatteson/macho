@@ -137,6 +137,7 @@ fn container_json_reports_fileset_entry_offsets() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["format"], "Fileset");
     let entry = &json["fileset"]["entries"][0];
 
     assert_eq!(entry["arch"], "arm64");
@@ -175,6 +176,63 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
         stdout.contains("No fileset entries matched architecture 'x86_64'."),
         "unexpected stdout: {stdout}"
     );
+}
+
+#[test]
+fn container_json_accepts_selected_parity_domains() {
+    let output = Command::new(macho_bin())
+        .args([
+            "container",
+            "--json",
+            "--parity-domain",
+            "imports",
+            "/usr/bin/plutil",
+        ])
+        .output()
+        .expect("failed to run macho container");
+
+    assert!(
+        output.status.success(),
+        "container command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json["parity"]["domains"], serde_json::json!(["imports"]));
+    if let Some(divergences) = json["parity"]["divergences"].as_array() {
+        for divergence in divergences {
+            assert_eq!(divergence["domain"], "imports");
+        }
+    }
+}
+
+#[test]
+fn fileset_inspect_reports_single_not_found_message() {
+    let path = temp_file_path("fileset-inspect-miss");
+    let bytes = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
+    std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
+
+    let output = Command::new(macho_bin())
+        .args([
+            "fileset",
+            "inspect",
+            path.to_str().expect("utf8 path"),
+            "missing.entry",
+        ])
+        .output()
+        .expect("failed to run macho fileset inspect");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        output.status.success(),
+        "fileset command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(stdout.matches("Fileset entry 'missing.entry' not found").count(), 1);
 }
 
 #[test]

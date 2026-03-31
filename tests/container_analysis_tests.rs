@@ -4,7 +4,7 @@ use macho::analysis::snapshot::{
     ImportSnapshot, ObjCSnapshot, SliceSnapshot,
 };
 use macho::container_analysis::ContainerReport;
-use macho::container_analysis::parity::compute_parity;
+use macho::container_analysis::parity::{ParityDomain, compute_parity, compute_parity_with_domains};
 use macho::container_analysis::resolve::{
     all_signed, common_exports, common_imports, diff_slices, divergent_exports, resolve_cross_image,
 };
@@ -156,7 +156,7 @@ fn container_report_from_snapshot() {
     let snap = snapshot_for("/usr/bin/true");
     let report = ContainerReport::from_snapshot(&snap);
 
-    assert_eq!(report.format, "Fat");
+    assert_eq!(report.format, ContainerFormat::Fat);
     assert!(report.arches.len() >= 2);
     assert!(report.parity.is_some());
 }
@@ -169,7 +169,7 @@ fn container_report_thin_has_no_parity() {
     snap.format = macho::analysis::snapshot::ContainerFormat::Thin;
 
     let report = ContainerReport::from_snapshot(&snap);
-    assert_eq!(report.format, "Thin");
+    assert_eq!(report.format, ContainerFormat::Thin);
     assert!(
         report.parity.is_none(),
         "thin binary should not have parity report"
@@ -232,8 +232,10 @@ fn container_helpers_cover_fileset_and_snapshot_surface() {
 
     let snapshot = container.snapshot();
     assert_eq!(snapshot.available_arches(), vec!["arm64"]);
+    assert_eq!(snapshot.format, ContainerFormat::Fileset);
 
     let report = container.container_report();
+    assert_eq!(report.format, ContainerFormat::Fileset);
     let fileset = report.fileset.as_ref().expect("expected fileset report");
     assert_eq!(fileset.entries.len(), 1);
     assert_eq!(fileset.entries[0].entry_id, "com.example.member");
@@ -257,6 +259,17 @@ fn helper_queries_surface_common_and_divergent_names() {
         .collect();
     assert!(symbols.contains(&"only_arm64"));
     assert!(symbols.contains(&"only_x86_64"));
+}
+
+#[test]
+fn parity_domains_can_be_selected() {
+    let mut snap = synthetic_cross_slice_snapshot();
+    snap.slices[1].codesign = None;
+
+    let parity = compute_parity_with_domains(&snap.slices, &[ParityDomain::Codesign]);
+    assert_eq!(parity.domains, vec![ParityDomain::Codesign]);
+    assert_eq!(parity.divergences.len(), 1);
+    assert_eq!(parity.divergences[0].domain, ParityDomain::Codesign);
 }
 
 #[test]
@@ -358,5 +371,25 @@ fn container_methods_match_snapshot_helpers() {
         assert_eq!(fat.common_exports(), container.common_exports());
         assert_eq!(fat.common_imports(), container.common_imports());
         assert_eq!(fat.all_signed(), container.all_signed());
+        assert_eq!(
+            serde_json::to_value(fat.check_parity(&[ParityDomain::Imports]))
+                .expect("serialize parity"),
+            serde_json::to_value(container.check_parity(&[ParityDomain::Imports]))
+                .expect("serialize parity")
+        );
     }
+}
+
+#[test]
+fn fileset_inspection_uses_shared_container_surface() {
+    let data = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
+    let container = macho::parse(&data).expect("parse");
+
+    let inspections = container.inspect_fileset_entry("com.example.member");
+    assert_eq!(inspections.len(), 1);
+    assert_eq!(inspections[0].arch, "arm64");
+    assert_eq!(inspections[0].entry_id, "com.example.member");
+    assert_eq!(inspections[0].file_offset, 0x2000);
+    assert!(inspections[0].member.is_none());
+    assert!(inspections[0].parse_error.is_some());
 }

@@ -124,7 +124,7 @@ impl<'data> FatBinary<'data> {
     pub fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
         self.arches
             .iter()
-            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, entry_id))
+            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, &arch.spec.name(), entry_id))
             .collect()
     }
 

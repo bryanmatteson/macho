@@ -200,6 +200,7 @@ fn available_arches_returns_all_arch_names() {
 fn container_format_display() {
     assert_eq!(ContainerFormat::Thin.to_string(), "Thin");
     assert_eq!(ContainerFormat::Fat.to_string(), "Fat");
+    assert_eq!(ContainerFormat::Fileset.to_string(), "Fileset");
 }
 
 #[test]
@@ -232,6 +233,7 @@ fn snapshot_contains_fileset_entry_details() {
     let data = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
     let container = macho::parse(&data).expect("parse");
     let snap = ContainerSnapshot::from_container(&container);
+    assert_eq!(snap.format, ContainerFormat::Fileset);
     let slice = &snap.slices[0];
 
     let lc = slice
