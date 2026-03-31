@@ -1,7 +1,11 @@
 use anyhow::{Context, Result};
+use macho::addr::types::Va;
 use macho::data_surface::strings::StringRegions;
 use macho::data_surface::vtable::VtableIndex;
+use macho::demangle::demangle_symbol;
 use macho::model::mach::MachFile;
+use macho::xref::ranges::{CodeEntity, SymbolRangeIndex};
+use macho::xref::refs::{XrefIndex, XrefKind, XrefTarget};
 use std::path::PathBuf;
 
 use crate::commands::common::for_each_selected_mach;
@@ -253,4 +257,307 @@ fn print_vtables_text(mach: &MachFile<'_>, args: &VtablesArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ── Ranges command ──────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+pub struct RangesArgs {
+    /// Path to Mach-O binary
+    path: PathBuf,
+    /// Filter to a specific architecture
+    #[arg(long)]
+    arch: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+    /// Look up the owner of a specific virtual address (hex, e.g. 0x100003f00)
+    #[arg(long)]
+    lookup: Option<String>,
+    /// Demangle symbol names
+    #[arg(long)]
+    demangle: bool,
+}
+
+pub fn run_ranges(args: RangesArgs) -> Result<()> {
+    let file = std::fs::File::open(&args.path)
+        .with_context(|| format!("failed to open {}", args.path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
+
+    let lookup_va = args
+        .lookup
+        .as_ref()
+        .map(|s| parse_hex_va(s))
+        .transpose()?;
+
+    if args.json {
+        let mut result = serde_json::Map::new();
+        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
+            let index = SymbolRangeIndex::build(mach)?;
+            let value = if let Some(va) = lookup_va {
+                serde_json::to_value(index.lookup_va(va))?
+            } else {
+                serde_json::to_value(&index)?
+            };
+            result.insert(arch_name.to_string(), value);
+            Ok(())
+        })?;
+
+        if result.len() == 1 {
+            let (_, val) = result.into_iter().next().unwrap();
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    } else {
+        for_each_selected_mach(
+            &container,
+            args.arch.as_deref(),
+            |mach, arch_name, show_header| {
+                if show_header {
+                    println!("=== {arch_name} ===");
+                }
+                print_ranges_text(mach, &args, lookup_va)?;
+                if show_header {
+                    println!();
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn print_ranges_text(mach: &MachFile<'_>, args: &RangesArgs, lookup_va: Option<Va>) -> Result<()> {
+    let index = SymbolRangeIndex::build(mach)?;
+
+    if let Some(va) = lookup_va {
+        match index.lookup_va(va) {
+            Some(entry) => {
+                let name = format_entity(&entry.entity, args.demangle);
+                println!(
+                    "{:#018x}..{:#018x}  {:#x}  [{}]  {}",
+                    entry.start.0,
+                    entry.end.0,
+                    entry.end.0 - entry.start.0,
+                    format_source(entry.source),
+                    name,
+                );
+            }
+            None => println!("No owner found for {:#x}", va.0),
+        }
+        return Ok(());
+    }
+
+    if index.is_empty() {
+        println!("No symbol ranges found.");
+        return Ok(());
+    }
+
+    println!("Symbol ranges: {} entries", index.len());
+    for entry in index.entries() {
+        let name = format_entity(&entry.entity, args.demangle);
+        println!(
+            "  {:#018x}..{:#018x}  {:#x}  [{}]  {}",
+            entry.start.0,
+            entry.end.0,
+            entry.end.0 - entry.start.0,
+            format_source(entry.source),
+            name,
+        );
+    }
+
+    Ok(())
+}
+
+fn format_entity(entity: &CodeEntity, do_demangle: bool) -> String {
+    match entity {
+        CodeEntity::Symbol { name, external } => {
+            let display = if do_demangle {
+                demangle_symbol(name).to_string()
+            } else {
+                name.clone()
+            };
+            if *external {
+                format!("{display} [ext]")
+            } else {
+                display
+            }
+        }
+        CodeEntity::ObjCMethod {
+            class_name,
+            selector,
+            is_class_method,
+        } => {
+            let prefix = if *is_class_method { '+' } else { '-' };
+            format!("{prefix}[{class_name} {selector}]")
+        }
+        CodeEntity::Export { name } => {
+            let display = if do_demangle {
+                demangle_symbol(name).to_string()
+            } else {
+                name.clone()
+            };
+            format!("{display} [export]")
+        }
+        CodeEntity::Anonymous { section_name } => {
+            format!("<anonymous in {section_name}>")
+        }
+    }
+}
+
+fn format_source(source: macho::xref::ranges::RangeSource) -> &'static str {
+    match source {
+        macho::xref::ranges::RangeSource::Nlist => "nlist",
+        macho::xref::ranges::RangeSource::ExportTrie => "export",
+        macho::xref::ranges::RangeSource::ObjCMetadata => "objc",
+        macho::xref::ranges::RangeSource::Inferred => "inferred",
+    }
+}
+
+// ── Xrefs command ───────────────────────────────────────────────────────
+
+#[derive(clap::Args)]
+pub struct XrefsArgs {
+    /// Path to Mach-O binary
+    path: PathBuf,
+    /// Filter to a specific architecture
+    #[arg(long)]
+    arch: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+    /// Show xrefs originating from this virtual address (hex)
+    #[arg(long)]
+    from: Option<String>,
+    /// Show xrefs targeting this virtual address (hex)
+    #[arg(long)]
+    to: Option<String>,
+}
+
+pub fn run_xrefs(args: XrefsArgs) -> Result<()> {
+    let file = std::fs::File::open(&args.path)
+        .with_context(|| format!("failed to open {}", args.path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
+
+    let from_va = args.from.as_ref().map(|s| parse_hex_va(s)).transpose()?;
+    let to_va = args.to.as_ref().map(|s| parse_hex_va(s)).transpose()?;
+
+    if args.json {
+        let mut result = serde_json::Map::new();
+        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
+            let index = XrefIndex::build(mach)?;
+            let value = if let Some(va) = from_va {
+                let refs: Vec<_> = index.refs_from(va).collect();
+                serde_json::to_value(&refs)?
+            } else if let Some(va) = to_va {
+                let refs: Vec<_> = index.refs_to(va).collect();
+                serde_json::to_value(&refs)?
+            } else {
+                serde_json::to_value(&index)?
+            };
+            result.insert(arch_name.to_string(), value);
+            Ok(())
+        })?;
+
+        if result.len() == 1 {
+            let (_, val) = result.into_iter().next().unwrap();
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+    } else {
+        for_each_selected_mach(
+            &container,
+            args.arch.as_deref(),
+            |mach, arch_name, show_header| {
+                if show_header {
+                    println!("=== {arch_name} ===");
+                }
+                print_xrefs_text(mach, from_va, to_va)?;
+                if show_header {
+                    println!();
+                }
+                Ok(())
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn print_xrefs_text(mach: &MachFile<'_>, from_va: Option<Va>, to_va: Option<Va>) -> Result<()> {
+    let index = XrefIndex::build(mach)?;
+
+    if let Some(va) = from_va {
+        let refs: Vec<_> = index.refs_from(va).collect();
+        println!("Xrefs from {:#018x}: {} found", va.0, refs.len());
+        for xref in &refs {
+            println!(
+                "  -> {}  [{}]",
+                format_target(&xref.target),
+                format_kind(xref.kind),
+            );
+        }
+        return Ok(());
+    }
+
+    if let Some(va) = to_va {
+        let refs: Vec<_> = index.refs_to(va).collect();
+        println!("Xrefs to {:#018x}: {} found", va.0, refs.len());
+        for xref in &refs {
+            println!("  {:#018x}  [{}]", xref.source.0, format_kind(xref.kind));
+        }
+        return Ok(());
+    }
+
+    if index.is_empty() {
+        println!("No cross-references found.");
+        return Ok(());
+    }
+
+    println!("Cross-references: {} entries", index.len());
+    for xref in index.all_refs() {
+        println!(
+            "  {:#018x} -> {}  [{}]",
+            xref.source.0,
+            format_target(&xref.target),
+            format_kind(xref.kind),
+        );
+    }
+
+    Ok(())
+}
+
+fn format_target(target: &XrefTarget) -> String {
+    match target {
+        XrefTarget::Internal { va } => format!("{:#018x}", va.0),
+        XrefTarget::Import { name, ordinal } => format!("{name} (ordinal {ordinal})"),
+    }
+}
+
+fn format_kind(kind: XrefKind) -> &'static str {
+    match kind {
+        XrefKind::Stub => "stub",
+        XrefKind::ChainedBind => "chained-bind",
+        XrefKind::ChainedRebase => "chained-rebase",
+        XrefKind::LegacyBind => "legacy-bind",
+        XrefKind::Relocation => "relocation",
+        XrefKind::DirectBranch => "branch",
+    }
+}
+
+fn parse_hex_va(s: &str) -> Result<Va> {
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    let val =
+        u64::from_str_radix(s, 16).with_context(|| format!("invalid hex address: {s}"))?;
+    Ok(Va(val))
 }

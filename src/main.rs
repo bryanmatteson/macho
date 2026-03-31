@@ -48,6 +48,10 @@ enum Commands {
     Strings(commands::data_surface::StringsArgs),
     /// Analyze C++ vtables
     Vtables(commands::data_surface::VtablesArgs),
+    /// List symbol ownership ranges by virtual address
+    Ranges(commands::data_surface::RangesArgs),
+    /// List cross-references (stubs, fixups, branches)
+    Xrefs(commands::data_surface::XrefsArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -71,5 +75,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Deps(args) => commands::deps::run(args),
         Commands::Strings(args) => commands::data_surface::run_strings(args),
         Commands::Vtables(args) => commands::data_surface::run_vtables(args),
+        Commands::Ranges(args) => commands::data_surface::run_ranges(args),
+        Commands::Xrefs(args) => commands::data_surface::run_xrefs(args),
     }
 }
