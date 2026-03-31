@@ -80,3 +80,24 @@ pub use crate::analysis::snapshot::{ContainerSnapshot, SliceSnapshot};
 
 // Diff
 pub use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport, diff_containers};
+
+// Inspection API
+pub use crate::inspect::{DylibLinkKind, ImageInfo, ImageInspector, LinkedDylib, PlatformInfo};
+pub use crate::inspect::resolve::{resolve_all_rpaths, resolve_path};
+
+// Symbol ranges and cross-references
+pub use crate::xref::{
+    CodeEntity, RangeEntry, RangeSource, SymbolRangeIndex, Xref, XrefIndex, XrefKind, XrefTarget,
+};
+
+// Data surface analysis
+pub use crate::data_surface::strings::{
+    FoundString, StringMatch, StringRegion, StringRegionKind, StringRegions,
+};
+pub use crate::data_surface::vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};
+
+// Dependency graph and compatibility
+pub use crate::depgraph::{
+    CompatCategory, CompatFinding, CompatReport, CompatSeverity, DepGraph, GraphIssue,
+    ImportProvider, IssueSeverity, NormalizedDylib, ReexportInfo, ResolvedExport, ResolvedImport,
+};

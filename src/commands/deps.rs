@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use macho::depgraph::compat::{CompatReport, CompatSeverity};
-use macho::depgraph::graph::{DepGraph, DylibLinkKind, ImportProvider};
+use macho::depgraph::graph::{DepGraph, ImportProvider};
+use macho::inspect::DylibLinkKind;
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use std::path::PathBuf;

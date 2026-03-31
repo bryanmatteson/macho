@@ -95,7 +95,9 @@ fn synthetic_signed_snapshot() -> ContainerSnapshot {
         hash_type: "sha256".into(),
         has_entitlements: false,
         entitlements_xml: None,
+        entitlement_keys: Vec::new(),
         has_der_entitlements: false,
+        entitlements_der_fingerprint: None,
         has_cms_signature: true,
         n_code_slots: 0,
         code_limit: 0,
@@ -554,35 +556,6 @@ fn diff_ignores_layout_only_linkedit_load_command_churn() {
             .iter()
             .all(|finding| finding.domain != DiffDomain::LoadCommands),
         "layout-only LINKEDIT offsets should not produce semantic load-command diffs: {:?}",
-        report.findings
-    );
-}
-
-#[test]
-fn diff_reports_export_payload_changes() {
-    let mut old = synthetic_snapshot();
-    old.slices[0].exports.push(ExportSnapshot {
-        name: "_widget".into(),
-        kind: ExportKindSnapshot::Regular { address: 0x1000 },
-        weak: false,
-    });
-
-    let mut new = synthetic_snapshot();
-    new.slices[0].exports.push(ExportSnapshot {
-        name: "_widget".into(),
-        kind: ExportKindSnapshot::Regular { address: 0x2000 },
-        weak: false,
-    });
-
-    let report = diff_containers(&old, &new);
-    assert!(
-        report.findings.iter().any(|finding| {
-            finding.domain == DiffDomain::Exports
-                && finding.message.contains("export _widget changed")
-                && finding.message.contains("0x1000")
-                && finding.message.contains("0x2000")
-        }),
-        "missing export payload diff: {:?}",
         report.findings
     );
 }

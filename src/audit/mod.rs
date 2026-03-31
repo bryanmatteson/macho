@@ -160,6 +160,38 @@ fn audit_container(snapshot: &ContainerSnapshot) -> Option<AuditReport> {
             first.arch.as_str(),
             slice.arch.as_str(),
         );
+        collect_option_drift(
+            &mut evidence,
+            "identifier",
+            baseline.identifier.as_deref(),
+            posture.identifier.as_deref(),
+            first.arch.as_str(),
+            slice.arch.as_str(),
+        );
+        collect_option_drift(
+            &mut evidence,
+            "hash type",
+            baseline.hash_type.as_deref(),
+            posture.hash_type.as_deref(),
+            first.arch.as_str(),
+            slice.arch.as_str(),
+        );
+        collect_option_drift(
+            &mut evidence,
+            "DER entitlements fingerprint",
+            baseline.der_fingerprint.as_deref(),
+            posture.der_fingerprint.as_deref(),
+            first.arch.as_str(),
+            slice.arch.as_str(),
+        );
+        collect_set_drift(
+            &mut evidence,
+            "entitlement keys",
+            &baseline.entitlement_keys,
+            &posture.entitlement_keys,
+            first.arch.as_str(),
+            slice.arch.as_str(),
+        );
 
         if !evidence.is_empty() {
             findings.push(AuditFinding {
@@ -186,7 +218,7 @@ fn audit_container(snapshot: &ContainerSnapshot) -> Option<AuditReport> {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SecurityPosture {
     signed: bool,
     identifier: Option<String>,
@@ -240,6 +272,48 @@ fn collect_drift(
     if left != right {
         evidence.push(format!(
             "{label} differs: {left_arch}={left}, {right_arch}={right}"
+        ));
+    }
+}
+
+fn collect_option_drift(
+    evidence: &mut Vec<String>,
+    label: &str,
+    left: Option<&str>,
+    right: Option<&str>,
+    left_arch: &str,
+    right_arch: &str,
+) {
+    if left != right {
+        evidence.push(format!(
+            "{label} differs: {left_arch}={}, {right_arch}={}",
+            left.unwrap_or("none"),
+            right.unwrap_or("none")
+        ));
+    }
+}
+
+fn collect_set_drift(
+    evidence: &mut Vec<String>,
+    label: &str,
+    left: &[String],
+    right: &[String],
+    left_arch: &str,
+    right_arch: &str,
+) {
+    if left != right {
+        let left = if left.is_empty() {
+            "none".to_string()
+        } else {
+            left.join(", ")
+        };
+        let right = if right.is_empty() {
+            "none".to_string()
+        } else {
+            right.join(", ")
+        };
+        evidence.push(format!(
+            "{label} differs: {left_arch}=[{left}], {right_arch}=[{right}]"
         ));
     }
 }

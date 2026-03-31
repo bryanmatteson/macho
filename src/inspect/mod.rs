@@ -191,6 +191,18 @@ pub enum DylibLinkKind {
     Upward,
 }
 
+impl std::fmt::Display for DylibLinkKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Required => write!(f, "required"),
+            Self::Weak => write!(f, "weak"),
+            Self::Reexport => write!(f, "reexport"),
+            Self::Lazy => write!(f, "lazy"),
+            Self::Upward => write!(f, "upward"),
+        }
+    }
+}
+
 impl ImageInfo {
     fn from_mach(mach: &MachFile<'_>) -> Self {
         let header = mach.header();
