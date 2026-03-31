@@ -2,9 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::addr::ThinFileOffset;
 use super::ObjCMetadata;
 use super::types::ObjCCategory;
+use crate::addr::ThinFileOffset;
 use crate::model::mach::MachFile;
 use crate::parse::parse_symbol_table;
 
@@ -369,7 +369,12 @@ impl ObjCGraph {
         None
     }
 
-    pub fn method_impl_va(&self, class_name: &str, selector: &str, kind: MethodKind) -> Option<u64> {
+    pub fn method_impl_va(
+        &self,
+        class_name: &str,
+        selector: &str,
+        kind: MethodKind,
+    ) -> Option<u64> {
         self.resolve_inherited(class_name, selector, kind)
             .map(|resolved| resolved.imp)
     }
@@ -382,7 +387,9 @@ impl ObjCGraph {
         kind: MethodKind,
     ) -> Option<ThinFileOffset> {
         let va = self.method_impl_va(class_name, selector, kind)?;
-        mach.address_map().va_to_thin_offset(crate::addr::Va(va)).ok()
+        mach.address_map()
+            .va_to_thin_offset(crate::addr::Va(va))
+            .ok()
     }
 
     pub fn responds_to(&self, class_name: &str, selector: &str, kind: MethodKind) -> bool {

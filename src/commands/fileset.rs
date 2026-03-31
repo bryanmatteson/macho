@@ -3,8 +3,6 @@ use macho::container_analysis::ContainerReport;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use crate::commands::common::for_each_selected_mach;
-
 #[derive(clap::Args)]
 pub struct FilesetArgs {
     #[command(subcommand)]
@@ -99,56 +97,45 @@ fn run_inspect(path: &std::path::Path, entry_id: &str, arch: Option<&str>) -> Re
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
-    for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
-        if show_header {
-            println!("=== {arch_name} ===");
-        }
+    let all_matches = container.inspect_fileset_entry(entry_id);
+    let matches: Vec<_> = all_matches
+        .iter()
+        .filter(|inspection| arch.is_none_or(|filter| inspection.arch.eq_ignore_ascii_case(filter)))
+        .collect();
 
-        let entry = mach.load_commands().iter().find_map(|lc| {
-            if let macho::model::load_command::LoadCommand::FilesetEntry(data) = &lc.kind {
-                if data.entry_id == entry_id {
-                    Some(data)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        });
-
-        match entry {
-            Some(data) => {
-                println!("Fileset Entry: {}", data.entry_id);
-                println!("  VM address:   {:#x}", data.vm_addr);
-                println!("  File offset:  {:#x}", data.file_offset);
-
-                // Try to parse the member as a Mach-O at the specified offset
-                let offset = data.file_offset as usize;
-                if offset < mach.bytes().len() {
-                    let remaining = &mach.bytes()[offset..];
-                    match macho::parse(remaining) {
-                        Ok(member) => {
-                            let member_mach = member.first_mach();
-                            println!("  File type:    {}", member_mach.header().file_type.name());
-                            println!("  CPU:          {}", member_mach.header().cpu_type);
-                            println!("  Load cmds:    {}", member_mach.load_commands().len());
-                            println!("  Segments:     {}", member_mach.segments().len());
-                        }
-                        Err(_) => {
-                            println!("  (could not parse member as Mach-O)");
-                        }
-                    }
-                }
-            }
-            None => {
+    if matches.is_empty() {
+        if let Some(filter) = arch {
+            if all_matches.is_empty() {
                 println!("Fileset entry '{entry_id}' not found");
+            } else {
+                println!("Fileset entry '{entry_id}' not found for architecture '{filter}'");
             }
+        } else {
+            println!("Fileset entry '{entry_id}' not found");
+        }
+        return Ok(());
+    }
+
+    let show_headers = matches.len() > 1;
+    for (index, inspection) in matches.iter().enumerate() {
+        if show_headers {
+            if index > 0 {
+                println!();
+            }
+            println!("=== {} ===", inspection.arch);
         }
 
-        if show_header {
-            println!();
+        println!("Fileset Entry: {}", inspection.entry_id);
+        println!("  VM address:   {:#x}", inspection.vm_addr);
+        println!("  File offset:  {:#x}", inspection.file_offset);
+        if let Some(member) = &inspection.member {
+            println!("  File type:    {}", member.file_type);
+            println!("  CPU:          {}", member.cpu);
+            println!("  Load cmds:    {}", member.load_commands);
+            println!("  Segments:     {}", member.segments);
+        } else if let Some(err) = &inspection.parse_error {
+            println!("  (could not parse member as Mach-O: {err})");
         }
-        Ok(())
-    })?;
+    }
     Ok(())
 }

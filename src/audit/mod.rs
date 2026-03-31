@@ -228,7 +228,9 @@ fn collect_drift(
     right_arch: &str,
 ) {
     if left != right {
-        evidence.push(format!("{label} differs: {left_arch}={left}, {right_arch}={right}"));
+        evidence.push(format!(
+            "{label} differs: {left_arch}={left}, {right_arch}={right}"
+        ));
     }
 }
 

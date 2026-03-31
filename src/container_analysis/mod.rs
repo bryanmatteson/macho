@@ -159,7 +159,10 @@ fn inspect_fileset_member(
     file_offset: u64,
 ) -> (Option<FilesetMemberReport>, Option<String>) {
     let Ok(offset) = usize::try_from(file_offset) else {
-        return (None, Some(format!("member offset {file_offset:#x} is too large")));
+        return (
+            None,
+            Some(format!("member offset {file_offset:#x} is too large")),
+        );
     };
 
     if offset >= mach.bytes().len() {

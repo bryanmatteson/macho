@@ -343,12 +343,7 @@ fn resolve_all_rpaths_with_multiple_entries() {
         "/usr/local/lib".to_string(),
         "@loader_path/../lib".to_string(),
     ]);
-    let result = resolve_all_rpaths(
-        "@rpath/libfoo.dylib",
-        &info,
-        Some("/usr/bin/myapp"),
-        None,
-    );
+    let result = resolve_all_rpaths("@rpath/libfoo.dylib", &info, Some("/usr/bin/myapp"), None);
     assert_eq!(result.len(), 3);
     assert_eq!(result[0], "/opt/lib/libfoo.dylib");
     assert_eq!(result[1], "/usr/local/lib/libfoo.dylib");
@@ -514,9 +509,18 @@ fn image_info_json_contains_all_fields() {
     assert!(parsed.get("uuid").is_some(), "missing uuid");
     assert!(parsed.get("image_base").is_some(), "missing image_base");
     assert!(parsed.get("platform").is_some(), "missing platform");
-    assert!(parsed.get("source_version").is_some(), "missing source_version");
+    assert!(
+        parsed.get("source_version").is_some(),
+        "missing source_version"
+    );
     assert!(parsed.get("install_name").is_some(), "missing install_name");
-    assert!(parsed.get("linked_dylibs").is_some(), "missing linked_dylibs");
+    assert!(
+        parsed.get("linked_dylibs").is_some(),
+        "missing linked_dylibs"
+    );
     assert!(parsed.get("rpaths").is_some(), "missing rpaths");
-    assert!(parsed.get("target_triple").is_some(), "missing target_triple");
+    assert!(
+        parsed.get("target_triple").is_some(),
+        "missing target_triple"
+    );
 }

@@ -212,10 +212,7 @@ fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
     }
 }
 
-fn merge_swift_types(
-    existing: &types::SwiftType,
-    candidate: types::SwiftType,
-) -> types::SwiftType {
+fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -> types::SwiftType {
     let existing_rank = confidence_rank(existing.confidence);
     let candidate_rank = confidence_rank(candidate.confidence);
     let mut preferred = if candidate_rank > existing_rank

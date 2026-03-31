@@ -14,7 +14,15 @@ pub struct PatchPreview {
     pub new_command_count: usize,
     pub validation_errors: Vec<String>,
     pub validation_warnings: Vec<String>,
-    pub signature_invalidated: bool,
+    pub signature_outcome: SignatureOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureOutcome {
+    Unchanged,
+    Invalidated,
+    Removed,
 }
 
 pub struct PatchTransaction<'data> {
@@ -100,9 +108,17 @@ impl<'data> PatchTransaction<'data> {
             .map(|d| format!("{}: {}", d.code.0, d.message))
             .collect();
 
-        let sig_invalidated = has_code_signature(self.mach)
-            && (editor.commands() != original_commands.as_slice()
-                || byte_patches_changed(self.mach.bytes(), &candidate, &self.ops));
+        let original_signed = has_code_signature(self.mach);
+        let candidate_signed = has_code_signature(reparsed_mach);
+        let signature_changed = editor.commands() != original_commands.as_slice()
+            || byte_patches_changed(self.mach.bytes(), &candidate, &self.ops);
+        let signature_outcome = if original_signed && !candidate_signed {
+            SignatureOutcome::Removed
+        } else if original_signed && signature_changed {
+            SignatureOutcome::Invalidated
+        } else {
+            SignatureOutcome::Unchanged
+        };
 
         Ok(PatchPreview {
             operations: self.ops.iter().map(|op| op.to_string()).collect(),
@@ -110,7 +126,7 @@ impl<'data> PatchTransaction<'data> {
             new_command_count: new_count,
             validation_errors: errors,
             validation_warnings: warnings,
-            signature_invalidated: sig_invalidated,
+            signature_outcome,
         })
     }
 

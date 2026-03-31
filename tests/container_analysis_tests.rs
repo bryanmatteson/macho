@@ -295,8 +295,8 @@ fn helper_queries_detect_signature_and_slice_diff() {
         "missing added export finding: {:?}",
         diff.findings
             .iter()
-        .map(|finding| &finding.message)
-        .collect::<Vec<_>>()
+            .map(|finding| &finding.message)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -334,12 +334,22 @@ fn container_methods_match_snapshot_helpers() {
             method_report
                 .findings
                 .iter()
-                .map(|finding| (&finding.domain, &finding.severity, finding.arch.as_deref(), finding.message.as_str()))
+                .map(|finding| (
+                    &finding.domain,
+                    &finding.severity,
+                    finding.arch.as_deref(),
+                    finding.message.as_str()
+                ))
                 .collect::<Vec<_>>(),
             helper_report
                 .findings
                 .iter()
-                .map(|finding| (&finding.domain, &finding.severity, finding.arch.as_deref(), finding.message.as_str()))
+                .map(|finding| (
+                    &finding.domain,
+                    &finding.severity,
+                    finding.arch.as_deref(),
+                    finding.message.as_str()
+                ))
                 .collect::<Vec<_>>()
         );
     }

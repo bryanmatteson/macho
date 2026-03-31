@@ -583,10 +583,7 @@ fn xref_stub_source_addresses_are_nonzero() {
         let index = XrefIndex::build(mach).expect("build");
         for xref in index.all_refs() {
             if xref.kind == XrefKind::Stub {
-                assert!(
-                    xref.source.0 != 0,
-                    "stub xref has zero source VA"
-                );
+                assert!(xref.source.0 != 0, "stub xref has zero source VA");
             }
         }
     }
@@ -663,7 +660,10 @@ fn entries_in_range_empty_query_returns_empty() {
         let index = SymbolRangeIndex::build(mach).expect("build");
         // Query with start == end should return empty
         let result = index.entries_in_range(Va(0x1000), Va(0x1000));
-        assert!(result.is_empty(), "equal start/end should yield empty slice");
+        assert!(
+            result.is_empty(),
+            "equal start/end should yield empty slice"
+        );
     }
 }
 
@@ -675,7 +675,10 @@ fn refs_in_range_empty_query_returns_empty() {
     for mach in container.mach_files() {
         let index = XrefIndex::build(mach).expect("build");
         let result = index.refs_in_range(Va(0x1000), Va(0x1000));
-        assert!(result.is_empty(), "equal start/end should yield empty slice");
+        assert!(
+            result.is_empty(),
+            "equal start/end should yield empty slice"
+        );
     }
 }
 

@@ -1,14 +1,12 @@
 use std::collections::BTreeMap;
 
-use macho::addr::Va;
 use macho::addr::ThinFileOffset;
+use macho::addr::Va;
 use macho::model::container::MachContainer;
 use macho::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
 };
-use macho::objc::{
-    ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, parse_objc_metadata,
-};
+use macho::objc::{ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, parse_objc_metadata};
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
     let data = std::fs::read(path).expect("read");

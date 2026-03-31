@@ -2,7 +2,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use macho::inspect::ImageInspector;
 use macho::model::container::MachContainer;
+use macho::objc::graph::ObjCGraph;
+use macho::objc::parse_objc_metadata;
 use macho::swift::SwiftTypeIndex;
 
 #[cfg(unix)]
@@ -67,6 +70,31 @@ fn has_rpath(mach: &macho::model::mach::MachFile<'_>, needle: &str) -> bool {
     mach.load_commands()
         .iter()
         .any(|lc| lc.kind.as_rpath() == Some(needle))
+}
+
+fn objc_graph_fixture(path: &str) -> Option<(String, ObjCGraph)> {
+    let data = std::fs::read(path).ok()?;
+    let container = macho::parse(&data).ok()?;
+    match &container {
+        MachContainer::Fat(fat) => fat.arches().iter().find_map(|arch| {
+            let metadata = parse_objc_metadata(&arch.mach).ok()?;
+            let graph = ObjCGraph::build_from_mach(&metadata, &arch.mach);
+            if graph.classes.is_empty() {
+                None
+            } else {
+                Some((arch.spec.name(), graph))
+            }
+        }),
+        MachContainer::Thin(mach) => {
+            let metadata = parse_objc_metadata(mach).ok()?;
+            let graph = ObjCGraph::build_from_mach(&metadata, mach);
+            if graph.classes.is_empty() {
+                None
+            } else {
+                Some((ImageInspector::new(mach).info().arch.clone(), graph))
+            }
+        }
+    }
 }
 
 #[test]
@@ -346,6 +374,136 @@ fn swift_json_kind_filter_applies_to_output() {
     assert!(
         types.iter().all(|ty| ty["kind"] == expected_kind),
         "JSON output should honor the requested kind filter"
+    );
+}
+
+#[test]
+fn objc_graph_json_returns_null_for_slice_without_metadata() {
+    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
+    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let arch = ImageInspector::new(container.first_mach())
+        .info()
+        .arch
+        .clone();
+
+    let output = Command::new(macho_bin())
+        .args(["objc", "graph", "/usr/bin/true", "--arch", &arch, "--json"])
+        .output()
+        .expect("failed to run macho objc graph");
+
+    assert!(
+        output.status.success(),
+        "objc graph command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    assert_eq!(json, serde_json::Value::Null);
+}
+
+#[test]
+fn objc_selectors_json_reports_owners() {
+    let Some((arch, graph)) = objc_graph_fixture("/usr/bin/plutil") else {
+        return;
+    };
+    let (selector, owners) = graph
+        .selectors
+        .iter()
+        .find(|(_, owners)| !owners.is_empty())
+        .expect("expected at least one selector");
+
+    let output = Command::new(macho_bin())
+        .args([
+            "objc",
+            "selectors",
+            "/usr/bin/plutil",
+            "--arch",
+            &arch,
+            "--name",
+            selector,
+            "--json",
+        ])
+        .output()
+        .expect("failed to run macho objc selectors");
+
+    assert!(
+        output.status.success(),
+        "objc selectors command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    let returned_owners = json["owners"].as_array().expect("owners array");
+
+    assert_eq!(json["selector"], selector.as_str());
+    assert_eq!(returned_owners.len(), owners.len());
+    assert!(
+        returned_owners
+            .iter()
+            .all(|owner| owner["class_name"].is_string() && owner["kind"].is_string()),
+        "selector JSON should include serialized owners"
+    );
+}
+
+#[test]
+fn objc_xrefs_json_reports_symbol_links() {
+    let Some((arch, graph)) = objc_graph_fixture("/usr/bin/plutil") else {
+        return;
+    };
+    let Some((class_name, selector, symbol)) = graph.classes.values().find_map(|class| {
+        class
+            .effective_instance_methods
+            .iter()
+            .find_map(|method| {
+                method
+                    .imp_symbol
+                    .as_ref()
+                    .map(|symbol| (class.name.clone(), method.selector.clone(), symbol.clone()))
+            })
+            .or_else(|| {
+                class.effective_class_methods.iter().find_map(|method| {
+                    method
+                        .imp_symbol
+                        .as_ref()
+                        .map(|symbol| (class.name.clone(), method.selector.clone(), symbol.clone()))
+                })
+            })
+    }) else {
+        return;
+    };
+
+    let output = Command::new(macho_bin())
+        .args([
+            "objc",
+            "xrefs",
+            "/usr/bin/plutil",
+            "--arch",
+            &arch,
+            "--class",
+            &class_name,
+            "--json",
+        ])
+        .output()
+        .expect("failed to run macho objc xrefs");
+
+    assert!(
+        output.status.success(),
+        "objc xrefs command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    let entries = json.as_array().expect("xref JSON array");
+    assert!(
+        entries.iter().any(|entry| {
+            entry["class_name"] == class_name
+                && entry["selector"] == selector
+                && entry["imp_symbol"] == symbol
+        }),
+        "xref JSON should include the resolved method symbol link"
     );
 }
 

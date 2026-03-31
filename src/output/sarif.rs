@@ -96,7 +96,7 @@ pub fn render(path: &Path, reports: &[AuditReport]) -> Result<String> {
                     AuditSeverity::Error | AuditSeverity::Critical => "error",
                 },
                 message: SarifMessage {
-                    text: format!("[{}] {}", report.arch, finding.title),
+                    text: format_message(report.arch.as_str(), finding),
                 },
                 locations: vec![SarifLocation {
                     physical_location: SarifPhysicalLocation {
@@ -158,4 +158,15 @@ fn percent_encode_path(input: impl AsRef<[u8]>) -> String {
         }
     }
     out
+}
+
+fn format_message(arch: &str, finding: &macho::audit::AuditFinding) -> String {
+    let mut lines = vec![format!("[{arch}] {}", finding.title), finding.body.clone()];
+    for evidence in &finding.evidence {
+        lines.push(format!("Evidence: {evidence}"));
+    }
+    if let Some(remediation) = &finding.remediation {
+        lines.push(format!("Remediation: {remediation}"));
+    }
+    lines.join("\n")
 }

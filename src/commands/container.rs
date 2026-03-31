@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use macho::container_analysis::parity::ParityDomain;
 use macho::container_analysis::{ContainerReport, resolve};
 use std::path::PathBuf;
 
@@ -17,6 +18,9 @@ pub struct ContainerArgs {
     /// Show cross-image symbol resolution
     #[arg(long)]
     resolve: bool,
+    /// Limit parity checks to a specific domain (repeatable: exports, imports, segments, codesign, objc)
+    #[arg(long = "parity-domain")]
+    parity_domains: Vec<String>,
 }
 
 pub fn run(args: ContainerArgs) -> Result<()> {
@@ -30,7 +34,8 @@ pub fn run(args: ContainerArgs) -> Result<()> {
     if let Some(ref filter) = args.arch {
         filter_snapshot_by_arch(&mut snapshot, filter, &args.path)?;
     }
-    let report = ContainerReport::from_snapshot(&snapshot);
+    let parity_domains = parse_parity_domains(&args.parity_domains)?;
+    let report = ContainerReport::from_snapshot_with_domains(&snapshot, &parity_domains);
 
     if args.json {
         if args.resolve {
@@ -47,10 +52,19 @@ pub fn run(args: ContainerArgs) -> Result<()> {
     }
 
     // Text output
-    println!("Container: {} format", report.format);
+    println!("Container: {}", report.format);
     println!("Architectures: {}", report.arches.join(", "));
 
     if let Some(ref parity) = report.parity {
+        println!(
+            "Parity domains: {}",
+            parity
+                .domains
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         if parity.divergences.is_empty() {
             println!("\nParity: all arches in agreement");
         } else {
@@ -102,4 +116,19 @@ pub fn run(args: ContainerArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_parity_domains(raw: &[String]) -> Result<Vec<ParityDomain>> {
+    raw.iter()
+        .map(|domain| match domain.as_str() {
+            "exports" => Ok(ParityDomain::Exports),
+            "imports" => Ok(ParityDomain::Imports),
+            "segments" => Ok(ParityDomain::Segments),
+            "codesign" => Ok(ParityDomain::Codesign),
+            "objc" => Ok(ParityDomain::Objc),
+            other => anyhow::bail!(
+                "unknown parity domain: {other} (use exports, imports, segments, codesign, or objc)"
+            ),
+        })
+        .collect()
 }

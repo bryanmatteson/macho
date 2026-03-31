@@ -56,8 +56,7 @@ impl VtableIndex {
         let image_base = mach.image_base().0;
 
         // Build a map of VA -> symbol name for resolving slot targets
-        let mut va_to_name: std::collections::HashMap<u64, &str> =
-            std::collections::HashMap::new();
+        let mut va_to_name: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
         for sym in symbols {
             if sym.is_defined() && sym.value != 0 {
                 va_to_name.insert(sym.value, sym.name);
@@ -186,9 +185,7 @@ enum VtableFixup {
 
 /// Build a map from file_offset -> resolved fixup, using chained fixups
 /// if available, otherwise legacy bind/rebase opcodes.
-fn build_vtable_fixup_map(
-    mach: &MachFile<'_>,
-) -> std::collections::HashMap<u64, VtableFixup> {
+fn build_vtable_fixup_map(mach: &MachFile<'_>) -> std::collections::HashMap<u64, VtableFixup> {
     use crate::dyld::chained::parse_chained_fixups;
     use crate::dyld::types::FixupKind;
 
@@ -239,8 +236,7 @@ fn build_vtable_fixup_map(
                 for entry in &rebases {
                     if let Some(seg) = mach.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset.0 + entry.segment_offset;
-                        map.entry(file_offset)
-                            .or_insert(VtableFixup::Rebase(0));
+                        map.entry(file_offset).or_insert(VtableFixup::Rebase(0));
                     }
                 }
             }
@@ -312,14 +308,14 @@ fn read_vtable_slots(
         };
 
         let raw_value = if ptr_size == 8 {
-            let arr: [u8; 8] = bytes.try_into().map_err(|_| {
-                Error::Format("failed to read 8 bytes for vtable slot".into())
-            })?;
+            let arr: [u8; 8] = bytes
+                .try_into()
+                .map_err(|_| Error::Format("failed to read 8 bytes for vtable slot".into()))?;
             endian.read_u64(arr)
         } else {
-            let arr: [u8; 4] = bytes.try_into().map_err(|_| {
-                Error::Format("failed to read 4 bytes for vtable slot".into())
-            })?;
+            let arr: [u8; 4] = bytes
+                .try_into()
+                .map_err(|_| Error::Format("failed to read 4 bytes for vtable slot".into()))?;
             endian.read_u32(arr) as u64
         };
 

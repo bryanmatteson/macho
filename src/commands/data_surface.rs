@@ -119,10 +119,7 @@ fn print_strings_text(mach: &MachFile<'_>, args: &StringsArgs) {
             );
         }
     } else {
-        println!(
-            "String regions: {} discovered",
-            regions.regions.len(),
-        );
+        println!("String regions: {} discovered", regions.regions.len(),);
         for (i, region) in regions.regions.iter().enumerate() {
             let strings = regions.strings_in_region(mach, region);
             println!(
@@ -154,11 +151,7 @@ pub fn run_vtables(args: VtablesArgs) -> Result<()> {
                 let filtered: Vec<_> = index
                     .vtables
                     .iter()
-                    .filter(|v| {
-                        v.name
-                            .as_ref()
-                            .is_some_and(|n| n.contains(class_name))
-                    })
+                    .filter(|v| v.name.as_ref().is_some_and(|n| n.contains(class_name)))
                     .collect();
                 serde_json::to_value(&filtered)?
             } else {
@@ -207,11 +200,7 @@ fn print_vtables_text(mach: &MachFile<'_>, args: &VtablesArgs) -> Result<()> {
         index
             .vtables
             .iter()
-            .filter(|v| {
-                v.name
-                    .as_ref()
-                    .is_some_and(|n| n.contains(class_name))
-            })
+            .filter(|v| v.name.as_ref().is_some_and(|n| n.contains(class_name)))
             .collect()
     } else {
         index.vtables.iter().collect()

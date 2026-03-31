@@ -427,10 +427,7 @@ fn import_provider_display() {
         format!("{}", ImportProvider::DynamicLookup),
         "dynamic-lookup"
     );
-    assert_eq!(
-        format!("{}", ImportProvider::WeakLookup),
-        "weak-lookup"
-    );
+    assert_eq!(format!("{}", ImportProvider::WeakLookup), "weak-lookup");
     assert_eq!(
         format!("{}", ImportProvider::Unknown { ordinal: -5 }),
         "unknown(-5)"
@@ -668,8 +665,8 @@ fn compat_no_provider_produces_target_findings() {
     let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
-    let report = CompatReport::check(mach, "/usr/bin/tar", None, None)
-        .expect("compat check failed");
+    let report =
+        CompatReport::check(mach, "/usr/bin/tar", None, None).expect("compat check failed");
 
     // Without a provider, should have no arch/platform/file-type findings
     let cross_findings: Vec<_> = report

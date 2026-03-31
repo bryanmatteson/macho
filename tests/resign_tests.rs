@@ -141,7 +141,10 @@ fn resign_plan_reports_unreadable_signature_as_signed() {
     let mach = container.first_mach();
 
     let plan = ResignPlan::from_mach(mach);
-    assert!(plan.was_signed, "LC_CODE_SIGNATURE should still count as signed");
+    assert!(
+        plan.was_signed,
+        "LC_CODE_SIGNATURE should still count as signed"
+    );
     assert!(plan.signature_parse_error.is_some());
     assert!(format!("{plan}").contains("Signature parse error"));
 }

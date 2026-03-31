@@ -129,6 +129,32 @@ fn check_export_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence
             });
         }
     }
+
+    for name in &all {
+        let per_arch: BTreeMap<String, String> = slices
+            .iter()
+            .filter_map(|slice| {
+                slice
+                    .exports
+                    .iter()
+                    .find(|export| export.name == *name)
+                    .map(|export| (slice.arch.clone(), describe_export(export)))
+            })
+            .collect();
+
+        if per_arch.len() < 2 {
+            continue;
+        }
+
+        let variants: BTreeSet<&str> = per_arch.values().map(|value| value.as_str()).collect();
+        if variants.len() > 1 {
+            divs.push(ParityDivergence {
+                domain: ParityDomain::Exports,
+                description: format!("export {name} differs across arches"),
+                per_arch,
+            });
+        }
+    }
 }
 
 fn check_import_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence>) {
@@ -162,6 +188,34 @@ fn check_import_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence
             divs.push(ParityDivergence {
                 domain: ParityDomain::Imports,
                 description: format!("import {name} not present in all arches"),
+                per_arch,
+            });
+        }
+    }
+
+    for name in &all {
+        let per_arch: BTreeMap<String, String> = slices
+            .iter()
+            .filter_map(|slice| {
+                let variants: Vec<String> = slice
+                    .imports
+                    .iter()
+                    .filter(|import| import.name == *name)
+                    .map(describe_import)
+                    .collect();
+                (!variants.is_empty()).then(|| (slice.arch.clone(), variants.join(", ")))
+            })
+            .collect();
+
+        if per_arch.len() < 2 {
+            continue;
+        }
+
+        let variants: BTreeSet<&str> = per_arch.values().map(|value| value.as_str()).collect();
+        if variants.len() > 1 {
+            divs.push(ParityDivergence {
+                domain: ParityDomain::Imports,
+                description: format!("import {name} differs across arches"),
                 per_arch,
             });
         }
@@ -283,4 +337,31 @@ fn check_objc_class_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDiverg
             });
         }
     }
+}
+
+fn describe_export(export: &crate::analysis::snapshot::ExportSnapshot) -> String {
+    let kind = match &export.kind {
+        crate::analysis::snapshot::ExportKindSnapshot::Regular { address } => {
+            format!("regular@{address:#x}")
+        }
+        crate::analysis::snapshot::ExportKindSnapshot::ThreadLocal { address } => {
+            format!("thread_local@{address:#x}")
+        }
+        crate::analysis::snapshot::ExportKindSnapshot::Absolute { address } => {
+            format!("absolute@{address:#x}")
+        }
+        crate::analysis::snapshot::ExportKindSnapshot::Reexport { ordinal, name } => format!(
+            "reexport ordinal={ordinal} name={}",
+            name.as_deref().unwrap_or("<none>")
+        ),
+        crate::analysis::snapshot::ExportKindSnapshot::StubAndResolver {
+            stub_offset,
+            resolver_offset,
+        } => format!("stub={stub_offset:#x} resolver={resolver_offset:#x}"),
+    };
+    format!("{kind} weak={}", export.weak)
+}
+
+fn describe_import(import: &crate::analysis::snapshot::ImportSnapshot) -> String {
+    format!("ordinal={} weak={}", import.lib_ordinal, import.weak)
 }

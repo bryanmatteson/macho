@@ -468,8 +468,10 @@ fn diff_exports(
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
 ) {
-    let old_map: BTreeMap<&str, &ExportSnapshot> = old.iter().map(|e| (e.name.as_str(), e)).collect();
-    let new_map: BTreeMap<&str, &ExportSnapshot> = new.iter().map(|e| (e.name.as_str(), e)).collect();
+    let old_map: BTreeMap<&str, &ExportSnapshot> =
+        old.iter().map(|e| (e.name.as_str(), e)).collect();
+    let new_map: BTreeMap<&str, &ExportSnapshot> =
+        new.iter().map(|e| (e.name.as_str(), e)).collect();
 
     for name in old_map.keys() {
         if !new_map.contains_key(name) {
@@ -598,10 +600,7 @@ fn diff_fixups(
                 domain: DiffDomain::Fixups,
                 severity: ChangeSeverity::Breaking,
                 arch: arch.clone(),
-                message: format!(
-                    "fixup removed at segment {} offset {:#x}",
-                    key.0, key.1
-                ),
+                message: format!("fixup removed at segment {} offset {:#x}", key.0, key.1),
             });
         }
     }
@@ -681,7 +680,10 @@ fn diff_objc(
                 domain: DiffDomain::ObjC,
                 severity: ChangeSeverity::Warning,
                 arch: arch.clone(),
-                message: format!("ObjC class {name} Swift marker changed: {} -> {}", oc.is_swift, nc.is_swift),
+                message: format!(
+                    "ObjC class {name} Swift marker changed: {} -> {}",
+                    oc.is_swift, nc.is_swift
+                ),
             });
         }
         diff_string_set(
@@ -1146,18 +1148,21 @@ fn describe_export_kind(kind: &ExportKindSnapshot) -> String {
         ExportKindSnapshot::ThreadLocal { address } => format!("thread-local@{address:#x}"),
         ExportKindSnapshot::Absolute { address } => format!("absolute@{address:#x}"),
         ExportKindSnapshot::Reexport { ordinal, name } => {
-            format!("reexport ordinal={ordinal} name={}", name.as_deref().unwrap_or("<none>"))
+            format!(
+                "reexport ordinal={ordinal} name={}",
+                name.as_deref().unwrap_or("<none>")
+            )
         }
         ExportKindSnapshot::StubAndResolver {
             stub_offset,
             resolver_offset,
-        } => format!(
-            "stub-and-resolver stub={stub_offset:#x} resolver={resolver_offset:#x}"
-        ),
+        } => format!("stub-and-resolver stub={stub_offset:#x} resolver={resolver_offset:#x}"),
     }
 }
 
-fn imports_by_name<'a>(imports: &'a [ImportSnapshot]) -> BTreeMap<&'a str, Vec<&'a ImportSnapshot>> {
+fn imports_by_name<'a>(
+    imports: &'a [ImportSnapshot],
+) -> BTreeMap<&'a str, Vec<&'a ImportSnapshot>> {
     let mut map: BTreeMap<&str, Vec<&ImportSnapshot>> = BTreeMap::new();
     for import in imports {
         map.entry(import.name.as_str()).or_default().push(import);

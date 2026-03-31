@@ -532,14 +532,24 @@ fn regression_vtable_slots_resolve_function_names_on_chained_fixup_binaries() {
         .vtables
         .iter()
         .flat_map(|v| v.slots.iter())
-        .filter(|s| matches!(&s.target, macho::data_surface::vtable::SlotTarget::Function { .. }))
+        .filter(|s| {
+            matches!(
+                &s.target,
+                macho::data_surface::vtable::SlotTarget::Function { .. }
+            )
+        })
         .count();
 
     let unknown_slot_count: usize = index
         .vtables
         .iter()
         .flat_map(|v| v.slots.iter())
-        .filter(|s| matches!(&s.target, macho::data_surface::vtable::SlotTarget::Unknown { .. }))
+        .filter(|s| {
+            matches!(
+                &s.target,
+                macho::data_surface::vtable::SlotTarget::Unknown { .. }
+            )
+        })
         .count();
 
     // We should have more function slots than unknown slots (the old code
@@ -763,7 +773,10 @@ fn vtable_output_is_deterministic() {
     let json1 = serde_json::to_string(&index1).expect("json");
     let json2 = serde_json::to_string(&index2).expect("json");
 
-    assert_eq!(json1, json2, "vtable output should be deterministic across runs");
+    assert_eq!(
+        json1, json2,
+        "vtable output should be deterministic across runs"
+    );
 }
 
 #[test]
@@ -783,5 +796,8 @@ fn string_region_output_is_deterministic() {
     let json1 = serde_json::to_string(&regions1).expect("json");
     let json2 = serde_json::to_string(&regions2).expect("json");
 
-    assert_eq!(json1, json2, "string region output should be deterministic across runs");
+    assert_eq!(
+        json1, json2,
+        "string region output should be deterministic across runs"
+    );
 }

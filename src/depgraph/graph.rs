@@ -342,10 +342,7 @@ fn collect_imports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Ve
     Ok(Vec::new())
 }
 
-fn collect_exports(
-    mach: &MachFile<'_>,
-    dylibs: &[NormalizedDylib],
-) -> Result<Vec<ResolvedExport>> {
+fn collect_exports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Vec<ResolvedExport>> {
     let raw_exports = match parse_exports(mach) {
         Ok(e) => e,
         Err(_) => return Ok(Vec::new()),

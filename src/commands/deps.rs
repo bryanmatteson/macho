@@ -43,7 +43,10 @@ pub fn run(args: DepsArgs) -> Result<()> {
                 mach,
                 &args.path.display().to_string(),
                 prov_mach,
-                args.check_compat.as_ref().map(|p| p.display().to_string()).as_deref(),
+                args.check_compat
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .as_deref(),
             )?;
         }
         MachContainer::Fat(fat) => {
@@ -66,7 +69,10 @@ pub fn run(args: DepsArgs) -> Result<()> {
                     &arch.mach,
                     &args.path.display().to_string(),
                     prov_mach,
-                    args.check_compat.as_ref().map(|p| p.display().to_string()).as_deref(),
+                    args.check_compat
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .as_deref(),
                 )?;
                 println!();
             }
@@ -100,7 +106,11 @@ fn print_deps(
         let import_count = graph.imports_from(dylib.ordinal).len();
         println!(
             "  [{:>2}] {}{} (compat: {}, current: {}) -- {} imports",
-            dylib.ordinal, dylib.name, kind_tag, dylib.compat_version, dylib.current_version,
+            dylib.ordinal,
+            dylib.name,
+            kind_tag,
+            dylib.compat_version,
+            dylib.current_version,
             import_count,
         );
     }

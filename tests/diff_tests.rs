@@ -460,18 +460,22 @@ fn diff_reports_fixup_changes() {
 #[test]
 fn diff_reports_import_metadata_changes() {
     let mut old = synthetic_snapshot();
-    old.slices[0].imports.push(macho::analysis::snapshot::ImportSnapshot {
-        name: "_objc_msgSend".into(),
-        lib_ordinal: 1,
-        weak: false,
-    });
+    old.slices[0]
+        .imports
+        .push(macho::analysis::snapshot::ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 1,
+            weak: false,
+        });
 
     let mut new = synthetic_snapshot();
-    new.slices[0].imports.push(macho::analysis::snapshot::ImportSnapshot {
-        name: "_objc_msgSend".into(),
-        lib_ordinal: 2,
-        weak: true,
-    });
+    new.slices[0]
+        .imports
+        .push(macho::analysis::snapshot::ImportSnapshot {
+            name: "_objc_msgSend".into(),
+            lib_ordinal: 2,
+            weak: true,
+        });
 
     let report = diff_containers(&old, &new);
     let import_findings: Vec<_> = report
@@ -506,10 +510,9 @@ fn diff_reports_der_entitlements_changes() {
 
     let report = diff_containers(&old, &new);
     assert!(
-        report
-            .findings
-            .iter()
-            .any(|finding| finding.message.contains("DER entitlements presence changed")),
+        report.findings.iter().any(|finding| finding
+            .message
+            .contains("DER entitlements presence changed")),
         "missing DER-entitlements diff: {:?}",
         report
             .findings

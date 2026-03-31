@@ -100,9 +100,10 @@ impl StringRegions {
             let sect = section.section_name.as_str_lossy();
 
             // Skip sections we already classified
-            let already_present = result.regions.iter().any(|r| {
-                r.section_segment == seg.as_ref() && r.section_name == sect.as_ref()
-            });
+            let already_present = result
+                .regions
+                .iter()
+                .any(|r| r.section_segment == seg.as_ref() && r.section_name == sect.as_ref());
             if already_present {
                 continue;
             }
@@ -213,8 +214,7 @@ impl StringRegions {
         extract_cstrings(bytes)
             .into_iter()
             .map(|(value, offset_in_region)| {
-                let file_offset =
-                    ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
+                let file_offset = ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
                 let va = Va(region.start.0 + offset_in_region as u64);
                 FoundString {
                     value,

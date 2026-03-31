@@ -89,10 +89,7 @@ impl CompatReport {
                 findings.push(CompatFinding {
                     category: CompatCategory::WeakImport,
                     severity: CompatSeverity::Info,
-                    message: format!(
-                        "weak import '{}' from {}",
-                        imp.name, provider_display,
-                    ),
+                    message: format!("weak import '{}' from {}", imp.name, provider_display,),
                 });
             }
         }
@@ -142,7 +139,12 @@ fn check_arch(target: &MachFile<'_>, provider: &MachFile<'_>, findings: &mut Vec
     }
 }
 
-fn get_platform(mach: &MachFile<'_>) -> Option<(crate::model::load_command::Platform, crate::model::load_command::PackedVersion)> {
+fn get_platform(
+    mach: &MachFile<'_>,
+) -> Option<(
+    crate::model::load_command::Platform,
+    crate::model::load_command::PackedVersion,
+)> {
     for lc in mach.load_commands() {
         match &lc.kind {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),
@@ -271,20 +273,21 @@ fn check_version_compat(
     };
 
     // Get provider's current version from its own LC_ID_DYLIB
-    let provider_current = provider
-        .load_commands()
-        .iter()
-        .find_map(|lc| {
-            if let LoadCommand::IdDylib(d) = &lc.kind {
-                Some(d.current_version)
-            } else {
-                None
-            }
-        });
+    let provider_current = provider.load_commands().iter().find_map(|lc| {
+        if let LoadCommand::IdDylib(d) = &lc.kind {
+            Some(d.current_version)
+        } else {
+            None
+        }
+    });
 
     if let Some(prov_ver) = provider_current {
         // Find matching dylib in target's dependencies
-        if let Some(target_dylib) = target_graph.dylibs.iter().find(|d| d.name == provider_install_name) {
+        if let Some(target_dylib) = target_graph
+            .dylibs
+            .iter()
+            .find(|d| d.name == provider_install_name)
+        {
             // Parse target's compat_version back to a PackedVersion for comparison
             // The compat_version string was created from PackedVersion::to_string() -> "M.m.p"
             // We need to compare: target's required compat_version <= provider's current_version
@@ -295,8 +298,9 @@ fn check_version_compat(
                 .collect();
 
             if target_compat_parts.len() == 3 {
-                let target_compat_packed =
-                    (target_compat_parts[0] << 16) | (target_compat_parts[1] << 8) | target_compat_parts[2];
+                let target_compat_packed = (target_compat_parts[0] << 16)
+                    | (target_compat_parts[1] << 8)
+                    | target_compat_parts[2];
 
                 if target_compat_packed > prov_ver.0 {
                     findings.push(CompatFinding {

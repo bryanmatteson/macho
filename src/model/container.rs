@@ -80,7 +80,10 @@ impl<'data> FatBinary<'data> {
     ) -> Option<parity::ArchParityReport> {
         let snapshot = self.snapshot();
         if snapshot.slices.len() > 1 {
-            Some(parity::compute_parity_with_domains(&snapshot.slices, domains))
+            Some(parity::compute_parity_with_domains(
+                &snapshot.slices,
+                domains,
+            ))
         } else {
             None
         }

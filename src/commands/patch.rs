@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use macho::edit::resign::ResignPlan;
-use macho::edit::transaction::{PatchOp, PatchTransaction};
+use macho::edit::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::owned::OwnedFatBinary;
@@ -266,9 +266,11 @@ fn run_patch(
                 let mut errors = Vec::new();
                 for index in &selected {
                     let arch = &rebuilt_fat.arches()[*index];
-                    errors.extend(validation_errors_for_mach(&arch.mach).into_iter().map(|err| {
-                        format!("{}: {err}", arch.spec.name())
-                    }));
+                    errors.extend(
+                        validation_errors_for_mach(&arch.mach)
+                            .into_iter()
+                            .map(|err| format!("{}: {err}", arch.spec.name())),
+                    );
                 }
                 if !errors.is_empty() {
                     anyhow::bail!(
@@ -425,9 +427,16 @@ fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
                 println!("  {w}");
             }
         }
-        if prepared.preview.signature_invalidated {
-            println!("\nWarning: code signature will be invalidated.");
-            print!("{}", prepared.resign_plan);
+        match prepared.preview.signature_outcome {
+            SignatureOutcome::Unchanged => {}
+            SignatureOutcome::Invalidated => {
+                println!("\nWarning: code signature will be invalidated.");
+                print!("{}", prepared.resign_plan);
+            }
+            SignatureOutcome::Removed => {
+                println!("\nCode signature will be removed; output will be unsigned.");
+                print!("{}", prepared.resign_plan);
+            }
         }
     }
 }

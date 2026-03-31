@@ -1,8 +1,8 @@
 pub mod snapshot;
 
 use crate::codesign::parse_code_signature;
-use crate::dyld::bind::parse_bind_entries;
 use crate::constants::VmProtection;
+use crate::dyld::bind::parse_bind_entries;
 use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
 use crate::dyld::types::ExportKind;
@@ -290,8 +290,8 @@ fn extract_imports_from_dynamic_linker(
     }
 
     if has_legacy_bind_info(mach) {
-        let (regular, weak, lazy) =
-            parse_bind_entries(mach).map_err(|err| format!("failed to parse legacy bind info: {err}"))?;
+        let (regular, weak, lazy) = parse_bind_entries(mach)
+            .map_err(|err| format!("failed to parse legacy bind info: {err}"))?;
         return Ok(collect_imports(
             regular
                 .into_iter()
@@ -493,9 +493,13 @@ fn snap_fixup(fixup: crate::dyld::types::Fixup) -> FixupSnapshot {
 
     let kind = match fixup.kind {
         FixupKind::Rebase { target } => FixupKindSnapshot::Rebase { target },
-        FixupKind::Bind { import_index, addend } => {
-            FixupKindSnapshot::Bind { import_index, addend }
-        }
+        FixupKind::Bind {
+            import_index,
+            addend,
+        } => FixupKindSnapshot::Bind {
+            import_index,
+            addend,
+        },
         FixupKind::AuthRebase {
             target,
             diversity,
