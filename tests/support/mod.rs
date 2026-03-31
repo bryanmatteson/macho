@@ -78,7 +78,10 @@ where
         .lock()
         .expect("lock stdio capture");
 
-    let argv: Vec<String> = args.into_iter().map(|arg| arg.as_ref().to_owned()).collect();
+    let argv: Vec<String> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
     let mut stdout_redirect = BufferRedirect::stdout().expect("redirect stdout");
     let mut stderr_redirect = BufferRedirect::stderr().expect("redirect stderr");
     let code = macho::cli::run(argv.iter().map(String::as_str));

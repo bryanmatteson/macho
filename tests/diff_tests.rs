@@ -1,3 +1,5 @@
+mod support;
+
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
     DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
@@ -5,11 +7,7 @@ use macho::analysis::snapshot::{
     ObjCMethodSnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
-use std::process::Command;
-
-fn macho_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_macho")
-}
+use support::run_cli;
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
@@ -741,10 +739,7 @@ fn diff_ignores_metadata_load_commands_covered_by_header() {
 
 #[test]
 fn diff_cli_json_outputs_findings() {
-    let output = Command::new(macho_bin())
-        .args(["diff", "/usr/bin/true", "/usr/bin/false", "--json"])
-        .output()
-        .expect("run macho diff");
+    let output = run_cli(["diff", "/usr/bin/true", "/usr/bin/false", "--json"]);
 
     assert!(
         output.status.success(),
@@ -766,17 +761,14 @@ fn diff_cli_json_outputs_findings() {
 
 #[test]
 fn diff_cli_fail_on_info_exits_nonzero() {
-    let output = Command::new(macho_bin())
-        .args([
-            "diff",
-            "/usr/bin/true",
-            "/usr/bin/false",
-            "--json",
-            "--fail-on",
-            "info",
-        ])
-        .output()
-        .expect("run macho diff");
+    let output = run_cli([
+        "diff",
+        "/usr/bin/true",
+        "/usr/bin/false",
+        "--json",
+        "--fail-on",
+        "info",
+    ]);
 
     assert!(
         !output.status.success(),

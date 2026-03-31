@@ -286,11 +286,7 @@ pub fn run_ranges(args: RangesArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    let lookup_va = args
-        .lookup
-        .as_ref()
-        .map(|s| parse_hex_va(s))
-        .transpose()?;
+    let lookup_va = args.lookup.as_ref().map(|s| parse_hex_va(s)).transpose()?;
 
     if args.json {
         let mut result = serde_json::Map::new();
@@ -557,7 +553,6 @@ fn parse_hex_va(s: &str) -> Result<Va> {
         .strip_prefix("0x")
         .or_else(|| s.strip_prefix("0X"))
         .unwrap_or(s);
-    let val =
-        u64::from_str_radix(s, 16).with_context(|| format!("invalid hex address: {s}"))?;
+    let val = u64::from_str_radix(s, 16).with_context(|| format!("invalid hex address: {s}"))?;
     Ok(Va(val))
 }

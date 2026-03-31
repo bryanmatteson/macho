@@ -169,19 +169,15 @@ impl DyldCache {
     /// Returns a slice into the original cache data that starts at the image's
     /// mapped location and extends to the next image boundary or mapping end.
     /// The returned slice can be passed to [`crate::parse::parse`].
-    pub fn extract_image<'data>(
-        &self,
-        index: usize,
-        data: &'data [u8],
-    ) -> Result<&'data [u8]> {
+    pub fn extract_image<'data>(&self, index: usize, data: &'data [u8]) -> Result<&'data [u8]> {
         let image = self
             .images
             .get(index)
             .ok_or_else(|| Error::Format(format!("image index {index} out of range")))?;
 
-        let file_offset = self
-            .va_to_file_offset(image.address)
-            .ok_or_else(|| Error::Address(format!("image VA {:#x} not in any mapping", image.address)))?;
+        let file_offset = self.va_to_file_offset(image.address).ok_or_else(|| {
+            Error::Address(format!("image VA {:#x} not in any mapping", image.address))
+        })?;
 
         let start = file_offset as usize;
         if start >= data.len() {

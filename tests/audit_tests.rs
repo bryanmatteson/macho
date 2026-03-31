@@ -1,15 +1,13 @@
+mod support;
+
 use macho::analysis::snapshot::{
     CodesignSnapshot, ContainerFormat, ContainerSnapshot, FixupSnapshot, HeaderSnapshot,
     LoadCommandSnapshot, ObjCSnapshot, SegmentSnapshot, SliceSnapshot,
 };
 use macho::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-fn macho_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_macho")
-}
+use support::run_cli;
 
 fn temp_file_path(name: &str) -> PathBuf {
     let nanos = SystemTime::now()
@@ -366,16 +364,13 @@ fn audit_reports_unreadable_code_signature_instead_of_unsigned() {
 fn audit_json_cli_filters_and_serializes_lowercase_severity() {
     let path = write_malformed_codesign_fixture();
 
-    let output = Command::new(macho_bin())
-        .args([
-            "audit",
-            "--json",
-            "--min-severity",
-            "error",
-            path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("run macho audit --json");
+    let output = run_cli([
+        "audit",
+        "--json",
+        "--min-severity",
+        "error",
+        path.to_str().expect("utf8 path"),
+    ]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -411,16 +406,13 @@ fn audit_json_cli_filters_and_serializes_lowercase_severity() {
 fn audit_sarif_cli_emits_machine_readable_document() {
     let path = write_malformed_codesign_fixture();
 
-    let output = Command::new(macho_bin())
-        .args([
-            "audit",
-            "--sarif",
-            "--min-severity",
-            "error",
-            path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("run macho audit --sarif");
+    let output = run_cli([
+        "audit",
+        "--sarif",
+        "--min-severity",
+        "error",
+        path.to_str().expect("utf8 path"),
+    ]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -464,16 +456,13 @@ fn audit_sarif_cli_emits_machine_readable_document() {
 fn audit_fail_on_exits_nonzero_after_emitting_json_output() {
     let path = write_malformed_codesign_fixture();
 
-    let output = Command::new(macho_bin())
-        .args([
-            "audit",
-            "--json",
-            "--fail-on",
-            "error",
-            path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("run macho audit --json --fail-on");
+    let output = run_cli([
+        "audit",
+        "--json",
+        "--fail-on",
+        "error",
+        path.to_str().expect("utf8 path"),
+    ]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -501,10 +490,7 @@ fn audit_sarif_cli_encodes_file_uri() {
     let path = temp_file_path("audit sarif uri");
     std::fs::write(&path, malformed_codesign_binary()).expect("write malformed binary");
 
-    let output = Command::new(macho_bin())
-        .args(["audit", "--sarif", path.to_str().expect("utf8 path")])
-        .output()
-        .expect("run macho audit --sarif");
+    let output = run_cli(["audit", "--sarif", path.to_str().expect("utf8 path")]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -540,16 +526,13 @@ fn audit_sarif_cli_encodes_file_uri() {
 
 #[test]
 fn audit_fail_on_invalid_severity_fails_before_printing_output() {
-    let output = Command::new(macho_bin())
-        .args([
-            "audit",
-            "--json",
-            "--fail-on",
-            "definitely_not_real",
-            "/usr/bin/true",
-        ])
-        .output()
-        .expect("run macho audit with invalid fail-on");
+    let output = run_cli([
+        "audit",
+        "--json",
+        "--fail-on",
+        "definitely_not_real",
+        "/usr/bin/true",
+    ]);
 
     assert!(
         !output.status.success(),
@@ -572,10 +555,7 @@ fn audit_fail_on_invalid_severity_fails_before_printing_output() {
 fn audit_sarif_cli_canonicalizes_relative_input_paths() {
     let (abs, rel) = write_relative_malformed_codesign_fixture();
 
-    let output = Command::new(macho_bin())
-        .args(["audit", "--sarif", rel.to_str().expect("utf8 path")])
-        .output()
-        .expect("run macho audit --sarif on relative path");
+    let output = run_cli(["audit", "--sarif", rel.to_str().expect("utf8 path")]);
 
     let _ = std::fs::remove_file(&abs);
 

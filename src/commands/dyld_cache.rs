@@ -103,16 +103,17 @@ fn extract_image(
             .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // Use the last path component as the filename
-        let filename = img
-            .path
-            .rsplit('/')
-            .next()
-            .unwrap_or("extracted");
+        let filename = img.path.rsplit('/').next().unwrap_or("extracted");
         let out_path = out_dir.join(filename);
 
         std::fs::create_dir_all(out_dir)?;
         std::fs::write(&out_path, slice)?;
-        println!("extracted {} -> {} ({} bytes)", img.path, out_path.display(), slice.len());
+        println!(
+            "extracted {} -> {} ({} bytes)",
+            img.path,
+            out_path.display(),
+            slice.len()
+        );
     }
 
     Ok(())
