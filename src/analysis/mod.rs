@@ -95,17 +95,6 @@ fn extract_header(mach: &MachFile<'_>) -> HeaderSnapshot {
     }
 }
 
-fn extract_platform_snapshot(mach: &MachFile<'_>) -> Option<PlatformSnapshot> {
-    mach.load_commands()
-        .iter()
-        .find_map(|lc| lc.kind.as_build_version())
-        .map(|bv| PlatformSnapshot {
-            platform: bv.platform.name().to_string(),
-            min_os: bv.minos.to_string(),
-            sdk: bv.sdk.to_string(),
-        })
-}
-
 fn extract_load_commands(mach: &MachFile<'_>) -> Vec<LoadCommandSnapshot> {
     mach.load_commands()
         .iter()
@@ -649,4 +638,56 @@ fn has_objc_metadata(mach: &MachFile<'_>) -> bool {
 fn has_code_signature(mach: &MachFile<'_>) -> bool {
     mach.find_load_command(|lc| matches!(lc, LoadCommand::CodeSignature(_)))
         .is_some()
+}
+
+fn extract_platform_snapshot(mach: &MachFile<'_>) -> Option<PlatformSnapshot> {
+    // Try LC_BUILD_VERSION first
+    if let Some(bv) = mach
+        .load_commands()
+        .iter()
+        .find_map(|lc| lc.kind.as_build_version())
+    {
+        return Some(PlatformSnapshot {
+            platform: bv.platform.name().to_string(),
+            min_os: bv.minos.to_string(),
+            sdk: bv.sdk.to_string(),
+        });
+    }
+
+    // Fall back to LC_VERSION_MIN_*
+    for lc in mach.load_commands() {
+        match &lc.kind {
+            LoadCommand::VersionMinMacOS(d) => {
+                return Some(PlatformSnapshot {
+                    platform: "macOS".to_string(),
+                    min_os: d.version.to_string(),
+                    sdk: d.sdk.to_string(),
+                });
+            }
+            LoadCommand::VersionMinIOS(d) => {
+                return Some(PlatformSnapshot {
+                    platform: "iOS".to_string(),
+                    min_os: d.version.to_string(),
+                    sdk: d.sdk.to_string(),
+                });
+            }
+            LoadCommand::VersionMinTvOS(d) => {
+                return Some(PlatformSnapshot {
+                    platform: "tvOS".to_string(),
+                    min_os: d.version.to_string(),
+                    sdk: d.sdk.to_string(),
+                });
+            }
+            LoadCommand::VersionMinWatchOS(d) => {
+                return Some(PlatformSnapshot {
+                    platform: "watchOS".to_string(),
+                    min_os: d.version.to_string(),
+                    sdk: d.sdk.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+
+    None
 }

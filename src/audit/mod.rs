@@ -189,9 +189,13 @@ fn audit_container(snapshot: &ContainerSnapshot) -> Option<AuditReport> {
 #[derive(Debug, Clone, Copy)]
 struct SecurityPosture {
     signed: bool,
+    identifier: Option<String>,
     has_entitlements: bool,
+    entitlement_keys: Vec<String>,
+    der_fingerprint: Option<String>,
     has_cms_signature: bool,
     has_team_id: bool,
+    hash_type: Option<String>,
     has_pie: bool,
     has_pagezero: bool,
     allows_stack_execution: bool,
@@ -202,9 +206,15 @@ impl SecurityPosture {
         let codesign = slice.codesign.as_ref();
         Self {
             signed: codesign.is_some(),
+            identifier: codesign.and_then(|cs| cs.identifier.clone()),
             has_entitlements: codesign.map(|cs| cs.has_entitlements).unwrap_or(false),
+            entitlement_keys: codesign
+                .map(|cs| cs.entitlement_keys.clone())
+                .unwrap_or_default(),
+            der_fingerprint: codesign.and_then(|cs| cs.entitlements_der_fingerprint.clone()),
             has_cms_signature: codesign.map(|cs| cs.has_cms_signature).unwrap_or(false),
             has_team_id: codesign.and_then(|cs| cs.team_id.as_ref()).is_some(),
+            hash_type: codesign.map(|cs| cs.hash_type.clone()),
             has_pie: slice.header.flags.iter().any(|flag| flag == "PIE"),
             has_pagezero: slice
                 .segments

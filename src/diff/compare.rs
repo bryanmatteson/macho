@@ -980,12 +980,7 @@ fn diff_codesign(
             }
             // Compare entitlements XML when both builds have entitlements
             if o.has_entitlements && n.has_entitlements {
-                diff_entitlement_keys(
-                    &o.entitlement_keys,
-                    &n.entitlement_keys,
-                    arch,
-                    findings,
-                );
+                diff_entitlement_keys(&o.entitlement_keys, &n.entitlement_keys, arch, findings);
 
                 if let (Some(ox), Some(nx)) = (&o.entitlements_xml, &n.entitlements_xml) {
                     if ox != nx {

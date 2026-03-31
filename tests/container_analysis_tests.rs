@@ -268,9 +268,8 @@ fn helper_queries_surface_common_and_divergent_names() {
 #[test]
 fn helper_queries_require_semantic_export_and_import_matches() {
     let mut snap = synthetic_cross_slice_snapshot();
-    snap.slices[1].exports[0].kind = macho::analysis::snapshot::ExportKindSnapshot::Regular {
-        address: 0x2000,
-    };
+    snap.slices[1].exports[0].kind =
+        macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x2000 };
     snap.slices[1].imports[0].weak = true;
 
     assert!(
@@ -286,25 +285,22 @@ fn helper_queries_require_semantic_export_and_import_matches() {
 #[test]
 fn parity_reports_export_and_import_metadata_drift() {
     let mut snap = synthetic_cross_slice_snapshot();
-    snap.slices[1].exports[0].kind = macho::analysis::snapshot::ExportKindSnapshot::Regular {
-        address: 0x2222,
-    };
+    snap.slices[1].exports[0].kind =
+        macho::analysis::snapshot::ExportKindSnapshot::Regular { address: 0x2222 };
     snap.slices[1].imports[0].weak = true;
 
     let parity = compute_parity(&snap.slices);
     assert!(
-        parity
-            .divergences
-            .iter()
-            .any(|div| div.description.contains("export common differs across arches")),
+        parity.divergences.iter().any(|div| div
+            .description
+            .contains("export common differs across arches")),
         "expected export metadata divergence: {:?}",
         parity.divergences
     );
     assert!(
-        parity
-            .divergences
-            .iter()
-            .any(|div| div.description.contains("import shared differs across arches")),
+        parity.divergences.iter().any(|div| div
+            .description
+            .contains("import shared differs across arches")),
         "expected import metadata divergence: {:?}",
         parity.divergences
     );

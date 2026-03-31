@@ -3,6 +3,7 @@ use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
 use crate::dyld::types::ExportKind;
 use crate::error::Result;
+use crate::inspect::DylibLinkKind;
 use crate::model::load_command::LoadCommand;
 use crate::model::mach::MachFile;
 
@@ -21,27 +22,6 @@ pub struct NormalizedDylib {
     pub current_version: String,
     pub compat_version: String,
     pub kind: DylibLinkKind,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DylibLinkKind {
-    Required,
-    Weak,
-    Reexport,
-    Lazy,
-    Upward,
-}
-
-impl std::fmt::Display for DylibLinkKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Required => write!(f, "required"),
-            Self::Weak => write!(f, "weak"),
-            Self::Reexport => write!(f, "reexport"),
-            Self::Lazy => write!(f, "lazy"),
-            Self::Upward => write!(f, "upward"),
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
