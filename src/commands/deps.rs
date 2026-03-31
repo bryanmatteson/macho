@@ -40,10 +40,12 @@ pub fn run(args: DepsArgs) -> Result<()> {
         None
     };
 
+    let mut has_incompatible = false;
+
     match &container {
         MachContainer::Thin(mach) => {
             let prov_mach = provider.map(|c| c.first_mach());
-            print_deps(
+            has_incompatible |= print_deps(
                 mach,
                 &args.path.display().to_string(),
                 prov_mach,
@@ -51,6 +53,7 @@ pub fn run(args: DepsArgs) -> Result<()> {
                     .as_ref()
                     .map(|p| p.display().to_string())
                     .as_deref(),
+                args.json,
             )?;
         }
         MachContainer::Fat(fat) => {
@@ -61,15 +64,14 @@ pub fn run(args: DepsArgs) -> Result<()> {
                         continue;
                     }
                 }
-                if fat.arches().len() > 1 {
+                if !args.json && fat.arches().len() > 1 {
                     println!("=== {name} ===");
                 }
-                // Try to match provider arch to target arch; fall back to first slice
                 let prov_mach = provider.map(|c| {
                     c.find_arch(arch.mach.header().cpu_type)
                         .unwrap_or_else(|| c.first_mach())
                 });
-                print_deps(
+                has_incompatible |= print_deps(
                     &arch.mach,
                     &args.path.display().to_string(),
                     prov_mach,
@@ -77,22 +79,64 @@ pub fn run(args: DepsArgs) -> Result<()> {
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .as_deref(),
+                    args.json,
                 )?;
-                println!();
+                if !args.json {
+                    println!();
+                }
             }
         }
+    }
+
+    if has_incompatible {
+        std::process::exit(1);
     }
 
     Ok(())
 }
 
+/// Returns true if incompatibilities were found.
 fn print_deps(
     mach: &MachFile<'_>,
     target_path: &str,
     provider: Option<&MachFile<'_>>,
     provider_path: Option<&str>,
-) -> Result<()> {
+    json: bool,
+) -> Result<bool> {
     let graph = DepGraph::build(mach).with_context(|| "failed to build dependency graph")?;
+
+    let compat_report = if provider.is_some() {
+        Some(
+            CompatReport::check(mach, target_path, provider, provider_path)
+                .with_context(|| "compatibility check failed")?,
+        )
+    } else {
+        None
+    };
+
+    if json {
+        let output = serde_json::json!({
+            "install_name": graph.install_name,
+            "dylibs": graph.dylibs.iter().map(|d| serde_json::json!({
+                "name": d.name,
+                "ordinal": d.ordinal,
+                "kind": d.kind.to_string(),
+                "current_version": d.current_version,
+                "compat_version": d.compat_version,
+                "import_count": graph.imports_from(d.ordinal).len(),
+            })).collect::<Vec<_>>(),
+            "import_count": graph.imports.len(),
+            "export_count": graph.exports.len(),
+            "reexport_count": graph.reexports().len(),
+            "validation_issues": graph.validate().iter().map(|i| serde_json::json!({
+                "severity": i.severity.to_string(),
+                "message": i.message,
+            })).collect::<Vec<_>>(),
+            "compat_report": compat_report.as_ref().map(|r| serde_json::to_value(r).ok()),
+        });
+        println!("{}", serde_json::to_string_pretty(&output)?);
+        return Ok(compat_report.as_ref().is_some_and(|r| r.has_incompatible()));
+    }
 
     if let Some(ref install_name) = graph.install_name {
         println!("install name: {install_name}");
@@ -162,11 +206,9 @@ fn print_deps(
         }
     }
 
-    if provider.is_some() {
+    if let Some(report) = &compat_report {
         println!();
         println!("--- compatibility check ---");
-        let report = CompatReport::check(mach, target_path, provider, provider_path)
-            .with_context(|| "compatibility check failed")?;
 
         for finding in &report.findings {
             let icon = match finding.severity {
@@ -184,5 +226,5 @@ fn print_deps(
         }
     }
 
-    Ok(())
+    Ok(compat_report.as_ref().is_some_and(|r| r.has_incompatible()))
 }

@@ -405,59 +405,6 @@ fn check_import_coverage(
 
 fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
     let flags = target.header().flags;
-    if flags.contains(MachHeaderFlags::FORCE_FLAT) {
-        findings.push(CompatFinding {
-            category: CompatCategory::NamespaceMode,
-            severity: CompatSeverity::Warning,
-            message: "target uses flat namespace binding (MH_FORCE_FLAT)".to_string(),
-        });
-    } else if flags.contains(MachHeaderFlags::TWOLEVEL) {
-        findings.push(CompatFinding {
-            category: CompatCategory::NamespaceMode,
-            severity: CompatSeverity::Info,
-            message: "target uses two-level namespace binding".to_string(),
-        });
-    } else {
-        findings.push(CompatFinding {
-            category: CompatCategory::NamespaceMode,
-            severity: CompatSeverity::Info,
-            message: "target has no explicit namespace-mode flags".to_string(),
-        });
-    }
-}
-
-fn check_rpaths(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
-    let rpaths: Vec<&str> = target
-        .load_commands()
-        .iter()
-        .filter_map(|lc| lc.kind.as_rpath())
-        .collect();
-
-    if rpaths.is_empty() {
-        findings.push(CompatFinding {
-            category: CompatCategory::Rpath,
-            severity: CompatSeverity::Info,
-            message: "target has no LC_RPATH entries".to_string(),
-        });
-        return;
-    }
-
-    for rpath in rpaths {
-        let severity = if rpath.starts_with('/') {
-            CompatSeverity::Warning
-        } else {
-            CompatSeverity::Info
-        };
-        findings.push(CompatFinding {
-            category: CompatCategory::Rpath,
-            severity,
-            message: format!("target declares rpath '{rpath}'"),
-        });
-    }
-}
-
-fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
-    let flags = target.header().flags;
 
     if flags.contains(MachHeaderFlags::FORCE_FLAT) {
         findings.push(CompatFinding {
