@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
+use macho::addr::Va;
 use macho::addr::ThinFileOffset;
 use macho::model::container::MachContainer;
 use macho::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
 };
-use macho::objc::parse_objc_metadata;
+use macho::objc::{
+    ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, parse_objc_metadata,
+};
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
     let data = std::fs::read(path).expect("read");
@@ -292,4 +295,62 @@ fn no_objc_graph_for_minimal_binary() {
         // Should just be empty
         assert!(graph.classes.is_empty());
     }
+}
+
+#[test]
+fn graph_category_folding_uses_metadata_order_for_overrides() {
+    let metadata = ObjCMetadata {
+        classes: vec![ObjCClass {
+            name: "Widget".into(),
+            superclass_name: None,
+            instance_methods: vec![ObjCMethod {
+                name: "draw".into(),
+                type_encoding: "v@:".into(),
+                imp: Va(0x1000),
+            }],
+            class_methods: vec![],
+            ivars: vec![],
+            properties: vec![],
+            protocols: vec![],
+            instance_size: 0,
+            is_meta: false,
+            is_swift: false,
+        }],
+        categories: vec![
+            ObjCCategory {
+                name: "Debug".into(),
+                class_name: "Widget".into(),
+                instance_methods: vec![ObjCMethod {
+                    name: "draw".into(),
+                    type_encoding: "v@:".into(),
+                    imp: Va(0x2000),
+                }],
+                class_methods: vec![],
+                protocols: vec![],
+            },
+            ObjCCategory {
+                name: "Release".into(),
+                class_name: "Widget".into(),
+                instance_methods: vec![ObjCMethod {
+                    name: "draw".into(),
+                    type_encoding: "v@:".into(),
+                    imp: Va(0x3000),
+                }],
+                class_methods: vec![],
+                protocols: vec![],
+            },
+        ],
+        protocols: vec![],
+    };
+
+    let graph = ObjCGraph::build(&metadata);
+    let method = graph
+        .find_method("Widget", "draw", MethodKind::Instance)
+        .expect("folded selector should resolve");
+
+    assert_eq!(method.imp, 0x3000);
+    assert_eq!(method.origin, MethodOrigin::Category("Release".into()));
+
+    let owners = graph.implementations_of("draw", MethodKind::Instance);
+    assert_eq!(owners.len(), 3);
 }

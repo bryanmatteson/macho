@@ -41,7 +41,7 @@ impl ContainerSnapshot {
     pub fn from_container(container: &MachContainer<'_>) -> Self {
         match container {
             MachContainer::Thin(mach) => Self {
-                format: ContainerFormat::Thin,
+                format: thin_container_format(mach),
                 slices: vec![SliceSnapshot::from_mach(mach)],
             },
             MachContainer::Fat(fat) => Self {
@@ -57,6 +57,14 @@ impl ContainerSnapshot {
                     .collect(),
             },
         }
+    }
+}
+
+fn thin_container_format(mach: &MachFile<'_>) -> ContainerFormat {
+    if mach.header().file_type.name() == "MH_FILESET" {
+        ContainerFormat::Fileset
+    } else {
+        ContainerFormat::Thin
     }
 }
 

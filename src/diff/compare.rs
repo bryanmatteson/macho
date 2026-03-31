@@ -241,7 +241,25 @@ fn diff_load_commands(
 fn should_compare_load_command(name: &str) -> bool {
     !matches!(
         name,
-        "LC_UUID" | "LC_BUILD_VERSION" | "LC_SEGMENT" | "LC_SEGMENT_64" | "LC_CODE_SIGNATURE"
+        "LC_UUID"
+            | "LC_BUILD_VERSION"
+            | "LC_SEGMENT"
+            | "LC_SEGMENT_64"
+            | "LC_CODE_SIGNATURE"
+            | "LC_SYMTAB"
+            | "LC_DYSYMTAB"
+            | "LC_DYLD_INFO"
+            | "LC_DYLD_INFO_ONLY"
+            | "LC_DYLD_EXPORTS_TRIE"
+            | "LC_DYLD_CHAINED_FIXUPS"
+            | "LC_FUNCTION_STARTS"
+            | "LC_DATA_IN_CODE"
+            | "LC_SEGMENT_SPLIT_INFO"
+            | "LC_DYLIB_CODE_SIGN_DRS"
+            | "LC_LINKER_OPTIMIZATION_HINT"
+            | "LC_ATOM_INFO"
+            | "LC_FUNCTION_VARIANTS"
+            | "LC_FUNCTION_VARIANT_FIXUPS"
     )
 }
 
@@ -450,10 +468,8 @@ fn diff_exports(
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
 ) {
-    let old_map: BTreeMap<&str, &ExportSnapshot> =
-        old.iter().map(|e| (e.name.as_str(), e)).collect();
-    let new_map: BTreeMap<&str, &ExportSnapshot> =
-        new.iter().map(|e| (e.name.as_str(), e)).collect();
+    let old_map: BTreeMap<&str, &ExportSnapshot> = old.iter().map(|e| (e.name.as_str(), e)).collect();
+    let new_map: BTreeMap<&str, &ExportSnapshot> = new.iter().map(|e| (e.name.as_str(), e)).collect();
 
     for name in old_map.keys() {
         if !new_map.contains_key(name) {
@@ -479,15 +495,15 @@ fn diff_exports(
     // Check for kind or weakness changes on shared exports
     for (name, old_exp) in &old_map {
         if let Some(new_exp) = new_map.get(name) {
-            if old_exp.kind.tag() != new_exp.kind.tag() {
+            if old_exp.kind != new_exp.kind {
                 findings.push(DiffFinding {
                     domain: DiffDomain::Exports,
                     severity: ChangeSeverity::Warning,
                     arch: arch.clone(),
                     message: format!(
-                        "export {name} kind changed: {} -> {}",
-                        old_exp.kind.tag(),
-                        new_exp.kind.tag()
+                        "export {name} changed: {} -> {}",
+                        describe_export_kind(&old_exp.kind),
+                        describe_export_kind(&new_exp.kind)
                     ),
                 });
             }
@@ -512,8 +528,10 @@ fn diff_imports(
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
 ) {
-    let old_names: BTreeSet<&str> = old.iter().map(|i| i.name.as_str()).collect();
-    let new_names: BTreeSet<&str> = new.iter().map(|i| i.name.as_str()).collect();
+    let old_by_name = imports_by_name(old);
+    let new_by_name = imports_by_name(new);
+    let old_names: BTreeSet<&str> = old_by_name.keys().copied().collect();
+    let new_names: BTreeSet<&str> = new_by_name.keys().copied().collect();
 
     for removed in old_names.difference(&new_names) {
         findings.push(DiffFinding {
@@ -532,31 +550,27 @@ fn diff_imports(
         });
     }
 
-    let old_map: BTreeMap<&str, &ImportSnapshot> = old.iter().map(|import| (import.name.as_str(), import)).collect();
-    let new_map: BTreeMap<&str, &ImportSnapshot> = new.iter().map(|import| (import.name.as_str(), import)).collect();
     for name in old_names.intersection(&new_names) {
-        let old_import = old_map.get(name).copied().unwrap();
-        let new_import = new_map.get(name).copied().unwrap();
+        let old_imports = old_by_name.get(name).expect("name present in old");
+        let new_imports = new_by_name.get(name).expect("name present in new");
+        let old_variants: BTreeSet<(i32, bool)> = old_imports
+            .iter()
+            .map(|import| (import.lib_ordinal, import.weak))
+            .collect();
+        let new_variants: BTreeSet<(i32, bool)> = new_imports
+            .iter()
+            .map(|import| (import.lib_ordinal, import.weak))
+            .collect();
 
-        if old_import.lib_ordinal != new_import.lib_ordinal {
+        if old_variants != new_variants {
             findings.push(DiffFinding {
                 domain: DiffDomain::Imports,
                 severity: ChangeSeverity::Warning,
                 arch: arch.clone(),
                 message: format!(
-                    "import {name} library ordinal changed: {} -> {}",
-                    old_import.lib_ordinal, new_import.lib_ordinal
-                ),
-            });
-        }
-        if old_import.weak != new_import.weak {
-            findings.push(DiffFinding {
-                domain: DiffDomain::Imports,
-                severity: ChangeSeverity::Warning,
-                arch: arch.clone(),
-                message: format!(
-                    "import {name} weakness changed: {} -> {}",
-                    old_import.weak, new_import.weak
+                    "import {name} variants changed: {} -> {}",
+                    describe_import_variants(old_imports),
+                    describe_import_variants(new_imports)
                 ),
             });
         }
@@ -650,6 +664,71 @@ fn diff_objc(
     for name in old_classes.intersection(&new_classes) {
         let oc = old.classes.iter().find(|c| c.name == *name).unwrap();
         let nc = new.classes.iter().find(|c| c.name == *name).unwrap();
+        if oc.superclass != nc.superclass {
+            findings.push(DiffFinding {
+                domain: DiffDomain::ObjC,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!(
+                    "ObjC class {name} superclass changed: {} -> {}",
+                    oc.superclass.as_deref().unwrap_or("<none>"),
+                    nc.superclass.as_deref().unwrap_or("<none>")
+                ),
+            });
+        }
+        if oc.is_swift != nc.is_swift {
+            findings.push(DiffFinding {
+                domain: DiffDomain::ObjC,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!("ObjC class {name} Swift marker changed: {} -> {}", oc.is_swift, nc.is_swift),
+            });
+        }
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            oc.properties.iter().map(|value| value.as_str()).collect(),
+            nc.properties.iter().map(|value| value.as_str()).collect(),
+            |value, removed| {
+                format!(
+                    "ObjC class {name} property {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            oc.ivars.iter().map(|value| value.as_str()).collect(),
+            nc.ivars.iter().map(|value| value.as_str()).collect(),
+            |value, removed| {
+                format!(
+                    "ObjC class {name} ivar {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            oc.protocols.iter().map(|value| value.as_str()).collect(),
+            nc.protocols.iter().map(|value| value.as_str()).collect(),
+            |value, removed| {
+                format!(
+                    "ObjC class {name} protocol {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
         diff_objc_methods(
             name,
             '-',
@@ -710,6 +789,21 @@ fn diff_objc(
             .find(|c| c.name == *cat && c.class_name == *cls)
             .unwrap();
         let label = format!("{cat}({cls})");
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            oc.protocols.iter().map(|value| value.as_str()).collect(),
+            nc.protocols.iter().map(|value| value.as_str()).collect(),
+            |value, removed| {
+                format!(
+                    "ObjC category {cat} on {cls} protocol {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
         diff_objc_methods(
             &label,
             '-',
@@ -753,6 +847,27 @@ fn diff_objc(
     for name in old_protos.intersection(&new_protos) {
         let op = old.protocols.iter().find(|p| p.name == *name).unwrap();
         let np = new.protocols.iter().find(|p| p.name == *name).unwrap();
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            op.adopted_protocols
+                .iter()
+                .map(|value| value.as_str())
+                .collect(),
+            np.adopted_protocols
+                .iter()
+                .map(|value| value.as_str())
+                .collect(),
+            |value, removed| {
+                format!(
+                    "protocol {name}: adopted protocol {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
         diff_protocol_selectors(
             name,
             "required-",
@@ -1025,6 +1140,46 @@ fn describe_load_command(cmd: &LoadCommandFingerprint) -> String {
     }
 }
 
+fn describe_export_kind(kind: &ExportKindSnapshot) -> String {
+    match kind {
+        ExportKindSnapshot::Regular { address } => format!("regular@{address:#x}"),
+        ExportKindSnapshot::ThreadLocal { address } => format!("thread-local@{address:#x}"),
+        ExportKindSnapshot::Absolute { address } => format!("absolute@{address:#x}"),
+        ExportKindSnapshot::Reexport { ordinal, name } => {
+            format!("reexport ordinal={ordinal} name={}", name.as_deref().unwrap_or("<none>"))
+        }
+        ExportKindSnapshot::StubAndResolver {
+            stub_offset,
+            resolver_offset,
+        } => format!(
+            "stub-and-resolver stub={stub_offset:#x} resolver={resolver_offset:#x}"
+        ),
+    }
+}
+
+fn imports_by_name<'a>(imports: &'a [ImportSnapshot]) -> BTreeMap<&'a str, Vec<&'a ImportSnapshot>> {
+    let mut map: BTreeMap<&str, Vec<&ImportSnapshot>> = BTreeMap::new();
+    for import in imports {
+        map.entry(import.name.as_str()).or_default().push(import);
+    }
+    for variants in map.values_mut() {
+        variants.sort_by(|left, right| {
+            left.lib_ordinal
+                .cmp(&right.lib_ordinal)
+                .then(left.weak.cmp(&right.weak))
+        });
+    }
+    map
+}
+
+fn describe_import_variants(imports: &[&ImportSnapshot]) -> String {
+    imports
+        .iter()
+        .map(|import| format!("ordinal={} weak={}", import.lib_ordinal, import.weak))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn diff_counts<T>(baseline: &BTreeMap<T, usize>, candidate: &BTreeMap<T, usize>) -> Vec<(T, usize)>
 where
     T: Clone + Ord,
@@ -1066,6 +1221,36 @@ fn format_count_suffix(count: usize) -> String {
         format!(" ({count} occurrences)")
     } else {
         String::new()
+    }
+}
+
+fn diff_string_set<F>(
+    domain: DiffDomain,
+    add_severity: ChangeSeverity,
+    remove_severity: ChangeSeverity,
+    arch: &Option<String>,
+    findings: &mut Vec<DiffFinding>,
+    old: BTreeSet<&str>,
+    new: BTreeSet<&str>,
+    mut message: F,
+) where
+    F: FnMut(&str, bool) -> String,
+{
+    for value in old.difference(&new) {
+        findings.push(DiffFinding {
+            domain,
+            severity: remove_severity,
+            arch: arch.clone(),
+            message: message(value, true),
+        });
+    }
+    for value in new.difference(&old) {
+        findings.push(DiffFinding {
+            domain,
+            severity: add_severity,
+            arch: arch.clone(),
+            message: message(value, false),
+        });
     }
 }
 

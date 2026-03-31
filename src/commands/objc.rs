@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use macho::model::mach::MachFile;
+use macho::inspect::ImageInspector;
 use macho::objc::graph::{MethodKind, ObjCGraph};
-use macho::objc::{self, render};
+use macho::objc::render;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use crate::commands::common::for_each_selected_mach;
@@ -48,6 +49,9 @@ enum ObjCAction {
         /// Filter to a specific selector name
         #[arg(long)]
         name: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
     /// Show cross-references between ObjC methods and symbols
     Xrefs {
@@ -57,6 +61,9 @@ enum ObjCAction {
         /// Filter to a specific class
         #[arg(long)]
         class: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -68,12 +75,18 @@ pub fn run(args: ObjCArgs) -> Result<()> {
             json,
             class,
         }) => run_graph(&path, arch.as_deref(), json, class.as_deref()),
-        Some(ObjCAction::Selectors { path, arch, name }) => {
-            run_selectors(&path, arch.as_deref(), name.as_deref())
-        }
-        Some(ObjCAction::Xrefs { path, arch, class }) => {
-            run_xrefs(&path, arch.as_deref(), class.as_deref())
-        }
+        Some(ObjCAction::Selectors {
+            path,
+            arch,
+            name,
+            json,
+        }) => run_selectors(&path, arch.as_deref(), name.as_deref(), json),
+        Some(ObjCAction::Xrefs {
+            path,
+            arch,
+            class,
+            json,
+        }) => run_xrefs(&path, arch.as_deref(), class.as_deref(), json),
         None => {
             let path = args
                 .path
@@ -81,6 +94,16 @@ pub fn run(args: ObjCArgs) -> Result<()> {
             run_list(&path, &args.arch, args.headers, args.class.as_deref())
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ObjCXref {
+    class_name: String,
+    selector: String,
+    kind: MethodKind,
+    origin: macho::objc::graph::MethodOrigin,
+    imp: u64,
+    imp_symbol: String,
 }
 
 fn run_list(
@@ -99,10 +122,15 @@ fn run_list(
         &container,
         arch_filter.as_deref(),
         |mach, arch_name, show_header| {
+            let inspector = ImageInspector::new(mach);
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_objc(mach, headers, class_filter);
+            if headers {
+                print_objc_headers(&inspector, class_filter);
+            } else {
+                print_objc_summary(&inspector, class_filter);
+            }
             if show_header {
                 println!();
             }
@@ -122,11 +150,14 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
     if json {
         let mut result = serde_json::Map::new();
         for_each_selected_mach(&container, arch, |mach, arch_name, _| {
-            let metadata = match objc::parse_objc_metadata(mach) {
-                Ok(m) => m,
-                Err(_) => return Ok(()),
+            let inspector = ImageInspector::new(mach);
+            let graph = match inspector.objc_graph() {
+                Ok(graph) => graph,
+                Err(_) => {
+                    result.insert(arch_name.to_string(), serde_json::Value::Null);
+                    return Ok(());
+                }
             };
-            let graph = ObjCGraph::build_from_mach(&metadata, mach);
             let val = if let Some(cls) = class {
                 graph
                     .class(cls)
@@ -147,11 +178,12 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
         }
     } else {
         for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
+            let inspector = ImageInspector::new(mach);
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            let metadata = match objc::parse_objc_metadata(mach) {
-                Ok(m) => m,
+            let graph = match inspector.objc_graph() {
+                Ok(graph) => graph,
                 Err(e) => {
                     println!("[{arch_name}] No ObjC metadata: {e}");
                     if show_header {
@@ -160,7 +192,6 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
                     return Ok(());
                 }
             };
-            let graph = ObjCGraph::build_from_mach(&metadata, mach);
 
             if let Some(cls) = class {
                 if let Some(node) = graph.class(cls) {
@@ -239,19 +270,55 @@ fn print_class_node(node: &macho::objc::graph::ClassNode, graph: &ObjCGraph) {
     }
 }
 
-fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>) -> Result<()> {
+fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool) -> Result<()> {
     let file =
         std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
+    if json {
+        let mut result = serde_json::Map::new();
+        for_each_selected_mach(&container, arch, |mach, arch_name, _| {
+            let inspector = ImageInspector::new(mach);
+            let graph = match inspector.objc_graph() {
+                Ok(graph) => graph,
+                Err(_) => {
+                    result.insert(arch_name.to_string(), serde_json::Value::Null);
+                    return Ok(());
+                }
+            };
+
+            let value = if let Some(sel_name) = name {
+                serde_json::json!({
+                    "selector": sel_name,
+                    "owners": graph.implementations_of(sel_name, MethodKind::Instance)
+                        .into_iter()
+                        .chain(graph.implementations_of(sel_name, MethodKind::Class))
+                        .collect::<Vec<_>>(),
+                })
+            } else {
+                serde_json::to_value(&graph.selectors)?
+            };
+            result.insert(arch_name.to_string(), value);
+            Ok(())
+        })?;
+        if result.len() == 1 {
+            let (_, val) = result.into_iter().next().unwrap();
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        return Ok(());
+    }
+
     for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
+        let inspector = ImageInspector::new(mach);
         if show_header {
             println!("=== {arch_name} ===");
         }
-        let metadata = match objc::parse_objc_metadata(mach) {
-            Ok(m) => m,
+        let graph = match inspector.objc_graph() {
+            Ok(graph) => graph,
             Err(e) => {
                 println!("[{arch_name}] No ObjC metadata: {e}");
                 if show_header {
@@ -260,7 +327,6 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>) -> Result<
                 return Ok(());
             }
         };
-        let graph = ObjCGraph::build_from_mach(&metadata, mach);
 
         if let Some(sel_name) = name {
             let owners = graph.selector_owners(sel_name);
@@ -299,8 +365,8 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>) -> Result<
     Ok(())
 }
 
-fn print_objc(mach: &MachFile<'_>, headers: bool, class_filter: Option<&str>) {
-    let metadata = match objc::parse_objc_metadata(mach) {
+fn print_objc_headers(inspector: &ImageInspector<'_>, class_filter: Option<&str>) {
+    let metadata = match inspector.objc_metadata() {
         Ok(m) => m,
         Err(e) => {
             println!("No ObjC metadata: {e}");
@@ -316,144 +382,179 @@ fn print_objc(mach: &MachFile<'_>, headers: bool, class_filter: Option<&str>) {
         return;
     }
 
-    if headers {
-        for class in &metadata.classes {
-            if let Some(filter) = class_filter {
-                if class.name != filter {
-                    continue;
-                }
-            }
-            println!("{}", render::render_class_header(class));
-        }
-        // When filtering by class, only show categories/protocols for that class
-        for cat in &metadata.categories {
-            if let Some(filter) = class_filter {
-                if cat.class_name != filter {
-                    continue;
-                }
-            }
-            println!("{}", render::render_category_header(cat));
-        }
-        if class_filter.is_none() {
-            for proto in &metadata.protocols {
-                println!("{}", render::render_protocol_header(proto));
+    for class in &metadata.classes {
+        if let Some(filter) = class_filter {
+            if class.name != filter {
+                continue;
             }
         }
-    } else {
-        let classes: Vec<_> = metadata
-            .classes
-            .iter()
-            .filter(|c| class_filter.is_none_or(|f| c.name == f))
-            .collect();
+        println!("{}", render::render_class_header(class));
+    }
+    // When filtering by class, only show categories/protocols for that class
+    for cat in &metadata.categories {
+        if let Some(filter) = class_filter {
+            if cat.class_name != filter {
+                continue;
+            }
+        }
+        println!("{}", render::render_category_header(cat));
+    }
 
-        println!("Classes ({}):", classes.len());
-        for class in &classes {
-            let super_str = class.superclass_name.as_deref().unwrap_or("?");
-            let swift_str = if class.is_swift { " [swift]" } else { "" };
-            println!(
-                "  {} : {} ({} methods, {} ivars, {} props){swift_str}",
-                class.name,
-                super_str,
-                class.instance_methods.len() + class.class_methods.len(),
-                class.ivars.len(),
-                class.properties.len(),
-            );
-        }
-
-        let categories: Vec<_> = metadata
-            .categories
-            .iter()
-            .filter(|c| class_filter.is_none_or(|f| c.class_name == f))
-            .collect();
-
-        if !categories.is_empty() {
-            println!("\nCategories ({}):", categories.len());
-            for cat in &categories {
-                println!(
-                    "  {} ({}) — {} methods",
-                    cat.class_name,
-                    cat.name,
-                    cat.instance_methods.len() + cat.class_methods.len(),
-                );
-            }
-        }
-
-        if class_filter.is_none() && !metadata.protocols.is_empty() {
-            println!("\nProtocols ({}):", metadata.protocols.len());
-            for proto in &metadata.protocols {
-                println!(
-                    "  {} — {} methods",
-                    proto.name,
-                    proto.instance_methods.len()
-                        + proto.class_methods.len()
-                        + proto.optional_instance_methods.len()
-                        + proto.optional_class_methods.len(),
-                );
-            }
+    if class_filter.is_none() {
+        for proto in &metadata.protocols {
+            println!("{}", render::render_protocol_header(proto));
         }
     }
 }
 
-fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>) -> Result<()> {
+fn print_objc_summary(inspector: &ImageInspector<'_>, class_filter: Option<&str>) {
+    let graph = match inspector.objc_graph() {
+        Ok(graph) => graph,
+        Err(e) => {
+            println!("No ObjC metadata: {e}");
+            return;
+        }
+    };
+
+    let classes: Vec<_> = graph
+        .classes
+        .values()
+        .filter(|c| class_filter.is_none_or(|f| c.name == f))
+        .collect();
+
+    println!("Classes ({}):", classes.len());
+    for class in &classes {
+        let super_str = class.superclass.as_deref().unwrap_or("?");
+        let swift_str = if class.is_swift { " [swift]" } else { "" };
+        let categories = if class.categories.is_empty() {
+            String::new()
+        } else {
+            format!(" +{} categories", class.categories.len())
+        };
+        println!(
+            "  {} : {} ({} effective methods, {} ivars, {} props){categories}{swift_str}",
+            class.name,
+            super_str,
+            class.effective_instance_methods.len() + class.effective_class_methods.len(),
+            class.ivars.len(),
+            class.properties.len(),
+        );
+    }
+
+    if class_filter.is_none() && !graph.protocols.is_empty() {
+        println!("\nProtocols ({}):", graph.protocols.len());
+        for proto in graph.protocols.values() {
+            println!(
+                "  {} — {} methods, {} conforming classes",
+                proto.name,
+                proto.instance_methods.len()
+                    + proto.class_methods.len()
+                    + proto.optional_instance_methods.len()
+                    + proto.optional_class_methods.len(),
+                proto.conforming_classes.len(),
+            );
+        }
+    }
+}
+
+fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>, json: bool) -> Result<()> {
     let file =
         std::fs::File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
+    if json {
+        let mut result = serde_json::Map::new();
+        for_each_selected_mach(&container, arch, |mach, arch_name, _| {
+            let inspector = ImageInspector::new(mach);
+            let graph = match inspector.objc_graph() {
+                Ok(graph) => graph,
+                Err(_) => {
+                    result.insert(arch_name.to_string(), serde_json::Value::Null);
+                    return Ok(());
+                }
+            };
+            result.insert(
+                arch_name.to_string(),
+                serde_json::to_value(collect_xrefs(graph, class))?,
+            );
+            Ok(())
+        })?;
+        if result.len() == 1 {
+            let (_, val) = result.into_iter().next().unwrap();
+            println!("{}", serde_json::to_string_pretty(&val)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        return Ok(());
+    }
+
     for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
+        let inspector = ImageInspector::new(mach);
         if show_header {
             println!("=== {arch_name} ===");
         }
-        let metadata = match objc::parse_objc_metadata(mach) {
-            Ok(m) => m,
+        let graph = match inspector.objc_graph() {
+            Ok(graph) => graph,
             Err(e) => {
                 println!("[{arch_name}] No ObjC metadata: {e}");
                 return Ok(());
             }
         };
-        let graph = ObjCGraph::build_from_mach(&metadata, mach);
-
-        let classes: Vec<_> = if let Some(cls) = class {
-            graph.class(cls).into_iter().collect()
-        } else {
-            graph.classes.values().collect()
-        };
-
-        let mut xref_count = 0;
-        for node in &classes {
-            for m in &node.effective_instance_methods {
-                if let Some(ref sym) = m.imp_symbol {
-                    println!(
-                        "  {}[{} {}] {:#x} -> {}",
-                        MethodKind::Instance.prefix(),
-                        node.name,
-                        m.selector,
-                        m.imp,
-                        sym
-                    );
-                    xref_count += 1;
-                }
-            }
-            for m in &node.effective_class_methods {
-                if let Some(ref sym) = m.imp_symbol {
-                    println!(
-                        "  {}[{} {}] {:#x} -> {}",
-                        MethodKind::Class.prefix(),
-                        node.name,
-                        m.selector,
-                        m.imp,
-                        sym
-                    );
-                    xref_count += 1;
-                }
-            }
+        let xrefs = collect_xrefs(graph, class);
+        for xref in &xrefs {
+            println!(
+                "  {}[{} {}] {:#x} -> {}",
+                xref.kind.prefix(),
+                xref.class_name,
+                xref.selector,
+                xref.imp,
+                xref.imp_symbol
+            );
         }
-        println!("({xref_count} cross-references)");
+        println!("({} cross-references)", xrefs.len());
         if show_header {
             println!();
         }
         Ok(())
     })?;
     Ok(())
+}
+
+fn collect_xrefs(graph: &ObjCGraph, class: Option<&str>) -> Vec<ObjCXref> {
+    let classes: Vec<_> = if let Some(cls) = class {
+        graph.class(cls).into_iter().collect()
+    } else {
+        graph.classes.values().collect()
+    };
+
+    let mut xrefs = Vec::new();
+    for node in &classes {
+        for method in &node.effective_instance_methods {
+            if let Some(sym) = &method.imp_symbol {
+                xrefs.push(ObjCXref {
+                    class_name: node.name.clone(),
+                    selector: method.selector.clone(),
+                    kind: MethodKind::Instance,
+                    origin: method.origin.clone(),
+                    imp: method.imp,
+                    imp_symbol: sym.clone(),
+                });
+            }
+        }
+        for method in &node.effective_class_methods {
+            if let Some(sym) = &method.imp_symbol {
+                xrefs.push(ObjCXref {
+                    class_name: node.name.clone(),
+                    selector: method.selector.clone(),
+                    kind: MethodKind::Class,
+                    origin: method.origin.clone(),
+                    imp: method.imp,
+                    imp_symbol: sym.clone(),
+                });
+            }
+        }
+    }
+    xrefs
 }

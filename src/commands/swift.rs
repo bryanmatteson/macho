@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use macho::model::mach::MachFile;
+use macho::inspect::ImageInspector;
 use macho::swift::SwiftTypeIndex;
 use std::path::PathBuf;
 
@@ -35,14 +35,20 @@ pub fn run(args: SwiftArgs) -> Result<()> {
         // Collect all slices into a single JSON object keyed by arch
         let mut result = serde_json::Map::new();
         for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let index = SwiftTypeIndex::build(mach);
+            let inspector = ImageInspector::new(mach);
+            let index = inspector.swift_types()?;
             let value = if let Some(kind) = kind_filter {
                 let filtered = SwiftTypeIndex {
-                    types: index.types.into_iter().filter(|t| t.kind == kind).collect(),
+                    types: index
+                        .types
+                        .iter()
+                        .filter(|t| t.kind == kind)
+                        .cloned()
+                        .collect(),
                 };
                 serde_json::to_value(&filtered)?
             } else {
-                serde_json::to_value(&index)?
+                serde_json::to_value(index)?
             };
             result.insert(arch_name.to_string(), value);
             Ok(())
@@ -59,10 +65,12 @@ pub fn run(args: SwiftArgs) -> Result<()> {
             &container,
             args.arch.as_deref(),
             |mach, arch_name, show_header| {
+                let inspector = ImageInspector::new(mach);
+                let index = inspector.swift_types()?;
                 if show_header {
                     println!("=== {arch_name} ===");
                 }
-                print_swift_text(mach, kind_filter);
+                print_swift_text(index, kind_filter);
                 if show_header {
                     println!();
                 }
@@ -86,9 +94,10 @@ fn parse_kind_filter(kind: &str) -> Result<macho::swift::types::SwiftTypeKind> {
     }
 }
 
-fn print_swift_text(mach: &MachFile<'_>, kind_filter: Option<macho::swift::types::SwiftTypeKind>) {
-    let index = SwiftTypeIndex::build(mach);
-
+fn print_swift_text(
+    index: &SwiftTypeIndex,
+    kind_filter: Option<macho::swift::types::SwiftTypeKind>,
+) {
     if index.types.is_empty() {
         println!("No Swift types discovered.");
         return;

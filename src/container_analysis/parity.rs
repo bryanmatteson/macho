@@ -4,33 +4,94 @@ use serde::Serialize;
 
 use crate::analysis::snapshot::SliceSnapshot;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParityDomain {
+    Exports,
+    Imports,
+    Segments,
+    Codesign,
+    Objc,
+}
+
+impl std::fmt::Display for ParityDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Exports => write!(f, "exports"),
+            Self::Imports => write!(f, "imports"),
+            Self::Segments => write!(f, "segments"),
+            Self::Codesign => write!(f, "codesign"),
+            Self::Objc => write!(f, "objc"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ArchParityReport {
     pub arches: Vec<String>,
+    pub domains: Vec<ParityDomain>,
     pub divergences: Vec<ParityDivergence>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParityDivergence {
-    pub domain: String,
+    pub domain: ParityDomain,
     pub description: String,
     pub per_arch: BTreeMap<String, String>,
 }
 
 pub fn compute_parity(slices: &[SliceSnapshot]) -> ArchParityReport {
+    compute_parity_with_domains(slices, all_domains())
+}
+
+pub fn check_parity(slices: &[SliceSnapshot], domains: &[ParityDomain]) -> ArchParityReport {
+    compute_parity_with_domains(slices, domains)
+}
+
+pub fn compute_parity_with_domains(
+    slices: &[SliceSnapshot],
+    domains: &[ParityDomain],
+) -> ArchParityReport {
     let arches: Vec<String> = slices.iter().map(|s| s.arch.clone()).collect();
+    let domains = normalized_domains(domains);
     let mut divergences = Vec::new();
 
-    check_export_parity(slices, &mut divergences);
-    check_import_parity(slices, &mut divergences);
-    check_segment_parity(slices, &mut divergences);
-    check_codesign_parity(slices, &mut divergences);
-    check_objc_class_parity(slices, &mut divergences);
+    for domain in &domains {
+        match domain {
+            ParityDomain::Exports => check_export_parity(slices, &mut divergences),
+            ParityDomain::Imports => check_import_parity(slices, &mut divergences),
+            ParityDomain::Segments => check_segment_parity(slices, &mut divergences),
+            ParityDomain::Codesign => check_codesign_parity(slices, &mut divergences),
+            ParityDomain::Objc => check_objc_class_parity(slices, &mut divergences),
+        }
+    }
 
     ArchParityReport {
         arches,
+        domains,
         divergences,
     }
+}
+
+pub fn all_domains() -> &'static [ParityDomain] {
+    &[
+        ParityDomain::Exports,
+        ParityDomain::Imports,
+        ParityDomain::Segments,
+        ParityDomain::Codesign,
+        ParityDomain::Objc,
+    ]
+}
+
+fn normalized_domains(domains: &[ParityDomain]) -> Vec<ParityDomain> {
+    let mut normalized = if domains.is_empty() {
+        all_domains().to_vec()
+    } else {
+        domains.to_vec()
+    };
+    normalized.sort();
+    normalized.dedup();
+    normalized
 }
 
 fn check_export_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence>) {
@@ -62,7 +123,7 @@ fn check_export_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence
                 );
             }
             divs.push(ParityDivergence {
-                domain: "exports".into(),
+                domain: ParityDomain::Exports,
                 description: format!("export {name} not present in all arches"),
                 per_arch,
             });
@@ -99,7 +160,7 @@ fn check_import_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergence
                 );
             }
             divs.push(ParityDivergence {
-                domain: "imports".into(),
+                domain: ParityDomain::Imports,
                 description: format!("import {name} not present in all arches"),
                 per_arch,
             });
@@ -130,7 +191,7 @@ fn check_segment_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergenc
                 );
             }
             divs.push(ParityDivergence {
-                domain: "segments".into(),
+                domain: ParityDomain::Segments,
                 description: format!("segment {name} not present in all arches"),
                 per_arch,
             });
@@ -162,7 +223,7 @@ fn check_segment_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergenc
                     }
                 }
                 divs.push(ParityDivergence {
-                    domain: "segments".into(),
+                    domain: ParityDomain::Segments,
                     description: format!("segment {name} has different protections across arches"),
                     per_arch,
                 });
@@ -186,7 +247,7 @@ fn check_codesign_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDivergen
             );
         }
         divs.push(ParityDivergence {
-            domain: "codesign".into(),
+            domain: ParityDomain::Codesign,
             description: "signing status differs across arches".into(),
             per_arch,
         });
@@ -216,7 +277,7 @@ fn check_objc_class_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDiverg
                 );
             }
             divs.push(ParityDivergence {
-                domain: "objc".into(),
+                domain: ParityDomain::Objc,
                 description: format!("ObjC class {name} not present in all arches"),
                 per_arch,
             });

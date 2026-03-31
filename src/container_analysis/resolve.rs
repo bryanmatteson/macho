@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use crate::analysis::snapshot::ContainerSnapshot;
+use crate::analysis::snapshot::ExportSnapshot;
+use crate::analysis::snapshot::ImportSnapshot;
 use crate::analysis::snapshot::SliceSnapshot;
 use crate::diff::DiffReport;
 use crate::diff::diff_slice_snapshots;
@@ -90,15 +92,11 @@ pub fn slice_by_arch<'a>(snap: &'a ContainerSnapshot, arch: &str) -> Option<&'a 
 }
 
 pub fn common_exports(snap: &ContainerSnapshot) -> Vec<String> {
-    common_names_from_iter(snap, |slice| {
-        slice.exports.iter().map(|export| export.name.as_str())
-    })
+    common_export_names(snap)
 }
 
 pub fn common_imports(snap: &ContainerSnapshot) -> Vec<String> {
-    common_names_from_iter(snap, |slice| {
-        slice.imports.iter().map(|import| import.name.as_str())
-    })
+    common_import_names(snap)
 }
 
 pub fn divergent_exports(snap: &ContainerSnapshot) -> Vec<ExportOwnership> {
@@ -116,30 +114,32 @@ pub fn diff_slices(snap: &ContainerSnapshot, old_arch: &str, new_arch: &str) -> 
     Some(diff_slice_snapshots(old, new))
 }
 
-fn common_names_from_iter<'a, F, I>(
-    snap: &'a ContainerSnapshot,
-    mut names_for_slice: F,
-) -> Vec<String>
-where
-    F: FnMut(&'a SliceSnapshot) -> I,
-    I: IntoIterator<Item = &'a str>,
-{
+fn common_export_names(snap: &ContainerSnapshot) -> Vec<String> {
     let mut iter = snap.slices.iter();
     let Some(first) = iter.next() else {
         return Vec::new();
     };
 
-    let mut common: BTreeSet<String> = names_for_slice(first)
-        .into_iter()
-        .map(ToString::to_string)
-        .collect();
+    let mut common: BTreeSet<ExportSnapshot> = first.exports.iter().cloned().collect();
     for slice in iter {
-        let names: BTreeSet<String> = names_for_slice(slice)
-            .into_iter()
-            .map(ToString::to_string)
-            .collect();
-        common = common.intersection(&names).cloned().collect();
+        let exports: BTreeSet<ExportSnapshot> = slice.exports.iter().cloned().collect();
+        common = common.intersection(&exports).cloned().collect();
     }
 
-    common.into_iter().collect()
+    common.into_iter().map(|export| export.name).collect()
+}
+
+fn common_import_names(snap: &ContainerSnapshot) -> Vec<String> {
+    let mut iter = snap.slices.iter();
+    let Some(first) = iter.next() else {
+        return Vec::new();
+    };
+
+    let mut common: BTreeSet<ImportSnapshot> = first.imports.iter().cloned().collect();
+    for slice in iter {
+        let imports: BTreeSet<ImportSnapshot> = slice.imports.iter().cloned().collect();
+        common = common.intersection(&imports).cloned().collect();
+    }
+
+    common.into_iter().map(|import| import.name).collect()
 }

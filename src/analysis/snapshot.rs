@@ -14,10 +14,11 @@ impl ContainerSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum ContainerFormat {
     Thin,
     Fat,
+    Fileset,
 }
 
 impl std::fmt::Display for ContainerFormat {
@@ -25,6 +26,7 @@ impl std::fmt::Display for ContainerFormat {
         match self {
             Self::Thin => write!(f, "Thin"),
             Self::Fat => write!(f, "Fat"),
+            Self::Fileset => write!(f, "Fileset"),
         }
     }
 }
@@ -117,7 +119,7 @@ pub struct SymbolSnapshot {
 
 // -- Exports --
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExportSnapshot {
     pub name: String,
     pub kind: ExportKindSnapshot,
@@ -159,7 +161,7 @@ impl ExportKindSnapshot {
 
 // -- Imports --
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImportSnapshot {
     pub name: String,
     pub lib_ordinal: i32,

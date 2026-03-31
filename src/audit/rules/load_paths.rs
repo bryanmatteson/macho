@@ -76,7 +76,7 @@ impl AuditRule for AbsoluteDylibPath {
 
     fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
         for lc in &slice.load_commands {
-            if lc.name != "LC_LOAD_DYLIB" && lc.name != "LC_LOAD_WEAK_DYLIB" {
+            if !is_dylib_path_command(&lc.name) {
                 continue;
             }
             let path = &lc.summary;
@@ -110,7 +110,7 @@ impl AuditRule for WritableLocationDylib {
         let writable_prefixes = ["/tmp", "/var/tmp", "/Users/"];
 
         for lc in &slice.load_commands {
-            if !lc.name.contains("DYLIB") && lc.name != "LC_RPATH" {
+            if !is_dylib_path_command(&lc.name) && lc.name != "LC_RPATH" {
                 continue;
             }
             let path = &lc.summary;
@@ -133,4 +133,16 @@ impl AuditRule for WritableLocationDylib {
             }
         }
     }
+}
+
+fn is_dylib_path_command(name: &str) -> bool {
+    matches!(
+        name,
+        "LC_ID_DYLIB"
+            | "LC_LOAD_DYLIB"
+            | "LC_LOAD_WEAK_DYLIB"
+            | "LC_REEXPORT_DYLIB"
+            | "LC_LAZY_LOAD_DYLIB"
+            | "LC_LOAD_UPWARD_DYLIB"
+    )
 }

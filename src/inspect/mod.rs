@@ -16,6 +16,7 @@ use crate::model::symbol::SymbolTable;
 use crate::objc::graph::ObjCGraph;
 use crate::objc::{ObjCMetadata, parse_objc_metadata};
 use crate::parse::parse_symbol_table;
+use crate::swift::SwiftTypeIndex;
 
 pub struct ImageInspector<'data> {
     mach: &'data MachFile<'data>,
@@ -26,6 +27,7 @@ pub struct ImageInspector<'data> {
     objc: OnceLock<Result<ObjCMetadata>>,
     codesign: OnceLock<Result<CodeSignature<'data>>>,
     objc_graph: OnceLock<Result<ObjCGraph>>,
+    swift_types: OnceLock<Result<SwiftTypeIndex>>,
 }
 
 impl<'data> ImageInspector<'data> {
@@ -40,6 +42,7 @@ impl<'data> ImageInspector<'data> {
             objc: OnceLock::new(),
             codesign: OnceLock::new(),
             objc_graph: OnceLock::new(),
+            swift_types: OnceLock::new(),
         }
     }
 
@@ -96,6 +99,13 @@ impl<'data> ImageInspector<'data> {
                 let meta = self.objc_metadata()?;
                 Ok(ObjCGraph::build_from_mach(meta, self.mach))
             })
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn swift_types(&self) -> Result<&SwiftTypeIndex> {
+        self.swift_types
+            .get_or_init(|| Ok(SwiftTypeIndex::build(self.mach)))
             .as_ref()
             .map_err(|e| e.clone())
     }

@@ -187,6 +187,7 @@ impl ObjCGraph {
         for cat in &metadata.categories {
             if let Some(node) = classes.get_mut(&cat.class_name) {
                 node.categories.push(cat.name.clone());
+                node.protocols.extend(cat.protocols.iter().cloned());
                 fold_category_methods(node, cat, &mut selectors, addr_to_sym);
             }
         }
@@ -407,6 +408,9 @@ fn finalize_class_node(node: &mut ClassNode) {
 fn build_effective_methods(entries: &[MethodEntry]) -> Vec<MethodEntry> {
     let mut map = BTreeMap::new();
     for entry in entries {
+        // Static category folding is intentionally deterministic: class methods
+        // are inserted first, then category methods are appended in metadata
+        // traversal order, and the last definition for a selector wins.
         map.insert(entry.selector.clone(), entry.clone());
     }
     map.into_values().collect()

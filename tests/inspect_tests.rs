@@ -439,6 +439,27 @@ fn inspector_objc_graph_reuses_cached_metadata() {
 }
 
 #[test]
+fn inspector_swift_types_are_cached_and_match_direct_build() {
+    let data = std::fs::read("/usr/bin/plutil").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    let first = inspector.swift_types().expect("swift types");
+    let second = inspector.swift_types().expect("swift types from cache");
+    assert!(
+        std::ptr::eq(first, second),
+        "swift type index should come from the inspector cache"
+    );
+
+    let direct = macho::swift::SwiftTypeIndex::build(mach);
+    assert_eq!(
+        first.types.iter().map(|ty| &ty.name).collect::<Vec<_>>(),
+        direct.types.iter().map(|ty| &ty.name).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn inspector_executable_has_no_install_name() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");

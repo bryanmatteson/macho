@@ -4,6 +4,7 @@ use macho::edit::transaction::{PatchOp, PatchTransaction};
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::owned::OwnedFatBinary;
+use macho::validate;
 use std::fs::Permissions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -216,7 +217,8 @@ fn run_patch(
 
             let selected = select_fat_arch_indices(fat, arch_filter)?;
             let prepared: Vec<(usize, String, PreparedPatch)> = selected
-                .into_iter()
+                .iter()
+                .copied()
                 .map(|index| {
                     let arch = &fat.arches()[index];
                     Ok((index, arch.spec.name(), prepare_patch(&arch.mach, &ops)?))
@@ -257,8 +259,23 @@ fn run_patch(
             let reparsed = macho::parse(&rebuilt).with_context(|| {
                 format!("failed to re-parse rebuilt fat binary {}", input.display())
             })?;
-            if !matches!(reparsed, MachContainer::Fat(_)) {
+            let MachContainer::Fat(rebuilt_fat) = reparsed else {
                 anyhow::bail!("rebuilt output is no longer a fat binary");
+            };
+            if !opts.force {
+                let mut errors = Vec::new();
+                for index in &selected {
+                    let arch = &rebuilt_fat.arches()[*index];
+                    errors.extend(validation_errors_for_mach(&arch.mach).into_iter().map(|err| {
+                        format!("{}: {err}", arch.spec.name())
+                    }));
+                }
+                if !errors.is_empty() {
+                    anyhow::bail!(
+                        "rebuilt fat binary has validation errors (use --force to override):\n  {}",
+                        errors.join("\n  ")
+                    );
+                }
             }
             rebuilt
         }
@@ -448,4 +465,12 @@ fn select_fat_arch_indices(
     }
 
     Ok(selected)
+}
+
+fn validation_errors_for_mach(mach: &MachFile<'_>) -> Vec<String> {
+    validate::validate(mach)
+        .into_iter()
+        .filter(|diag| diag.severity == validate::Severity::Error)
+        .map(|diag| format!("{}: {}", diag.code.0, diag.message))
+        .collect()
 }

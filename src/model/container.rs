@@ -1,8 +1,11 @@
 use crate::addr::{FatFileOffset, ThinFileOffset};
 use crate::analysis::snapshot::{ContainerFormat, ContainerSnapshot, SliceSnapshot};
-use crate::container_analysis::parity;
+use crate::container_analysis::parity::{self, ParityDomain};
 use crate::container_analysis::resolve;
-use crate::container_analysis::{ContainerReport, FilesetReport};
+use crate::container_analysis::{
+    ContainerReport, FilesetEntryInspection, FilesetReport, inspect_fileset_entry,
+    inspect_fileset_entry_in_mach,
+};
 use crate::error::{Error, Result};
 use crate::model::fat::{ArchSpec, FatHeader};
 use crate::model::header::{CpuSubtype, CpuType};
@@ -68,12 +71,23 @@ impl<'data> FatBinary<'data> {
     }
 
     pub fn parity_report(&self) -> Option<parity::ArchParityReport> {
+        self.parity_report_with_domains(parity::all_domains())
+    }
+
+    pub fn parity_report_with_domains(
+        &self,
+        domains: &[ParityDomain],
+    ) -> Option<parity::ArchParityReport> {
         let snapshot = self.snapshot();
         if snapshot.slices.len() > 1 {
-            Some(parity::compute_parity(&snapshot.slices))
+            Some(parity::compute_parity_with_domains(&snapshot.slices, domains))
         } else {
             None
         }
+    }
+
+    pub fn check_parity(&self, domains: &[ParityDomain]) -> Option<parity::ArchParityReport> {
+        self.parity_report_with_domains(domains)
     }
 
     pub fn fileset_report(&self) -> Option<FilesetReport> {
@@ -102,6 +116,13 @@ impl<'data> FatBinary<'data> {
 
     pub fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<crate::diff::DiffReport> {
         resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
+    }
+
+    pub fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
+        self.arches
+            .iter()
+            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, entry_id))
+            .collect()
     }
 
     /// Find an arch by CPU type only (returns first match).
@@ -170,10 +191,21 @@ impl<'data> MachContainer<'data> {
     }
 
     pub fn parity_report(&self) -> Option<parity::ArchParityReport> {
+        self.parity_report_with_domains(parity::all_domains())
+    }
+
+    pub fn parity_report_with_domains(
+        &self,
+        domains: &[ParityDomain],
+    ) -> Option<parity::ArchParityReport> {
         match self {
             Self::Thin(_) => None,
-            Self::Fat(fat) => fat.parity_report(),
+            Self::Fat(fat) => fat.parity_report_with_domains(domains),
         }
+    }
+
+    pub fn check_parity(&self, domains: &[ParityDomain]) -> Option<parity::ArchParityReport> {
+        self.parity_report_with_domains(domains)
     }
 
     pub fn fileset_report(&self) -> Option<FilesetReport> {
@@ -202,6 +234,10 @@ impl<'data> MachContainer<'data> {
 
     pub fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<crate::diff::DiffReport> {
         resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
+    }
+
+    pub fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
+        inspect_fileset_entry(self, entry_id)
     }
 
     /// Returns the first (or only) MachFile. Panics only if a fat binary has
