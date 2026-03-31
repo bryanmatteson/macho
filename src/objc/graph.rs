@@ -400,13 +400,17 @@ impl ObjCGraph {
         let mut current = Some(class_name);
         let mut seen = BTreeSet::new();
         let mut methods = BTreeMap::new();
+        let mut saw_class = false;
 
         while let Some(name) = current {
             if !seen.insert(name) {
                 break;
             }
 
-            let node = self.classes.get(name)?;
+            let Some(node) = self.classes.get(name) else {
+                return if saw_class { Some(methods.into_values().collect()) } else { None };
+            };
+            saw_class = true;
             let candidates = match kind {
                 MethodKind::Instance => &node.effective_instance_methods,
                 MethodKind::Class => &node.effective_class_methods,

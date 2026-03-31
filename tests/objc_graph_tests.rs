@@ -316,6 +316,46 @@ fn graph_all_methods_includes_inherited_methods_without_overriding_direct_ones()
 }
 
 #[test]
+fn graph_all_methods_tolerates_unresolved_superclass() {
+    let subclass = ClassNode {
+        name: "Widget".into(),
+        superclass: Some("NSObject".into()),
+        is_swift: false,
+        instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        class_methods: vec![],
+        effective_instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        effective_class_methods: vec![],
+        properties: vec![],
+        ivars: vec![],
+        protocols: vec![],
+        categories: vec![],
+    };
+
+    let graph = ObjCGraph {
+        classes: BTreeMap::from([(subclass.name.clone(), subclass)]),
+        protocols: BTreeMap::<String, ProtocolNode>::new(),
+        selectors: BTreeMap::new(),
+    };
+
+    let methods = graph
+        .all_methods("Widget")
+        .expect("expected methods even when superclass metadata is absent");
+    assert_eq!(methods.instance.len(), 1);
+    assert_eq!(methods.instance[0].selector, "draw");
+    assert!(methods.class.is_empty());
+}
+
+#[test]
 fn graph_method_origin_json_is_tagged_and_machine_readable() {
     let class_json =
         serde_json::to_value(MethodOrigin::Class).expect("serialize class method origin");
