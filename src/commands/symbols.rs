@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use macho::demangle::SymbolDemangler;
 use macho::ext::MachExt;
-use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::symbol::SymbolTable;
 use std::path::PathBuf;
+
+use crate::commands::common::for_each_selected_mach;
 
 #[derive(clap::Args)]
 pub struct SymbolsArgs {
@@ -29,6 +31,10 @@ pub struct SymbolsArgs {
     /// Sort by address
     #[arg(long)]
     sort_address: bool,
+
+    /// Demangle Rust and C++ symbol names when possible
+    #[arg(long)]
+    demangle: bool,
 }
 
 pub fn run(args: SymbolsArgs) -> Result<()> {
@@ -39,28 +45,20 @@ pub fn run(args: SymbolsArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    match &container {
-        MachContainer::Thin(mach) => {
-            print_symbols(mach, &args);
-        }
-        MachContainer::Fat(fat) => {
-            for (i, arch) in fat.arches().iter().enumerate() {
-                let arch_name = arch.spec.name();
-                if let Some(ref filter) = args.arch {
-                    if !arch_name.eq_ignore_ascii_case(filter) {
-                        continue;
-                    }
-                }
-                if fat.arches().len() > 1 {
-                    println!("=== {arch_name} ===");
-                }
-                print_symbols(&arch.mach, &args);
-                if i + 1 < fat.arches().len() {
-                    println!();
-                }
+    for_each_selected_mach(
+        &container,
+        args.arch.as_deref(),
+        |mach, arch_name, show_header| {
+            if show_header {
+                println!("=== {arch_name} ===");
             }
-        }
-    }
+            print_symbols(mach, &args);
+            if show_header {
+                println!();
+            }
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }
@@ -90,6 +88,9 @@ fn print_symbols(mach: &MachFile<'_>, args: &SymbolsArgs) {
     );
 
     let mut symbols: Vec<_> = symtab.symbols().iter().collect();
+    let mut demangler = SymbolDemangler::new(args.demangle);
+
+    demangler.precompute(symbols.iter().map(|sym| sym.name));
 
     if args.sort_address {
         symbols.sort_by_key(|s| s.value);
@@ -121,7 +122,7 @@ fn print_symbols(mach: &MachFile<'_>, args: &SymbolsArgs) {
             sym.sym_type.name(),
             ext_str,
             sym.section_index,
-            sym.name,
+            demangler.format(sym.name),
         );
     }
 

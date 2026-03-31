@@ -1,10 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use macho::constants::VmProtection;
 use macho::model::container::MachContainer;
 use macho::model::load_command::format_uuid;
 use macho::model::mach::MachFile;
 use macho::validate;
 use std::path::PathBuf;
+
+use crate::commands::common::arch_name_for_mach;
 
 #[derive(clap::Args)]
 pub struct InspectArgs {
@@ -33,8 +35,7 @@ pub fn run(args: InspectArgs) -> Result<()> {
             if let Some(ref filter) = args.arch {
                 let arch_name = arch_name_for_mach(mach);
                 if !arch_name.eq_ignore_ascii_case(filter) {
-                    println!("Thin Mach-O binary ({arch_name}): no match for --arch {filter}");
-                    std::process::exit(1);
+                    bail!("no architecture matching '{filter}' found (available: {arch_name})");
                 }
             }
             println!("Thin Mach-O binary ({} bytes)", mmap.len());
@@ -74,26 +75,16 @@ pub fn run(args: InspectArgs) -> Result<()> {
                 if let Some(ref filter) = args.arch {
                     let available: Vec<String> =
                         fat.arches().iter().map(|a| a.spec.name()).collect();
-                    eprintln!(
+                    bail!(
                         "no architecture matching '{filter}' found (available: {})",
                         available.join(", ")
                     );
-                    std::process::exit(1);
                 }
             }
         }
     }
 
     Ok(())
-}
-
-fn arch_name_for_mach(mach: &MachFile<'_>) -> String {
-    use macho::model::fat::ArchSpec;
-    let spec = ArchSpec {
-        cpu_type: mach.header().cpu_type,
-        cpu_subtype: mach.header().cpu_subtype,
-    };
-    spec.name()
 }
 
 fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
@@ -227,22 +218,7 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
 }
 
 fn format_prot(prot: VmProtection) -> String {
-    let r = if prot.contains(VmProtection::READ) {
-        'r'
-    } else {
-        '-'
-    };
-    let w = if prot.contains(VmProtection::WRITE) {
-        'w'
-    } else {
-        '-'
-    };
-    let x = if prot.contains(VmProtection::EXECUTE) {
-        'x'
-    } else {
-        '-'
-    };
-    format!("{r}{w}{x}")
+    prot.rwx_string()
 }
 
 fn format_section_extras(sect: &macho::model::section::Section) -> String {

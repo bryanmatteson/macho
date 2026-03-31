@@ -1,8 +1,16 @@
+pub mod audit;
 pub mod codesign;
+pub mod common;
+pub mod container;
+pub mod diff;
 pub mod exports;
+pub mod fileset;
 pub mod fixups;
 pub mod imports;
 pub mod inspect;
 pub mod objc;
+pub mod patch;
 pub mod relocations;
+pub mod snapshot;
+pub mod swift;
 pub mod symbols;

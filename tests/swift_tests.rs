@@ -1,0 +1,103 @@
+use macho::model::container::MachContainer;
+use macho::swift::SwiftTypeIndex;
+use macho::swift::types::{SwiftTypeKind, SwiftTypeSource};
+
+fn swift_index_for(path: &str) -> SwiftTypeIndex {
+    let data = std::fs::read(path).expect("read");
+    let container = macho::parse(&data).expect("parse");
+    let mach = match &container {
+        MachContainer::Fat(fat) => &fat.arches()[0].mach,
+        MachContainer::Thin(mach) => mach,
+    };
+    SwiftTypeIndex::build(mach)
+}
+
+#[test]
+fn swift_types_found_in_plutil() {
+    let index = swift_index_for("/usr/bin/plutil");
+    assert!(
+        !index.types.is_empty(),
+        "plutil should have Swift types (it's a Swift binary)"
+    );
+}
+
+#[test]
+fn swift_type_names_are_clean() {
+    let index = swift_index_for("/usr/bin/plutil");
+    for t in &index.types {
+        assert!(
+            !t.name.starts_with('('),
+            "type name should not start with '(' (broken extension parsing): '{}'",
+            t.name
+        );
+        assert!(!t.name.is_empty(), "type name should not be empty");
+        assert!(
+            !t.name.contains(' '),
+            "type name should not contain spaces: '{}'",
+            t.name
+        );
+    }
+}
+
+#[test]
+fn swift_type_kind_filter() {
+    let index = swift_index_for("/usr/bin/plutil");
+    let classes = index.classes();
+    let structs = index.structs();
+    let protos = index.protocols();
+    let unknown = index.by_kind(SwiftTypeKind::Unknown);
+
+    // The union of all known kinds plus Unknown must equal the full type list.
+    let total = classes.len() + structs.len() + protos.len() + index.enums().len() + unknown.len();
+    assert_eq!(total, index.types.len());
+}
+
+#[test]
+fn swift_find_by_name() {
+    let index = swift_index_for("/usr/bin/plutil");
+    // Try to find a common Foundation type
+    if let Some(t) = index.find("Foundation.URL") {
+        assert!(
+            t.kind == SwiftTypeKind::Struct || t.kind == SwiftTypeKind::Class,
+            "Foundation.URL should be a struct, got: {:?}",
+            t.kind
+        );
+    }
+}
+
+#[test]
+fn swift_types_sorted() {
+    let index = swift_index_for("/usr/bin/plutil");
+    for window in index.types.windows(2) {
+        assert!(
+            window[0].name <= window[1].name,
+            "types should be sorted: '{}' > '{}'",
+            window[0].name,
+            window[1].name
+        );
+    }
+}
+
+#[test]
+fn swift_empty_for_c_binary() {
+    // /usr/bin/true is a minimal C binary with no Swift
+    let index = swift_index_for("/usr/bin/true");
+    // Might have some due to ObjC-marked classes; but should have no demangled symbols
+    let from_symbols: Vec<_> = index
+        .types
+        .iter()
+        .filter(|t| t.source == SwiftTypeSource::DemangledSymbol)
+        .collect();
+    assert!(
+        from_symbols.is_empty(),
+        "/usr/bin/true should have no Swift demangled symbols"
+    );
+}
+
+#[test]
+fn swift_type_index_serializes() {
+    let index = swift_index_for("/usr/bin/plutil");
+    let json = serde_json::to_string(&index).expect("serialize");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
+    assert!(parsed["types"].is_array());
+}

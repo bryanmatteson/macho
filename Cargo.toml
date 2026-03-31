@@ -7,7 +7,7 @@
     description  = "Mach-O library and CLI"
     homepage     = "https://github.com/bryanmatteson/macho"
     repository   = "https://github.com/bryanmatteson/macho.git"
-    keywords     = ["macho", "binary", "elf", "dylib", "executable", "macos", "ios", "linux"]
+    keywords     = ["macho", "binary", "dylib", "executable", "macos"]
     categories   = ["development-tools::debugging", "development-tools::profiling"]
 
 [lib]
@@ -18,9 +18,13 @@
     path = "src/main.rs"
 
 [dependencies]
-    zerocopy  = { version = "0.8", features = ["derive"] }
-    thiserror = "2"
-    bitflags  = "2"
-    clap      = { version = "4", features = ["derive"] }
-    memmap2   = "0.9"
-    anyhow    = "1"
+    zerocopy       = { version = "0.8", features = ["derive"] }
+    thiserror      = "2"
+    bitflags       = "2"
+    clap           = { version = "4", features = ["derive"] }
+    memmap2        = "0.9"
+    anyhow         = "1"
+    serde          = { version = "1", features = ["derive"] }
+    serde_json     = "1"
+    cpp_demangle   = "0.5.1"
+    rustc-demangle = "0.1"

@@ -1,5 +1,14 @@
 pub mod encoder;
 pub mod layout;
+pub mod patch;
+pub mod resign;
+pub mod transaction;
+
+pub use patch::{
+    FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachoPatcher,
+    PatchArch, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable,
+    TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
+};
 
 use crate::error::{Error, Result};
 use crate::model::load_command::*;

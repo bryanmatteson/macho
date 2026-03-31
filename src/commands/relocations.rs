@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::parse::relocations::relocations_for_section;
 use std::path::PathBuf;
+
+use crate::commands::common::for_each_selected_mach;
 
 #[derive(clap::Args)]
 pub struct RelocationsArgs {
@@ -26,28 +27,20 @@ pub fn run(args: RelocationsArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    match &container {
-        MachContainer::Thin(mach) => {
-            print_relocations(mach, &args)?;
-        }
-        MachContainer::Fat(fat) => {
-            for (i, arch) in fat.arches().iter().enumerate() {
-                let arch_name = arch.spec.name();
-                if let Some(ref filter) = args.arch {
-                    if !arch_name.eq_ignore_ascii_case(filter) {
-                        continue;
-                    }
-                }
-                if fat.arches().len() > 1 {
-                    println!("=== {arch_name} ===");
-                }
-                print_relocations(&arch.mach, &args)?;
-                if i + 1 < fat.arches().len() {
-                    println!();
-                }
+    for_each_selected_mach(
+        &container,
+        args.arch.as_deref(),
+        |mach, arch_name, show_header| {
+            if show_header {
+                println!("=== {arch_name} ===");
             }
-        }
-    }
+            print_relocations(mach, &args)?;
+            if show_header {
+                println!();
+            }
+            Ok(())
+        },
+    )?;
 
     Ok(())
 }

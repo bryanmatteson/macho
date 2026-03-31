@@ -52,6 +52,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
                 fat_offset: FatFileOffset(offset),
                 size,
                 align,
+                reserved: endian.interpret_u32(raw.reserved),
                 mach,
             });
         }
@@ -75,6 +76,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
                 fat_offset: FatFileOffset(offset),
                 size,
                 align,
+                reserved: 0,
                 mach,
             });
         }

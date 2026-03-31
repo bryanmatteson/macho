@@ -188,6 +188,25 @@ bitflags::bitflags! {
     }
 }
 
+impl VmProtection {
+    pub fn rwx_string(self) -> String {
+        let r = if self.contains(Self::READ) { 'r' } else { '-' };
+        let w = if self.contains(Self::WRITE) { 'w' } else { '-' };
+        let x = if self.contains(Self::EXECUTE) {
+            'x'
+        } else {
+            '-'
+        };
+        format!("{r}{w}{x}")
+    }
+}
+
+impl std::fmt::Display for VmProtection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.rwx_string())
+    }
+}
+
 // CPU type constants
 pub const CPU_ARCH_ABI64: i32 = 0x0100_0000;
 pub const CPU_ARCH_ABI64_32: i32 = 0x0200_0000;

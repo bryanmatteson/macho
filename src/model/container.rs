@@ -10,6 +10,7 @@ pub struct FatArch<'data> {
     pub fat_offset: FatFileOffset,
     pub size: u64,
     pub align: u32,
+    pub reserved: u32,
     pub mach: MachFile<'data>,
 }
 

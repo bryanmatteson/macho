@@ -7,6 +7,7 @@ use crate::addr::types::{Rva, ThinFileOffset, Va};
 use crate::error::{Error, Result};
 use crate::io::endian::Endian;
 use crate::io::pod;
+use crate::model::fat::FatMagic;
 use crate::model::header::{Bitness, MachHeader};
 use crate::model::load_command::ParsedLoadCommand;
 use crate::model::mach::MachFile;
@@ -34,17 +35,6 @@ pub struct OwnedMachFile {
 impl OwnedMachFile {
     /// Create from a parsed `MachFile` by copying its bytes and metadata.
     pub fn from_mach_file(mach: &MachFile<'_>) -> Self {
-        let entries: Vec<MappingEntry> = mach
-            .segments()
-            .iter()
-            .map(|seg| MappingEntry {
-                file_offset: seg.file_offset,
-                file_size: seg.file_size,
-                vm_addr: seg.vm_addr,
-                vm_size: seg.vm_size,
-            })
-            .collect();
-
         Self {
             bytes: mach.bytes().to_vec(),
             header: mach.header().clone(),
@@ -52,9 +42,32 @@ impl OwnedMachFile {
             segments: mach.segments().to_vec(),
             endian: mach.endian(),
             bitness: mach.bitness(),
-            address_map: AddressMap::new(entries),
+            address_map: AddressMap::new(mapping_entries(mach.segments())),
             image_base: mach.image_base(),
         }
+    }
+
+    /// Create from owned Mach-O bytes by parsing and snapshotting metadata.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let parsed = parse_mach_file(&bytes)?;
+        let header = parsed.header().clone();
+        let load_commands = parsed.load_commands().to_vec();
+        let segments = parsed.segments().to_vec();
+        let endian = parsed.endian();
+        let bitness = parsed.bitness();
+        let image_base = parsed.image_base();
+        let address_map = AddressMap::new(mapping_entries(&segments));
+
+        Ok(Self {
+            bytes,
+            header,
+            load_commands,
+            segments,
+            endian,
+            bitness,
+            address_map,
+            image_base,
+        })
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -158,15 +171,22 @@ impl std::fmt::Debug for OwnedMachFile {
 pub struct OwnedFatBinary {
     /// Full container bytes (header + arch table + padding + all arch slices).
     container_bytes: Vec<u8>,
+    magic: FatMagic,
     /// Per-arch owned copies with their offsets within the container.
     arches: Vec<OwnedFatArch>,
 }
 
 pub struct OwnedFatArch {
+    /// Architecture spec from the fat arch table.
+    pub spec: crate::model::fat::ArchSpec,
     /// Offset of this arch's slice within the fat container.
     pub offset: usize,
     /// Size of this arch's slice.
     pub size: usize,
+    /// Alignment exponent from the fat arch table (`2^align` bytes).
+    pub align: u32,
+    /// Reserved field from `fat_arch_64`.
+    pub reserved: u32,
     /// The owned mutable image for this arch.
     pub mach: OwnedMachFile,
 }
@@ -178,14 +198,18 @@ impl OwnedFatBinary {
             .arches()
             .iter()
             .map(|arch| OwnedFatArch {
+                spec: arch.spec,
                 offset: arch.fat_offset.0 as usize,
                 size: arch.size as usize,
+                align: arch.align,
+                reserved: arch.reserved,
                 mach: OwnedMachFile::from_mach_file(&arch.mach),
             })
             .collect();
 
         Self {
             container_bytes: full_data.to_vec(),
+            magic: fat.header.magic,
             arches,
         }
     }
@@ -202,24 +226,102 @@ impl OwnedFatBinary {
         self.arches.get_mut(index).map(|a| &mut a.mach)
     }
 
-    /// Sync modified arch bytes back into the container and return the bytes.
-    pub fn into_bytes(mut self) -> Vec<u8> {
-        self.sync_arches();
-        self.container_bytes
+    pub fn replace_arch(&mut self, index: usize, bytes: Vec<u8>) -> Result<()> {
+        let arch_count = self.arches.len();
+        let mach = OwnedMachFile::from_bytes(bytes)?;
+        let arch = self.arches.get_mut(index).ok_or_else(|| {
+            Error::Format(format!(
+                "fat arch index {index} out of range (have {arch_count})",
+            ))
+        })?;
+        arch.size = mach.bytes().len();
+        arch.mach = mach;
+        Ok(())
+    }
+
+    /// Serialize the current fat container, rebuilding offsets if any slice changed size.
+    pub fn try_into_bytes(mut self) -> Result<Vec<u8>> {
+        self.rebuild_in_place()?;
+        Ok(self.container_bytes)
+    }
+
+    /// Serialize the current fat container, rebuilding offsets if any slice changed size.
+    ///
+    /// Panics only if the current in-memory state cannot be re-encoded as a valid fat binary.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.try_into_bytes()
+            .expect("OwnedFatBinary::into_bytes failed to rebuild fat container")
     }
 
     pub fn save_to<W: Write>(&mut self, mut writer: W) -> std::io::Result<()> {
-        self.sync_arches();
+        self.rebuild_in_place()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         writer.write_all(&self.container_bytes)
     }
 
-    fn sync_arches(&mut self) {
-        for arch in &self.arches {
-            let end = arch.offset + arch.size;
-            if end <= self.container_bytes.len() && arch.mach.bytes().len() == arch.size {
-                self.container_bytes[arch.offset..end].copy_from_slice(arch.mach.bytes());
-            }
+    pub fn rebuild_bytes(&self) -> Result<Vec<u8>> {
+        let (out, _) = self.build_rebuilt_container()?;
+        Ok(out)
+    }
+
+    fn rebuild_in_place(&mut self) -> Result<()> {
+        let (rebuilt, layouts) = self.build_rebuilt_container()?;
+        for (arch, (offset, size)) in self.arches.iter_mut().zip(layouts) {
+            arch.offset = offset;
+            arch.size = size;
         }
+        self.container_bytes = rebuilt;
+        Ok(())
+    }
+
+    fn build_rebuilt_container(&self) -> Result<(Vec<u8>, Vec<(usize, usize)>)> {
+        let arch_entry_size = match self.magic {
+            FatMagic::Fat32 => 20usize,
+            FatMagic::Fat64 => 32usize,
+        };
+        let header_size = 8usize
+            .checked_add(
+                arch_entry_size
+                    .checked_mul(self.arches.len())
+                    .ok_or_else(|| Error::Format("fat arch table size overflow".into()))?,
+            )
+            .ok_or_else(|| Error::Format("fat header size overflow".into()))?;
+
+        let layouts = self.arches.iter().try_fold(
+            (Vec::with_capacity(self.arches.len()), header_size),
+            |(mut layouts, cursor), arch| {
+                let align_bytes = fat_align_bytes(arch.align)?;
+                let offset = align_up(cursor, align_bytes);
+                let size = arch.mach.bytes().len();
+                let end = offset
+                    .checked_add(size)
+                    .ok_or_else(|| Error::Format("fat arch offset overflow".into()))?;
+                layouts.push((arch, offset, size));
+                Ok::<_, Error>((layouts, end))
+            },
+        )?;
+        let (layouts, total_size) = layouts;
+
+        let mut out = vec![0; total_size];
+        write_fat_header(&mut out, self.magic, self.arches.len() as u32);
+        let mut offsets = Vec::with_capacity(self.arches.len());
+
+        for (index, (arch, offset, size)) in layouts.iter().enumerate() {
+            write_fat_arch_entry(
+                &mut out,
+                self.magic,
+                index,
+                arch,
+                u64::try_from(*offset)
+                    .map_err(|_| Error::Format("fat arch offset exceeds u64".into()))?,
+            )?;
+
+            let end = *offset + *size;
+            out[*offset..end].copy_from_slice(arch.mach.bytes());
+            offsets.push((*offset, *size));
+        }
+
+        Ok((out, offsets))
     }
 }
 
@@ -237,4 +339,77 @@ impl MachFile<'_> {
     pub fn to_owned_mach(&self) -> OwnedMachFile {
         OwnedMachFile::from_mach_file(self)
     }
+}
+
+fn mapping_entries(segments: &[Segment]) -> Vec<MappingEntry> {
+    segments
+        .iter()
+        .map(|seg| MappingEntry {
+            file_offset: seg.file_offset,
+            file_size: seg.file_size,
+            vm_addr: seg.vm_addr,
+            vm_size: seg.vm_size,
+        })
+        .collect()
+}
+
+fn fat_align_bytes(align: u32) -> Result<usize> {
+    1usize
+        .checked_shl(align)
+        .ok_or_else(|| Error::Format(format!("fat arch alignment 2^{align} is too large")))
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    if align <= 1 {
+        value
+    } else {
+        value.div_ceil(align) * align
+    }
+}
+
+fn write_fat_header(out: &mut [u8], magic: FatMagic, nfat_arch: u32) {
+    let magic = match magic {
+        FatMagic::Fat32 => crate::constants::FAT_MAGIC,
+        FatMagic::Fat64 => crate::constants::FAT_MAGIC_64,
+    };
+
+    out[0..4].copy_from_slice(&magic.to_be_bytes());
+    out[4..8].copy_from_slice(&nfat_arch.to_be_bytes());
+}
+
+fn write_fat_arch_entry(
+    out: &mut [u8],
+    magic: FatMagic,
+    index: usize,
+    arch: &OwnedFatArch,
+    offset: u64,
+) -> Result<()> {
+    let base = match magic {
+        FatMagic::Fat32 => 8 + index * 20,
+        FatMagic::Fat64 => 8 + index * 32,
+    };
+
+    out[base..base + 4].copy_from_slice(&arch.spec.cpu_type.0.to_be_bytes());
+    out[base + 4..base + 8].copy_from_slice(&arch.spec.cpu_subtype.0.to_be_bytes());
+
+    match magic {
+        FatMagic::Fat32 => {
+            let offset = u32::try_from(offset)
+                .map_err(|_| Error::Format("fat32 arch offset exceeds u32".into()))?;
+            let size = u32::try_from(arch.mach.bytes().len())
+                .map_err(|_| Error::Format("fat32 arch size exceeds u32".into()))?;
+            out[base + 8..base + 12].copy_from_slice(&offset.to_be_bytes());
+            out[base + 12..base + 16].copy_from_slice(&size.to_be_bytes());
+            out[base + 16..base + 20].copy_from_slice(&arch.align.to_be_bytes());
+        }
+        FatMagic::Fat64 => {
+            out[base + 8..base + 16].copy_from_slice(&offset.to_be_bytes());
+            out[base + 16..base + 24]
+                .copy_from_slice(&(arch.mach.bytes().len() as u64).to_be_bytes());
+            out[base + 24..base + 28].copy_from_slice(&arch.align.to_be_bytes());
+            out[base + 28..base + 32].copy_from_slice(&arch.reserved.to_be_bytes());
+        }
+    }
+
+    Ok(())
 }

@@ -27,6 +27,20 @@ enum Commands {
     Objc(commands::objc::ObjCArgs),
     /// Inspect code signature (entitlements, code directory, CMS)
     Codesign(commands::codesign::CodesignArgs),
+    /// Dump a full JSON snapshot of the binary
+    Snapshot(commands::snapshot::SnapshotArgs),
+    /// Compare two Mach-O binaries semantically
+    Diff(commands::diff::DiffArgs),
+    /// Run security and policy audit on a binary
+    Audit(commands::audit::AuditArgs),
+    /// Apply structural patches to a binary
+    Patch(commands::patch::PatchArgs),
+    /// Discover Swift types from symbol metadata
+    Swift(commands::swift::SwiftArgs),
+    /// Analyze container structure (fat binary parity, fileset entries)
+    Container(commands::container::ContainerArgs),
+    /// List and inspect fileset entries
+    Fileset(commands::fileset::FilesetArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -40,5 +54,12 @@ fn main() -> anyhow::Result<()> {
         Commands::Fixups(args) => commands::fixups::run(args),
         Commands::Objc(args) => commands::objc::run(args),
         Commands::Codesign(args) => commands::codesign::run(args),
+        Commands::Snapshot(args) => commands::snapshot::run(args),
+        Commands::Diff(args) => commands::diff::run(args),
+        Commands::Audit(args) => commands::audit::run(args),
+        Commands::Patch(args) => commands::patch::run(args),
+        Commands::Swift(args) => commands::swift::run(args),
+        Commands::Container(args) => commands::container::run(args),
+        Commands::Fileset(args) => commands::fileset::run(args),
     }
 }

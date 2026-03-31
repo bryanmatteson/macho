@@ -1,8 +1,11 @@
 use anyhow::{Context, Result};
+use macho::demangle::SymbolDemangler;
 use macho::dyld::exports::parse_exports;
-use macho::model::container::MachContainer;
+use macho::dyld::types::ExportKind;
 use macho::model::mach::MachFile;
 use std::path::PathBuf;
+
+use crate::commands::common::for_each_selected_mach;
 
 #[derive(clap::Args)]
 pub struct ExportsArgs {
@@ -10,6 +13,9 @@ pub struct ExportsArgs {
     path: PathBuf,
     #[arg(long)]
     arch: Option<String>,
+    /// Demangle Rust and C++ symbol names when possible
+    #[arg(long)]
+    demangle: bool,
 }
 
 pub fn run(args: ExportsArgs) -> Result<()> {
@@ -19,32 +25,63 @@ pub fn run(args: ExportsArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    match &container {
-        MachContainer::Thin(mach) => print_exports(mach),
-        MachContainer::Fat(fat) => {
-            for arch in fat.arches() {
-                let name = arch.spec.name();
-                if let Some(ref f) = args.arch {
-                    if !name.eq_ignore_ascii_case(f) {
-                        continue;
-                    }
-                }
-                if fat.arches().len() > 1 {
-                    println!("=== {name} ===");
-                }
-                print_exports(&arch.mach);
+    for_each_selected_mach(
+        &container,
+        args.arch.as_deref(),
+        |mach, arch_name, show_header| {
+            if show_header {
+                println!("=== {arch_name} ===");
+            }
+            print_exports(mach, &args);
+            if show_header {
                 println!();
             }
-        }
-    }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
-fn print_exports(mach: &MachFile<'_>) {
+fn print_exports(mach: &MachFile<'_>, args: &ExportsArgs) {
     match parse_exports(mach) {
         Ok(exports) => {
+            let mut demangler = SymbolDemangler::new(args.demangle);
+            demangler.precompute(exports.iter().map(|export| export.name.as_str()));
+            demangler.precompute(exports.iter().filter_map(|export| match &export.kind {
+                ExportKind::Reexport {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            }));
+
             for e in &exports {
-                println!("  {e}");
+                match &e.kind {
+                    ExportKind::Regular { address } => {
+                        println!("  {:#018x} {}", address, demangler.format(&e.name));
+                    }
+                    ExportKind::ThreadLocal { address } => {
+                        println!("  {:#018x} [tlv] {}", address, demangler.format(&e.name));
+                    }
+                    ExportKind::Absolute { address } => {
+                        println!("  {:#018x} [abs] {}", address, demangler.format(&e.name));
+                    }
+                    ExportKind::Reexport { ordinal, name } => {
+                        print!("  [reexport ord={ordinal}] {}", demangler.format(&e.name));
+                        if let Some(name) = name {
+                            print!(" -> {}", demangler.format(name));
+                        }
+                        println!();
+                    }
+                    ExportKind::StubAndResolver {
+                        stub_offset,
+                        resolver_offset,
+                    } => {
+                        println!(
+                            "  [stub={stub_offset:#x} resolver={resolver_offset:#x}] {}",
+                            demangler.format(&e.name)
+                        );
+                    }
+                }
             }
             println!("({} exports)", exports.len());
         }

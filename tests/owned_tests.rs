@@ -1,4 +1,5 @@
 use macho::addr::ThinFileOffset;
+use macho::edit::transaction::PatchTransaction;
 use macho::model::container::MachContainer;
 use macho::model::owned::OwnedFatBinary;
 
@@ -180,5 +181,40 @@ fn owned_fat_arch_mut() {
         // The patched byte should be reflected in the container at the arch's offset
         let fat_offset = fat.arches()[0].fat_offset.0 as usize;
         assert_eq!(bytes[fat_offset + 0x100], 0xFF);
+    }
+}
+
+#[test]
+fn owned_fat_into_bytes_rebuilds_after_size_changing_slice_edit() {
+    let mmap = load_true();
+    let container = macho::parse(&mmap).expect("failed to parse");
+
+    if let MachContainer::Fat(ref fat) = container {
+        let mut owned = OwnedFatBinary::from_fat(fat, &mmap);
+        let original_len = mmap.len();
+        let first_arch = &fat.arches()[0];
+
+        let mut txn = PatchTransaction::new(&first_arch.mach);
+        txn.add_rpath(format!("/{}", "z".repeat(0x5000)));
+        let rebuilt_arch = txn.commit().expect("rebuild first arch");
+
+        owned
+            .replace_arch(0, rebuilt_arch)
+            .expect("replace first arch");
+        let bytes = owned.try_into_bytes().expect("rebuild fat container");
+
+        assert!(bytes.len() > original_len, "fat container should grow");
+
+        let reparsed = macho::parse(&bytes).expect("reparse rebuilt fat container");
+        let reparsed_fat = match reparsed {
+            MachContainer::Fat(fat) => fat,
+            MachContainer::Thin(_) => panic!("expected fat binary"),
+        };
+
+        assert_eq!(reparsed_fat.arches().len(), fat.arches().len());
+        assert!(
+            reparsed_fat.arches()[0].size > first_arch.size,
+            "patched slice should be larger after structural edit"
+        );
     }
 }

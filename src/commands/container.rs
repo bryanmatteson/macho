@@ -1,0 +1,106 @@
+use anyhow::{Context, Result};
+use macho::analysis::snapshot::ContainerSnapshot;
+use macho::container_analysis::{ContainerReport, resolve};
+use std::path::PathBuf;
+
+use crate::commands::common::filter_snapshot_by_arch;
+
+#[derive(clap::Args)]
+pub struct ContainerArgs {
+    /// Path to Mach-O binary
+    path: PathBuf,
+    /// Filter to a specific architecture
+    #[arg(long)]
+    arch: Option<String>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
+    /// Show cross-image symbol resolution
+    #[arg(long)]
+    resolve: bool,
+}
+
+pub fn run(args: ContainerArgs) -> Result<()> {
+    let file = std::fs::File::open(&args.path)
+        .with_context(|| format!("failed to open {}", args.path.display()))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
+
+    let mut snapshot = ContainerSnapshot::from_container(&container);
+    if let Some(ref filter) = args.arch {
+        filter_snapshot_by_arch(&mut snapshot, filter, &args.path)?;
+    }
+    let report = ContainerReport::from_snapshot(&snapshot);
+
+    if args.json {
+        if args.resolve {
+            let resolution = resolve::resolve_cross_image(&snapshot);
+            let combined = serde_json::json!({
+                "container": report,
+                "resolution": resolution,
+            });
+            println!("{}", serde_json::to_string_pretty(&combined)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        return Ok(());
+    }
+
+    // Text output
+    println!("Container: {} format", report.format);
+    println!("Architectures: {}", report.arches.join(", "));
+
+    if let Some(ref parity) = report.parity {
+        if parity.divergences.is_empty() {
+            println!("\nParity: all arches in agreement");
+        } else {
+            println!("\nParity divergences ({}):", parity.divergences.len());
+            for div in &parity.divergences {
+                println!("  [{}] {}", div.domain, div.description);
+                for (arch, status) in &div.per_arch {
+                    println!("    {arch}: {status}");
+                }
+            }
+        }
+    }
+
+    if let Some(ref fileset) = report.fileset {
+        println!("\nFileset entries ({}):", fileset.entries.len());
+        for entry in &fileset.entries {
+            println!(
+                "  [{}] {} vm={:#x} fileoff={:#x}",
+                entry.arch, entry.entry_id, entry.vm_addr, entry.file_offset
+            );
+        }
+    }
+
+    if args.resolve {
+        let resolution = resolve::resolve_cross_image(&snapshot);
+        if !resolution.export_ownership.is_empty() {
+            println!(
+                "\nArch-specific exports ({}):",
+                resolution.export_ownership.len()
+            );
+            for eo in &resolution.export_ownership {
+                println!("  {} -> {}", eo.symbol, eo.arches.join(", "));
+            }
+        }
+        if !resolution.import_divergence.is_empty() {
+            println!(
+                "\nDivergent imports ({}):",
+                resolution.import_divergence.len()
+            );
+            for div in &resolution.import_divergence {
+                println!(
+                    "  {} — present in: {}, absent from: {}",
+                    div.symbol,
+                    div.present_in.join(", "),
+                    div.absent_from.join(", ")
+                );
+            }
+        }
+    }
+
+    Ok(())
+}

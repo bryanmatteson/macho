@@ -1,6 +1,11 @@
 pub mod addr;
+pub mod analysis;
+pub mod audit;
 pub mod codesign;
 pub mod constants;
+pub mod container_analysis;
+pub mod demangle;
+pub mod diff;
 pub mod dyld;
 pub mod edit;
 pub mod error;
@@ -10,6 +15,7 @@ pub mod model;
 pub mod objc;
 pub mod parse;
 pub mod prelude;
+pub mod swift;
 pub mod validate;
 
 pub use error::{Error, Result};

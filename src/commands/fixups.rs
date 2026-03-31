@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
+use macho::demangle::SymbolDemangler;
 use macho::dyld::chained::parse_chained_fixups;
 use macho::dyld::types::FixupKind;
-use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use std::path::PathBuf;
+
+use crate::commands::common::for_each_selected_mach;
 
 #[derive(clap::Args)]
 pub struct FixupsArgs {
@@ -12,11 +14,14 @@ pub struct FixupsArgs {
     #[arg(long)]
     arch: Option<String>,
     /// Show only bind fixups
-    #[arg(long)]
+    #[arg(long, conflicts_with = "rebases_only")]
     binds_only: bool,
     /// Show only rebase fixups
-    #[arg(long)]
+    #[arg(long, conflicts_with = "binds_only")]
     rebases_only: bool,
+    /// Demangle Rust and C++ symbol names when possible
+    #[arg(long)]
+    demangle: bool,
 }
 
 pub fn run(args: FixupsArgs) -> Result<()> {
@@ -26,24 +31,20 @@ pub fn run(args: FixupsArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    match &container {
-        MachContainer::Thin(mach) => print_fixups(mach, &args),
-        MachContainer::Fat(fat) => {
-            for arch in fat.arches() {
-                let name = arch.spec.name();
-                if let Some(ref f) = args.arch {
-                    if !name.eq_ignore_ascii_case(f) {
-                        continue;
-                    }
-                }
-                if fat.arches().len() > 1 {
-                    println!("=== {name} ===");
-                }
-                print_fixups(&arch.mach, &args);
+    for_each_selected_mach(
+        &container,
+        args.arch.as_deref(),
+        |mach, arch_name, show_header| {
+            if show_header {
+                println!("=== {arch_name} ===");
+            }
+            print_fixups(mach, &args);
+            if show_header {
                 println!();
             }
-        }
-    }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 
@@ -52,6 +53,9 @@ fn print_fixups(mach: &MachFile<'_>, args: &FixupsArgs) {
         Ok(fixups) => {
             let mut bind_count = 0usize;
             let mut rebase_count = 0usize;
+            let mut demangler = SymbolDemangler::new(args.demangle);
+
+            demangler.precompute(fixups.imports.iter().map(|import| import.name));
 
             for f in &fixups.fixups {
                 let is_bind = matches!(f.kind, FixupKind::Bind { .. } | FixupKind::AuthBind { .. });
@@ -81,6 +85,7 @@ fn print_fixups(mach: &MachFile<'_>, args: &FixupsArgs) {
                             .get(*import_index as usize)
                             .map(|i| i.name)
                             .unwrap_or("?");
+                        let name = demangler.format(name);
                         if *addend != 0 {
                             format!("bind    -> {name} + {addend}")
                         } else {
@@ -106,6 +111,7 @@ fn print_fixups(mach: &MachFile<'_>, args: &FixupsArgs) {
                             .get(*import_index as usize)
                             .map(|i| i.name)
                             .unwrap_or("?");
+                        let name = demangler.format(name);
                         format!("auth-bd -> {name} key={key} div={diversity}")
                     }
                 };

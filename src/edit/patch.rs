@@ -1,0 +1,1570 @@
+// SPDX-License-Identifier: MIT
+//! Mach-O specific patching operations.
+//!
+//! Provides a `MachoPatcher` that operates on an in-memory copy of a Mach-O
+//! binary, offering virtual address to file offset translation, symbol-based
+//! offset lookup, byte pattern searching, atomic read/write operations that
+//! return the original bytes for rollback, and architecture-aware executable
+//! hook patch planning for function-entry detours.
+
+use std::collections::{BTreeMap, HashMap};
+use std::fmt;
+use std::ops::Range;
+
+// ---------------------------------------------------------------------------
+// MachoPatcher
+// ---------------------------------------------------------------------------
+
+const X86_64_REL32_JUMP_LEN: usize = 5;
+const X86_64_ABSOLUTE_JUMP_LEN: usize = 14;
+const ARM64_DIRECT_BRANCH_LEN: usize = 4;
+const ARM64_ABSOLUTE_JUMP_LEN: usize = 16;
+const ARM64_NOP: [u8; 4] = [0x1F, 0x20, 0x03, 0xD5];
+const ARM64_LDR_X16_LITERAL_8: [u8; 4] = [0x50, 0x00, 0x00, 0x58];
+const ARM64_BR_X16: [u8; 4] = [0x00, 0x02, 0x1F, 0xD6];
+
+/// Architecture variants supported by patch planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PatchArch {
+    Arm64,
+    Arm64e,
+    X86_64,
+    I386,
+}
+
+impl fmt::Display for PatchArch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Arm64 => write!(f, "arm64"),
+            Self::Arm64e => write!(f, "arm64e"),
+            Self::X86_64 => write!(f, "x86_64"),
+            Self::I386 => write!(f, "i386"),
+        }
+    }
+}
+
+/// A single symbol entry tracked for patch lookup.
+#[derive(Debug, Clone)]
+pub struct PatchSymbolEntry {
+    pub address: u64,
+    pub size: u64,
+    pub section: Option<usize>,
+    pub is_external: bool,
+}
+
+/// Symbol table with by-name and by-address lookup.
+#[derive(Debug, Clone, Default)]
+pub struct PatchSymbolTable {
+    by_name: HashMap<String, PatchSymbolEntry>,
+    by_address: BTreeMap<u64, String>,
+}
+
+impl PatchSymbolTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, name: String, entry: PatchSymbolEntry) {
+        if entry.address != 0 {
+            self.by_address.insert(entry.address, name.clone());
+        }
+        self.by_name.insert(name, entry);
+    }
+
+    pub fn by_name(&self, name: &str) -> Option<&PatchSymbolEntry> {
+        self.by_name.get(name)
+    }
+
+    pub fn by_address(&self, addr: u64) -> Option<(&u64, &String)> {
+        self.by_address.range(..=addr).next_back()
+    }
+
+    pub fn at_address(&self, addr: u64) -> Option<&String> {
+        self.by_address.get(&addr)
+    }
+
+    pub fn len(&self) -> usize {
+        self.by_name.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_name.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &PatchSymbolEntry)> {
+        self.by_name.iter()
+    }
+
+    pub fn symbols_with_prefix<'a>(
+        &'a self,
+        prefix: &'a str,
+    ) -> impl Iterator<Item = (&'a String, &'a PatchSymbolEntry)> + 'a {
+        self.by_name
+            .iter()
+            .filter(move |(name, _)| name.starts_with(prefix))
+    }
+
+    pub fn symbols_matching<'a, F>(
+        &'a self,
+        mut predicate: F,
+    ) -> impl Iterator<Item = (&'a String, &'a PatchSymbolEntry)> + 'a
+    where
+        F: FnMut(&str, &PatchSymbolEntry) -> bool + 'a,
+    {
+        self.by_name
+            .iter()
+            .filter(move |(name, entry)| predicate(name, entry))
+    }
+
+    pub fn vtable_symbols<'a>(
+        &'a self,
+        type_name: &'a str,
+    ) -> impl Iterator<Item = (&'a String, &'a PatchSymbolEntry)> + 'a {
+        let prefix = vtable_mangled_prefix(type_name);
+        self.symbols_matching(move |name, _| name.starts_with(&prefix))
+    }
+}
+
+/// A section within a segment.
+#[derive(Debug, Clone)]
+pub struct PatchSectionInfo {
+    pub name: String,
+    pub segment_name: String,
+    pub addr: u64,
+    pub size: u64,
+    pub offset: u32,
+    pub section_type: Option<String>,
+}
+
+/// A segment in the binary.
+#[derive(Debug, Clone)]
+pub struct PatchSegmentInfo {
+    pub name: String,
+    pub vmaddr: u64,
+    pub vmsize: u64,
+    pub fileoff: u64,
+    pub filesize: u64,
+    pub sections: Vec<PatchSectionInfo>,
+}
+
+/// Machine-code encoding selected for a function-entry branch patch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookJumpEncoding {
+    /// x86_64 `jmp rel32`.
+    X86_64Relative,
+    /// x86_64 `jmp qword ptr [rip + 0]; .quad target`.
+    X86_64Absolute,
+    /// arm64/arm64e `b <imm26>`.
+    Arm64BranchImmediate,
+    /// arm64/arm64e `ldr x16, #8; br x16; .quad target`.
+    Arm64AbsoluteLiteral,
+}
+
+impl HookJumpEncoding {
+    /// Return the exact number of bytes emitted for this jump encoding.
+    pub fn len(self) -> usize {
+        match self {
+            Self::X86_64Relative => X86_64_REL32_JUMP_LEN,
+            Self::X86_64Absolute => X86_64_ABSOLUTE_JUMP_LEN,
+            Self::Arm64BranchImmediate => ARM64_DIRECT_BRANCH_LEN,
+            Self::Arm64AbsoluteLiteral => ARM64_ABSOLUTE_JUMP_LEN,
+        }
+    }
+
+    /// Return `true` when the encoding occupies zero bytes.
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
+/// A resolved jump encoding for an executable hook patch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookJump {
+    pub arch: PatchArch,
+    pub source_va: u64,
+    pub destination_va: u64,
+    pub encoding: HookJumpEncoding,
+    pub bytes: Vec<u8>,
+}
+
+impl HookJump {
+    /// Return the number of bytes to write for this jump.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Return `true` when the jump encodes no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+/// A concrete patch plan for rewriting a function entry to branch elsewhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionEntryPatchPlan {
+    pub arch: PatchArch,
+    pub entry_va: u64,
+    pub entry_offset: usize,
+    pub destination_va: u64,
+    pub overwrite_len: usize,
+    pub original_bytes: Vec<u8>,
+    pub jump: HookJump,
+    pub patch_bytes: Vec<u8>,
+}
+
+impl FunctionEntryPatchPlan {
+    /// Return the virtual address execution should resume at after the stolen bytes.
+    pub fn resume_va(&self) -> u64 {
+        self.entry_va + self.overwrite_len as u64
+    }
+}
+
+/// A trampoline buffer that replays stolen bytes and jumps back to the function body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrampolinePlan {
+    pub arch: PatchArch,
+    pub trampoline_va: u64,
+    pub relocated_bytes: Vec<u8>,
+    pub resume_va: u64,
+    pub jump_back: HookJump,
+    pub bytes: Vec<u8>,
+}
+
+/// A complete function-entry hook plan: entry detour plus trampoline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionEntryHookPlan {
+    pub entry: FunctionEntryPatchPlan,
+    pub trampoline: TrampolinePlan,
+}
+
+/// Operates on a mutable in-memory copy of a Mach-O binary.
+///
+/// All mutations go through `write_bytes`, which returns the original content
+/// so that callers can feed it into the rollback store.
+#[derive(Debug)]
+pub struct MachoPatcher {
+    data: Vec<u8>,
+    symbols: PatchSymbolTable,
+    segments: Vec<PatchSegmentInfo>,
+}
+
+impl MachoPatcher {
+    /// Create a new patcher from an image's data, symbols, and segments.
+    pub fn new(data: Vec<u8>, symbols: PatchSymbolTable, segments: Vec<PatchSegmentInfo>) -> Self {
+        Self {
+            data,
+            symbols,
+            segments,
+        }
+    }
+
+    /// Return a reference to the underlying byte buffer.
+    pub fn data(&self) -> &[u8] {
+        &self.data
+    }
+
+    /// Consume the patcher and return the (potentially modified) byte buffer.
+    pub fn into_data(self) -> Vec<u8> {
+        self.data
+    }
+
+    /// Return a reference to the symbol table.
+    pub fn symbols(&self) -> &PatchSymbolTable {
+        &self.symbols
+    }
+
+    /// Return a reference to the segment list.
+    pub fn segments(&self) -> &[PatchSegmentInfo] {
+        &self.segments
+    }
+
+    // -- Address translation ------------------------------------------------
+
+    /// Translate a virtual address to a file offset.
+    ///
+    /// Walks segments to find one whose `[vmaddr, vmaddr+vmsize)` range
+    /// contains `va`, then computes `fileoff + (va - vmaddr)`.
+    pub fn va_to_offset(&self, va: u64) -> Option<usize> {
+        for seg in &self.segments {
+            let Some(seg_end) = seg.vmaddr.checked_add(seg.vmsize) else {
+                continue;
+            };
+            if va >= seg.vmaddr && va < seg_end {
+                let delta = va - seg.vmaddr;
+                // Ensure the offset falls within the file-backed portion.
+                if delta < seg.filesize {
+                    let Some(fileoff) = seg.fileoff.checked_add(delta) else {
+                        continue;
+                    };
+                    return usize::try_from(fileoff).ok();
+                }
+            }
+        }
+        None
+    }
+
+    /// Translate a relative virtual address (offset from image base) to a
+    /// file offset. The image base is taken from the first `__TEXT` segment
+    /// (or the first segment if no `__TEXT` exists).
+    pub fn rva_to_offset(&self, rva: u64) -> Option<usize> {
+        let base = self.image_base();
+        self.va_to_offset(base + rva)
+    }
+
+    /// Return the image base address (vmaddr of the first __TEXT segment, or
+    /// the first segment).
+    pub fn image_base(&self) -> u64 {
+        self.segments
+            .iter()
+            .find(|s| s.name == "__TEXT")
+            .or_else(|| self.segments.first())
+            .map(|s| s.vmaddr)
+            .unwrap_or(0)
+    }
+
+    /// Look up a symbol by name and return its file offset.
+    pub fn symbol_offset(&self, name: &str) -> Option<usize> {
+        let entry = self.symbols.by_name(name)?;
+        self.va_to_offset(entry.address)
+    }
+
+    fn va_range_to_offset(&self, va: u64, len: usize) -> Option<usize> {
+        let len = u64::try_from(len).ok()?;
+
+        for seg in &self.segments {
+            let Some(seg_end) = seg.vmaddr.checked_add(seg.vmsize) else {
+                continue;
+            };
+            if va < seg.vmaddr || va >= seg_end {
+                continue;
+            }
+
+            let delta = va - seg.vmaddr;
+            let range_end = delta.checked_add(len)?;
+            if range_end > seg.filesize {
+                return None;
+            }
+
+            let fileoff = seg.fileoff.checked_add(delta)?;
+            return usize::try_from(fileoff).ok();
+        }
+
+        None
+    }
+
+    // -- Executable hook planning ------------------------------------------
+
+    /// Encode a jump suitable for function-entry patching.
+    ///
+    /// Supported encodings:
+    /// - `x86_64`: prefers a 5-byte `jmp rel32`; falls back to a 14-byte
+    ///   RIP-indirect absolute jump (`jmp qword ptr [rip + 0]; .quad target`)
+    ///   when the target is out of `rel32` range.
+    /// - `arm64` / `arm64e`: prefers a 4-byte `b <imm26>` when the target is
+    ///   within +/-128 MiB; falls back to a 16-byte literal veneer
+    ///   (`ldr x16, #8; br x16; .quad target`) otherwise.
+    ///
+    /// Failure modes:
+    /// - `i386` is rejected as unsupported.
+    /// - `arm64` / `arm64e` require both `source_va` and `destination_va` to be
+    ///   4-byte aligned.
+    /// - The arm64 direct branch form is rejected when the delta is not a
+    ///   multiple of 4 or exceeds the signed `imm26` range, in which case the
+    ///   absolute literal veneer is used instead.
+    /// - `arm64e` uses the same bytes as `arm64`; callers must supply raw code
+    ///   virtual addresses, not PAC-signed function pointers.
+    pub fn encode_hook_jump(
+        arch: PatchArch,
+        source_va: u64,
+        destination_va: u64,
+    ) -> Result<HookJump, String> {
+        ensure_hook_arch_supported(arch)?;
+
+        match arch {
+            PatchArch::X86_64 => encode_x86_64_hook_jump(source_va, destination_va),
+            PatchArch::Arm64 | PatchArch::Arm64e => {
+                encode_arm64_hook_jump(arch, source_va, destination_va)
+            }
+            PatchArch::I386 => {
+                Err("executable hook patching is not supported for i386".to_string())
+            }
+        }
+    }
+
+    /// Validate bytes intended to be moved into a trampoline buffer.
+    ///
+    /// Support differences:
+    /// - `x86_64`: a conservative decoder rejects relative control-flow,
+    ///   RIP-relative addressing, and unsupported complex instructions because
+    ///   the trampoline copies bytes verbatim and performs no relocation fixups.
+    /// - `arm64` / `arm64e`: bytes must be a whole-number sequence of 4-byte
+    ///   instructions and are rejected when they contain common PC-relative or
+    ///   control-flow instructions that would need relocation rewriting.
+    ///
+    /// Failure modes:
+    /// - unsupported architectures are rejected.
+    /// - `arm64` / `arm64e` reject byte lengths that are not multiples of 4.
+    /// - `arm64` / `arm64e` reject instructions such as `b`, `bl`, `b.cond`,
+    ///   `cbz/cbnz`, `tbz/tbnz`, `adr`, `adrp`, literal loads, and
+    ///   register-based or authenticated branch instructions.
+    pub fn validate_trampoline_instructions(arch: PatchArch, bytes: &[u8]) -> Result<(), String> {
+        ensure_hook_arch_supported(arch)?;
+
+        match arch {
+            PatchArch::X86_64 => validate_x86_64_trampoline_bytes(bytes),
+            PatchArch::Arm64 | PatchArch::Arm64e => validate_arm64_trampoline_bytes(arch, bytes),
+            PatchArch::I386 => {
+                Err("executable hook patching is not supported for i386".to_string())
+            }
+        }
+    }
+
+    /// Build a trampoline buffer that replays `relocated_bytes` and jumps to
+    /// `resume_va`.
+    ///
+    /// This emits bytes only; it does not allocate storage or write them into
+    /// any image. Callers are responsible for choosing a trampoline location
+    /// and mapping it through the appropriate image patcher.
+    pub fn build_trampoline(
+        arch: PatchArch,
+        trampoline_va: u64,
+        relocated_bytes: &[u8],
+        resume_va: u64,
+    ) -> Result<TrampolinePlan, String> {
+        ensure_hook_arch_supported(arch)?;
+        validate_patch_alignment(arch, trampoline_va, relocated_bytes.len())?;
+        Self::validate_trampoline_instructions(arch, relocated_bytes)?;
+
+        let jump_source_va = trampoline_va
+            .checked_add(relocated_bytes.len() as u64)
+            .ok_or_else(|| format!("trampoline at {trampoline_va:#x} overflows address space"))?;
+        let jump_back = Self::encode_hook_jump(arch, jump_source_va, resume_va)?;
+
+        let mut bytes = Vec::with_capacity(relocated_bytes.len() + jump_back.len());
+        bytes.extend_from_slice(relocated_bytes);
+        bytes.extend_from_slice(&jump_back.bytes);
+
+        Ok(TrampolinePlan {
+            arch,
+            trampoline_va,
+            relocated_bytes: relocated_bytes.to_vec(),
+            resume_va,
+            jump_back,
+            bytes,
+        })
+    }
+
+    /// Plan a function-entry patch that overwrites `overwrite_len` bytes at
+    /// `entry_va` with a branch to `destination_va`, padding any remainder with
+    /// architecture-appropriate NOPs.
+    ///
+    /// Failure modes:
+    /// - `entry_va` must map into this image and the full overwrite window must
+    ///   be readable.
+    /// - `overwrite_len` must be large enough for the selected jump encoding.
+    /// - `arm64` / `arm64e` require `entry_va` and `overwrite_len` to be 4-byte
+    ///   aligned.
+    pub fn plan_function_entry_patch(
+        &self,
+        arch: PatchArch,
+        entry_va: u64,
+        destination_va: u64,
+        overwrite_len: usize,
+    ) -> Result<FunctionEntryPatchPlan, String> {
+        ensure_hook_arch_supported(arch)?;
+        if overwrite_len == 0 {
+            return Err(
+                "function-entry hook planning requires a non-zero patch length".to_string(),
+            );
+        }
+        validate_patch_alignment(arch, entry_va, overwrite_len)?;
+
+        let entry_offset = self.va_range_to_offset(entry_va, overwrite_len).ok_or_else(|| {
+            format!(
+                "function entry patch window [{:#x}, {:#x}) is not fully mappable in this image",
+                entry_va,
+                entry_va.saturating_add(overwrite_len as u64),
+            )
+        })?;
+        let original_bytes = self
+            .read_bytes(entry_offset, overwrite_len)
+            .ok_or_else(|| {
+                format!(
+                    "cannot read {overwrite_len} bytes for function entry patch at {entry_va:#x}"
+                )
+            })?
+            .to_vec();
+
+        let jump = Self::encode_hook_jump(arch, entry_va, destination_va)?;
+        if overwrite_len < jump.len() {
+            return Err(format!(
+                "function entry patch at {entry_va:#x} needs {} bytes for {:?}, but overwrite_len is {}",
+                jump.len(),
+                jump.encoding,
+                overwrite_len,
+            ));
+        }
+
+        let mut patch_bytes = Vec::with_capacity(overwrite_len);
+        patch_bytes.extend_from_slice(&jump.bytes);
+        let padding_len = overwrite_len - jump.len();
+        if padding_len > 0 {
+            patch_bytes.extend_from_slice(&nop_bytes_for_arch(arch, padding_len)?);
+        }
+
+        Ok(FunctionEntryPatchPlan {
+            arch,
+            entry_va,
+            entry_offset,
+            destination_va,
+            overwrite_len,
+            original_bytes,
+            jump,
+            patch_bytes,
+        })
+    }
+
+    /// Plan a complete function-entry hook: an entry detour to `hook_va` plus
+    /// a trampoline at `trampoline_va` containing the stolen bytes and a jump
+    /// back to the original function body.
+    ///
+    /// This is intended for local integration in `apply.rs`: the returned plan
+    /// is pure data, so callers can decide whether and where to materialize the
+    /// trampoline bytes.
+    pub fn plan_function_entry_hook(
+        &self,
+        arch: PatchArch,
+        entry_va: u64,
+        hook_va: u64,
+        trampoline_va: u64,
+        overwrite_len: usize,
+    ) -> Result<FunctionEntryHookPlan, String> {
+        let entry = self.plan_function_entry_patch(arch, entry_va, hook_va, overwrite_len)?;
+        let trampoline = Self::build_trampoline(
+            arch,
+            trampoline_va,
+            &entry.original_bytes,
+            entry.resume_va(),
+        )?;
+
+        Ok(FunctionEntryHookPlan { entry, trampoline })
+    }
+
+    // -- Read / Write -------------------------------------------------------
+
+    /// Read a byte slice from the buffer.
+    pub fn read_bytes(&self, offset: usize, len: usize) -> Option<&[u8]> {
+        let end = offset.checked_add(len)?;
+        if end <= self.data.len() {
+            Some(&self.data[offset..end])
+        } else {
+            None
+        }
+    }
+
+    /// Write bytes at `offset`, returning the original bytes that were
+    /// overwritten. Returns an error if the write would exceed the buffer.
+    pub fn write_bytes(&mut self, offset: usize, bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+            format!(
+                "write at offset {:#x} with length {} overflows the address space",
+                offset,
+                bytes.len(),
+            )
+        })?;
+        if end > self.data.len() {
+            return Err(format!(
+                "write at offset {:#x} with length {} exceeds image size {}",
+                offset,
+                bytes.len(),
+                self.data.len(),
+            ));
+        }
+
+        let original = self.data[offset..end].to_vec();
+        self.data[offset..end].copy_from_slice(bytes);
+        Ok(original)
+    }
+
+    /// Write a single byte at `offset`, returning the original byte.
+    pub fn write_byte(&mut self, offset: usize, byte: u8) -> Result<u8, String> {
+        if offset >= self.data.len() {
+            return Err(format!(
+                "write at offset {:#x} exceeds image size {}",
+                offset,
+                self.data.len(),
+            ));
+        }
+        let original = self.data[offset];
+        self.data[offset] = byte;
+        Ok(original)
+    }
+
+    // -- Pattern search -----------------------------------------------------
+
+    /// Find all offsets where `pattern` matches, with `mask` applied.
+    ///
+    /// For each candidate offset in `scope`, the match succeeds when for every
+    /// byte index `i`: `(data[off+i] & mask[i]) == (pattern[i] & mask[i])`.
+    ///
+    /// `pattern` and `mask` must be the same length. A mask byte of `0xFF`
+    /// means exact match; `0x00` means wildcard (match any).
+    pub fn find_bytes(&self, pattern: &[u8], mask: &[u8], scope: Range<usize>) -> Vec<usize> {
+        assert_eq!(
+            pattern.len(),
+            mask.len(),
+            "pattern and mask must have the same length"
+        );
+
+        let pat_len = pattern.len();
+        if pat_len == 0 || scope.start + pat_len > self.data.len() {
+            return Vec::new();
+        }
+
+        let end = scope.end.min(self.data.len());
+        if scope.start + pat_len > end {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        let search_end = end - pat_len + 1;
+
+        for off in scope.start..search_end {
+            let mut matched = true;
+            for i in 0..pat_len {
+                if (self.data[off + i] & mask[i]) != (pattern[i] & mask[i]) {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                results.push(off);
+            }
+        }
+
+        results
+    }
+
+    /// Search for exact byte sequences (no mask, all bytes must match).
+    pub fn find_exact(&self, needle: &[u8], scope: Range<usize>) -> Vec<usize> {
+        let mask = vec![0xFF; needle.len()];
+        self.find_bytes(needle, &mask, scope)
+    }
+
+    /// Find null-terminated C strings matching `needle` in the binary.
+    ///
+    /// Returns a vec of `(offset, allocated_size)` tuples. The allocated size
+    /// is the number of bytes from the start of the string to the next null
+    /// byte (inclusive). This is useful for in-place string replacement with
+    /// null padding.
+    pub fn find_cstring(&self, needle: &str) -> Vec<(usize, usize)> {
+        let needle_bytes = needle.as_bytes();
+        if needle_bytes.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::new();
+        let data = &self.data;
+        let data_len = data.len();
+
+        // Search for the needle bytes followed by a null terminator.
+        let mut pos = 0;
+        while pos + needle_bytes.len() < data_len {
+            if let Some(found) = find_subsequence(&data[pos..], needle_bytes) {
+                let abs_offset = pos + found;
+                // Verify null terminator follows.
+                let after = abs_offset + needle_bytes.len();
+                if after < data_len && data[after] == 0 {
+                    // Measure the full allocation: scan forward from the start
+                    // to find contiguous null bytes (the padded region).
+                    let mut end = after + 1;
+                    while end < data_len && data[end] == 0 {
+                        end += 1;
+                    }
+                    let alloc_size = end - abs_offset;
+                    results.push((abs_offset, alloc_size));
+                }
+                pos = abs_offset + 1;
+            } else {
+                break;
+            }
+        }
+
+        results
+    }
+
+    // -- NOP fill -----------------------------------------------------------
+
+    /// Fill `count` bytes at `offset` with NOP instructions.
+    ///
+    /// For arm64, uses the 4-byte NOP encoding `0xD503201F`. For x86_64,
+    /// uses single-byte `0x90` NOPs.
+    pub fn nop_fill(
+        &mut self,
+        offset: usize,
+        count: usize,
+        arm64: bool,
+    ) -> Result<Vec<u8>, String> {
+        if arm64 {
+            self.write_bytes(offset, &nop_bytes_for_arch(PatchArch::Arm64, count)?)
+        } else {
+            self.write_bytes(offset, &nop_bytes_for_arch(PatchArch::X86_64, count)?)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Find the first occurrence of `needle` in `haystack`.
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+pub fn vtable_mangled_prefix(type_name: &str) -> String {
+    format!("__ZTV{}{}", type_name.len(), type_name)
+}
+
+pub fn nop_bytes_for_arch(arch: PatchArch, count: usize) -> Result<Vec<u8>, String> {
+    match arch {
+        PatchArch::X86_64 => Ok(vec![0x90; count]),
+        PatchArch::Arm64 | PatchArch::Arm64e => {
+            if !count.is_multiple_of(4) {
+                return Err(format!(
+                    "{arch} NOP padding requires a count divisible by 4, got {count}"
+                ));
+            }
+            let mut bytes = Vec::with_capacity(count);
+            for _ in 0..(count / 4) {
+                bytes.extend_from_slice(&ARM64_NOP);
+            }
+            Ok(bytes)
+        }
+        PatchArch::I386 => Err("NOP padding is not supported for i386 hook patches".to_string()),
+    }
+}
+
+fn ensure_hook_arch_supported(arch: PatchArch) -> Result<(), String> {
+    match arch {
+        PatchArch::X86_64 | PatchArch::Arm64 | PatchArch::Arm64e => Ok(()),
+        PatchArch::I386 => Err("executable hook patching is not supported for i386".to_string()),
+    }
+}
+
+fn validate_patch_alignment(arch: PatchArch, address: u64, len: usize) -> Result<(), String> {
+    match arch {
+        PatchArch::X86_64 => Ok(()),
+        PatchArch::Arm64 | PatchArch::Arm64e => {
+            if !address.is_multiple_of(4) {
+                return Err(format!(
+                    "{arch} function-entry patch address must be 4-byte aligned, got {address:#x}"
+                ));
+            }
+            if !len.is_multiple_of(4) {
+                return Err(format!(
+                    "{arch} function-entry patch length must be divisible by 4, got {len}"
+                ));
+            }
+            Ok(())
+        }
+        PatchArch::I386 => Err("executable hook patching is not supported for i386".to_string()),
+    }
+}
+
+fn encode_x86_64_hook_jump(source_va: u64, destination_va: u64) -> Result<HookJump, String> {
+    let relative_delta = i128::from(destination_va)
+        - i128::from(
+            source_va
+                .checked_add(X86_64_REL32_JUMP_LEN as u64)
+                .ok_or_else(|| format!("x86_64 jump source {source_va:#x} overflows"))?,
+        );
+
+    if (i32::MIN as i128..=i32::MAX as i128).contains(&relative_delta) {
+        let displacement = i32::try_from(relative_delta).map_err(|_| {
+            format!(
+                "x86_64 relative jump delta out of range: source={source_va:#x} destination={destination_va:#x}"
+            )
+        })?;
+        let mut bytes = Vec::with_capacity(X86_64_REL32_JUMP_LEN);
+        bytes.push(0xE9);
+        bytes.extend_from_slice(&displacement.to_le_bytes());
+        return Ok(HookJump {
+            arch: PatchArch::X86_64,
+            source_va,
+            destination_va,
+            encoding: HookJumpEncoding::X86_64Relative,
+            bytes,
+        });
+    }
+
+    let mut bytes = Vec::with_capacity(X86_64_ABSOLUTE_JUMP_LEN);
+    bytes.extend_from_slice(&[0xFF, 0x25, 0x00, 0x00, 0x00, 0x00]);
+    bytes.extend_from_slice(&destination_va.to_le_bytes());
+
+    Ok(HookJump {
+        arch: PatchArch::X86_64,
+        source_va,
+        destination_va,
+        encoding: HookJumpEncoding::X86_64Absolute,
+        bytes,
+    })
+}
+
+fn encode_arm64_hook_jump(
+    arch: PatchArch,
+    source_va: u64,
+    destination_va: u64,
+) -> Result<HookJump, String> {
+    if !source_va.is_multiple_of(4) {
+        return Err(format!(
+            "{arch} jump source must be 4-byte aligned, got {source_va:#x}"
+        ));
+    }
+    if !destination_va.is_multiple_of(4) {
+        return Err(format!(
+            "{arch} jump destination must be 4-byte aligned, got {destination_va:#x}"
+        ));
+    }
+
+    let delta = i128::from(destination_va) - i128::from(source_va);
+    if delta % 4 == 0 {
+        let scaled = delta / 4;
+        if (-(1_i128 << 25)..=(1_i128 << 25) - 1).contains(&scaled) {
+            let imm26 = (i32::try_from(scaled)
+                .map_err(|_| format!("arm64 jump delta out of range"))?
+                as u32)
+                & 0x03FF_FFFF;
+            let insn = 0x1400_0000u32 | imm26;
+            return Ok(HookJump {
+                arch,
+                source_va,
+                destination_va,
+                encoding: HookJumpEncoding::Arm64BranchImmediate,
+                bytes: insn.to_le_bytes().to_vec(),
+            });
+        }
+    }
+
+    let mut bytes = Vec::with_capacity(ARM64_ABSOLUTE_JUMP_LEN);
+    bytes.extend_from_slice(&ARM64_LDR_X16_LITERAL_8);
+    bytes.extend_from_slice(&ARM64_BR_X16);
+    bytes.extend_from_slice(&destination_va.to_le_bytes());
+
+    Ok(HookJump {
+        arch,
+        source_va,
+        destination_va,
+        encoding: HookJumpEncoding::Arm64AbsoluteLiteral,
+        bytes,
+    })
+}
+
+fn validate_x86_64_trampoline_bytes(bytes: &[u8]) -> Result<(), String> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let len = decode_x86_64_instruction_len(&bytes[offset..]).map_err(|reason| {
+            format!(
+                "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: {}",
+                offset, reason,
+            )
+        })?;
+        offset += len;
+    }
+
+    Ok(())
+}
+
+fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
+    let mut idx = 0;
+    let mut rex_w = false;
+    let mut address_size_override = false;
+
+    while let Some(&byte) = bytes.get(idx) {
+        match byte {
+            0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 => {
+                idx += 1;
+            }
+            0x67 => {
+                address_size_override = true;
+                idx += 1;
+            }
+            0x40..=0x4F => {
+                rex_w |= byte & 0x08 != 0;
+                idx += 1;
+            }
+            _ => break,
+        }
+    }
+
+    if address_size_override {
+        return Err("address-size override is not supported");
+    }
+
+    let opcode = *bytes.get(idx).ok_or("truncated instruction")?;
+    idx += 1;
+
+    match opcode {
+        0x70..=0x7F => return Err("conditional branch"),
+        0xE8 => return Err("relative call"),
+        0xE9 | 0xEB => return Err("relative jump"),
+        0xE0..=0xE3 => return Err("loop branch"),
+        0xC2 | 0xC3 | 0xCA | 0xCB => return Err("return"),
+        0x50..=0x5F | 0x90..=0x97 | 0x98..=0x99 | 0x9C..=0x9F => return Ok(idx),
+        0x68 => return checked_advance(idx, 4, bytes),
+        0x6A => return checked_advance(idx, 1, bytes),
+        0xB0..=0xB7 => return checked_advance(idx, 1, bytes),
+        0xB8..=0xBF => {
+            let imm_len = if rex_w { 8 } else { 4 };
+            return checked_advance(idx, imm_len, bytes);
+        }
+        0x0F => {
+            let second = *bytes.get(idx).ok_or("truncated two-byte opcode")?;
+            idx += 1;
+
+            if (0x80..=0x8F).contains(&second) {
+                return Err("conditional branch");
+            }
+            if second == 0x1E && bytes.get(idx) == Some(&0xFA) {
+                return Ok(idx + 1);
+            }
+
+            let modrm = match second {
+                0x1F | 0xAF | 0xB6 | 0xB7 | 0xBE | 0xBF => parse_x86_64_modrm(bytes, idx)?,
+                _ => return Err("unsupported two-byte opcode"),
+            };
+
+            if modrm.rip_relative {
+                return Err("RIP-relative addressing");
+            }
+
+            return Ok(idx + modrm.len);
+        }
+        _ => {}
+    }
+
+    let (modrm_needed, imm_len, group5_control_flow) = match opcode {
+        0x01 | 0x03 | 0x09 | 0x0B | 0x11 | 0x13 | 0x19 | 0x1B | 0x21 | 0x23 | 0x29 | 0x2B
+        | 0x31 | 0x33 | 0x39 | 0x3B | 0x63 | 0x84 | 0x85 | 0x86 | 0x87 | 0x88 | 0x89 | 0x8A
+        | 0x8B | 0x8D | 0x8F | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xFE => (true, None, false),
+        0x69 => (true, Some(4usize), false),
+        0x6B => (true, Some(1usize), false),
+        0x80 | 0x82 | 0x83 | 0xC0 | 0xC1 | 0xC6 => (true, Some(1usize), false),
+        0x81 | 0xC7 => (true, Some(4usize), false),
+        0xF6 => (true, None, false),
+        0xF7 => (true, None, false),
+        0xFF => (true, None, true),
+        _ => return Err("unsupported opcode"),
+    };
+
+    if !modrm_needed {
+        return Ok(idx);
+    }
+
+    let modrm = parse_x86_64_modrm(bytes, idx)?;
+    if modrm.rip_relative {
+        return Err("RIP-relative addressing");
+    }
+    if group5_control_flow && matches!(modrm.reg, 2..=5) {
+        return Err("register or memory control-flow instruction");
+    }
+
+    let mut end = idx + modrm.len;
+    match opcode {
+        0xF6 if modrm.reg == 0 => end = checked_advance(end, 1, bytes)?,
+        0xF7 if modrm.reg == 0 => end = checked_advance(end, 4, bytes)?,
+        _ => {
+            if let Some(imm_len) = imm_len {
+                end = checked_advance(end, imm_len, bytes)?;
+            }
+        }
+    }
+
+    Ok(end)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct X86_64ModRm {
+    len: usize,
+    reg: u8,
+    rip_relative: bool,
+}
+
+fn parse_x86_64_modrm(bytes: &[u8], modrm_offset: usize) -> Result<X86_64ModRm, &'static str> {
+    let modrm = *bytes.get(modrm_offset).ok_or("truncated ModRM")?;
+    let mode = modrm >> 6;
+    let reg = (modrm >> 3) & 0x07;
+    let rm = modrm & 0x07;
+
+    let mut len = 1;
+    let rip_relative = mode != 0b11 && rm == 0b101;
+
+    if mode != 0b11 && rm == 0b100 {
+        let sib = *bytes.get(modrm_offset + len).ok_or("truncated SIB")?;
+        len += 1;
+        let base = sib & 0x07;
+        if mode == 0b00 && base == 0b101 {
+            len = checked_advance(modrm_offset, len + 4, bytes)? - modrm_offset;
+            return Ok(X86_64ModRm {
+                len,
+                reg,
+                rip_relative,
+            });
+        }
+    }
+
+    let disp_len = match mode {
+        0b00 if rm == 0b101 => 4,
+        0b01 => 1,
+        0b10 => 4,
+        _ => 0,
+    };
+    len = checked_advance(modrm_offset, len + disp_len, bytes)? - modrm_offset;
+
+    Ok(X86_64ModRm {
+        len,
+        reg,
+        rip_relative,
+    })
+}
+
+fn checked_advance(current: usize, advance: usize, bytes: &[u8]) -> Result<usize, &'static str> {
+    let end = current
+        .checked_add(advance)
+        .ok_or("instruction length overflow")?;
+    if end <= bytes.len() {
+        Ok(end)
+    } else {
+        Err("truncated instruction")
+    }
+}
+
+fn validate_arm64_trampoline_bytes(arch: PatchArch, bytes: &[u8]) -> Result<(), String> {
+    if !bytes.len().is_multiple_of(4) {
+        return Err(format!(
+            "{arch} trampoline bytes must be a whole number of instructions, got {} bytes",
+            bytes.len()
+        ));
+    }
+
+    for (insn_index, insn_bytes) in bytes.chunks_exact(4).enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(insn_bytes);
+        let insn = u32::from_le_bytes(buf);
+        if let Some(reason) = classify_arm64_relocated_instruction(insn) {
+            return Err(format!(
+                "{arch} trampoline relocation rejected instruction at byte offset {:#x}: {} ({:#010x})",
+                insn_index * 4,
+                reason,
+                insn,
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn classify_arm64_relocated_instruction(insn: u32) -> Option<&'static str> {
+    if insn & 0x7C00_0000 == 0x1400_0000 {
+        return Some("branch immediate");
+    }
+    if insn & 0xFF00_0010 == 0x5400_0000 {
+        return Some("conditional branch");
+    }
+    if insn & 0x7E00_0000 == 0x3400_0000 {
+        return Some("compare-and-branch");
+    }
+    if insn & 0x7E00_0000 == 0x3600_0000 {
+        return Some("test-and-branch");
+    }
+    if insn & 0x9F00_0000 == 0x1000_0000 {
+        return Some("ADR");
+    }
+    if insn & 0x9F00_0000 == 0x9000_0000 {
+        return Some("ADRP");
+    }
+    if insn & 0x3B00_0000 == 0x1800_0000 {
+        return Some("literal load");
+    }
+    if insn & 0xFE00_0000 == 0xD600_0000 || insn & 0xFE00_0000 == 0xD700_0000 {
+        return Some("register or authenticated branch");
+    }
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_patcher() -> MachoPatcher {
+        let data = vec![0u8; 0x2000];
+
+        let mut symbols = PatchSymbolTable::new();
+        symbols.insert(
+            "_main".to_string(),
+            PatchSymbolEntry {
+                address: 0x100100,
+                size: 0,
+                section: Some(0),
+                is_external: true,
+            },
+        );
+        symbols.insert(
+            "_helper".to_string(),
+            PatchSymbolEntry {
+                address: 0x101010,
+                size: 0,
+                section: Some(1),
+                is_external: false,
+            },
+        );
+
+        let segments = vec![
+            PatchSegmentInfo {
+                name: "__TEXT".to_string(),
+                vmaddr: 0x100000,
+                vmsize: 0x1000,
+                fileoff: 0,
+                filesize: 0x1000,
+                sections: vec![PatchSectionInfo {
+                    name: "__text".to_string(),
+                    segment_name: "__TEXT".to_string(),
+                    addr: 0x100000,
+                    size: 0x1000,
+                    offset: 0,
+                    section_type: None,
+                }],
+            },
+            PatchSegmentInfo {
+                name: "__DATA".to_string(),
+                vmaddr: 0x101000,
+                vmsize: 0x1000,
+                fileoff: 0x1000,
+                filesize: 0x1000,
+                sections: vec![PatchSectionInfo {
+                    name: "__data".to_string(),
+                    segment_name: "__DATA".to_string(),
+                    addr: 0x101000,
+                    size: 0x1000,
+                    offset: 0x1000,
+                    section_type: None,
+                }],
+            },
+        ];
+
+        MachoPatcher::new(data, symbols, segments)
+    }
+
+    #[test]
+    fn va_to_offset_text_segment() {
+        let p = make_test_patcher();
+        // VA 0x100100 is in __TEXT: fileoff=0 + (0x100100 - 0x100000) = 0x100
+        assert_eq!(p.va_to_offset(0x100100), Some(0x100));
+    }
+
+    #[test]
+    fn va_to_offset_data_segment() {
+        let p = make_test_patcher();
+        // VA 0x101010 is in __DATA: fileoff=0x1000 + (0x101010 - 0x101000) = 0x1010
+        assert_eq!(p.va_to_offset(0x101010), Some(0x1010));
+    }
+
+    #[test]
+    fn va_to_offset_out_of_range() {
+        let p = make_test_patcher();
+        assert_eq!(p.va_to_offset(0x200000), None);
+    }
+
+    #[test]
+    fn va_to_offset_at_segment_boundary() {
+        let p = make_test_patcher();
+        // Start of __TEXT
+        assert_eq!(p.va_to_offset(0x100000), Some(0));
+        // Start of __DATA
+        assert_eq!(p.va_to_offset(0x101000), Some(0x1000));
+    }
+
+    #[test]
+    fn va_to_offset_end_exclusive() {
+        let p = make_test_patcher();
+        // One past end of __TEXT vmrange => falls into __DATA? No: 0x101000
+        // is the start of __DATA vmaddr, so it should map there.
+        assert_eq!(p.va_to_offset(0x101000), Some(0x1000));
+        // Beyond __DATA
+        assert_eq!(p.va_to_offset(0x102000), None);
+    }
+
+    #[test]
+    fn rva_to_offset() {
+        let p = make_test_patcher();
+        // Image base is __TEXT vmaddr = 0x100000.
+        // RVA 0x100 => VA 0x100100 => file offset 0x100.
+        assert_eq!(p.rva_to_offset(0x100), Some(0x100));
+        // RVA 0x1010 => VA 0x101010 => file offset 0x1010.
+        assert_eq!(p.rva_to_offset(0x1010), Some(0x1010));
+    }
+
+    #[test]
+    fn image_base() {
+        let p = make_test_patcher();
+        assert_eq!(p.image_base(), 0x100000);
+    }
+
+    #[test]
+    fn symbol_offset_lookup() {
+        let p = make_test_patcher();
+        assert_eq!(p.symbol_offset("_main"), Some(0x100));
+        assert_eq!(p.symbol_offset("_helper"), Some(0x1010));
+        assert_eq!(p.symbol_offset("_missing"), None);
+    }
+
+    #[test]
+    fn read_write_bytes() {
+        let mut p = make_test_patcher();
+
+        // Write some bytes at offset 0x100.
+        let patch = [0xDE, 0xAD, 0xBE, 0xEF];
+        let original = p.write_bytes(0x100, &patch).unwrap();
+        assert_eq!(original, [0x00, 0x00, 0x00, 0x00]);
+
+        // Read them back.
+        let readback = p.read_bytes(0x100, 4).unwrap();
+        assert_eq!(readback, &[0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn write_bytes_returns_original() {
+        let mut p = make_test_patcher();
+
+        // First write
+        let patch1 = [0x01, 0x02, 0x03];
+        let orig1 = p.write_bytes(0x10, &patch1).unwrap();
+        assert_eq!(orig1, [0x00, 0x00, 0x00]);
+
+        // Second write at same location
+        let patch2 = [0xAA, 0xBB, 0xCC];
+        let orig2 = p.write_bytes(0x10, &patch2).unwrap();
+        assert_eq!(orig2, [0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn write_bytes_out_of_bounds() {
+        let mut p = make_test_patcher();
+        let big = vec![0xFF; 0x3000]; // larger than 0x2000 buffer
+        assert!(p.write_bytes(0, &big).is_err());
+    }
+
+    #[test]
+    fn find_bytes_exact() {
+        let mut p = make_test_patcher();
+        // Plant a pattern.
+        p.data[0x200] = 0xCA;
+        p.data[0x201] = 0xFE;
+        p.data[0x202] = 0xBA;
+        p.data[0x203] = 0xBE;
+
+        let pattern = [0xCA, 0xFE, 0xBA, 0xBE];
+        let mask = [0xFF, 0xFF, 0xFF, 0xFF];
+        let results = p.find_bytes(&pattern, &mask, 0..0x1000);
+        assert_eq!(results, vec![0x200]);
+    }
+
+    #[test]
+    fn find_bytes_with_wildcard() {
+        let mut p = make_test_patcher();
+        // Plant patterns.
+        p.data[0x100] = 0xCA;
+        p.data[0x101] = 0x11;
+        p.data[0x102] = 0xBA;
+
+        p.data[0x300] = 0xCA;
+        p.data[0x301] = 0x99;
+        p.data[0x302] = 0xBA;
+
+        let pattern = [0xCA, 0x00, 0xBA]; // middle byte is wildcard
+        let mask = [0xFF, 0x00, 0xFF];
+        let results = p.find_bytes(&pattern, &mask, 0..0x1000);
+        assert!(results.contains(&0x100));
+        assert!(results.contains(&0x300));
+    }
+
+    #[test]
+    fn find_bytes_no_match() {
+        let p = make_test_patcher();
+        let pattern = [0xDE, 0xAD];
+        let mask = [0xFF, 0xFF];
+        let results = p.find_bytes(&pattern, &mask, 0..0x2000);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn find_exact_helper() {
+        let mut p = make_test_patcher();
+        p.data[0x50] = 0xAB;
+        p.data[0x51] = 0xCD;
+        let results = p.find_exact(&[0xAB, 0xCD], 0..0x1000);
+        assert_eq!(results, vec![0x50]);
+    }
+
+    #[test]
+    fn find_cstring_basic() {
+        let mut p = make_test_patcher();
+        let s = b"hello";
+        let offset = 0x500;
+        p.data[offset..offset + s.len()].copy_from_slice(s);
+        p.data[offset + s.len()] = 0; // null terminator
+        // Add some padding nulls
+        p.data[offset + s.len() + 1] = 0;
+        p.data[offset + s.len() + 2] = 0;
+        // Place a non-null byte to bound the allocation scan.
+        p.data[offset + s.len() + 3] = 0x42;
+
+        let results = p.find_cstring("hello");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0, offset);
+        // allocated size = "hello" (5) + null (1) + 2 padding nulls (2) = 8
+        assert_eq!(results[0].1, 8);
+    }
+
+    #[test]
+    fn find_cstring_no_match() {
+        let p = make_test_patcher();
+        let results = p.find_cstring("nonexistent");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn encode_hook_jump_x86_64_relative() {
+        let jump = MachoPatcher::encode_hook_jump(PatchArch::X86_64, 0x1000, 0x1100).unwrap();
+        assert_eq!(jump.encoding, HookJumpEncoding::X86_64Relative);
+        assert_eq!(jump.bytes, vec![0xE9, 0xFB, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn encode_hook_jump_x86_64_absolute_fallback() {
+        let jump =
+            MachoPatcher::encode_hook_jump(PatchArch::X86_64, 0x1000, 0x1_0000_0000).unwrap();
+        assert_eq!(jump.encoding, HookJumpEncoding::X86_64Absolute);
+        assert_eq!(
+            jump.bytes,
+            vec![
+                0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_hook_jump_arm64_direct_branch() {
+        let jump = MachoPatcher::encode_hook_jump(PatchArch::Arm64, 0x1000, 0x1040).unwrap();
+        assert_eq!(jump.encoding, HookJumpEncoding::Arm64BranchImmediate);
+        assert_eq!(jump.bytes, vec![0x10, 0x00, 0x00, 0x14]);
+    }
+
+    #[test]
+    fn encode_hook_jump_arm64e_absolute_literal() {
+        let jump =
+            MachoPatcher::encode_hook_jump(PatchArch::Arm64e, 0x1000, 0x9000_0000_0000).unwrap();
+        assert_eq!(jump.encoding, HookJumpEncoding::Arm64AbsoluteLiteral);
+        assert_eq!(
+            jump.bytes,
+            vec![
+                0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1F, 0xD6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90,
+                0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_trampoline_x86_64_appends_jump_back() {
+        let trampoline = MachoPatcher::build_trampoline(
+            PatchArch::X86_64,
+            0x2000,
+            &[0x55, 0x48, 0x89, 0xE5],
+            0x3000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            trampoline.jump_back.encoding,
+            HookJumpEncoding::X86_64Relative
+        );
+        assert_eq!(
+            trampoline.bytes,
+            vec![0x55, 0x48, 0x89, 0xE5, 0xE9, 0xF7, 0x0F, 0x00, 0x00]
+        );
+    }
+
+    #[test]
+    fn build_trampoline_arm64_appends_jump_back() {
+        let relocated = [
+            0xFD, 0x7B, 0xBF, 0xA9, // stp x29, x30, [sp, #-16]!
+            0xFD, 0x03, 0x00, 0x91, // mov x29, sp
+        ];
+        let trampoline =
+            MachoPatcher::build_trampoline(PatchArch::Arm64, 0x2000, &relocated, 0x2048).unwrap();
+
+        assert_eq!(
+            trampoline.jump_back.encoding,
+            HookJumpEncoding::Arm64BranchImmediate
+        );
+        assert_eq!(
+            trampoline.bytes,
+            vec![
+                0xFD, 0x7B, 0xBF, 0xA9, 0xFD, 0x03, 0x00, 0x91, 0x10, 0x00, 0x00, 0x14,
+            ]
+        );
+    }
+
+    #[test]
+    fn build_trampoline_x86_64_allows_empty_relocated_bytes() {
+        let trampoline =
+            MachoPatcher::build_trampoline(PatchArch::X86_64, 0x2000, &[], 0x3000).unwrap();
+
+        assert_eq!(trampoline.relocated_bytes, Vec::<u8>::new());
+        assert_eq!(
+            trampoline.jump_back.encoding,
+            HookJumpEncoding::X86_64Relative
+        );
+        assert_eq!(trampoline.bytes, vec![0xE9, 0xFB, 0x0F, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn validate_trampoline_instructions_x86_64_rejects_rip_relative_lea() {
+        let err = MachoPatcher::validate_trampoline_instructions(
+            PatchArch::X86_64,
+            &[0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00], // lea rax, [rip]
+        )
+        .unwrap_err();
+
+        assert!(err.contains("RIP-relative"));
+    }
+
+    #[test]
+    fn plan_function_entry_hook_x86_64_rejects_relative_control_flow_stolen_bytes() {
+        let mut p = make_test_patcher();
+        p.data[0x100..0x105].copy_from_slice(&[0xE8, 0x01, 0x00, 0x00, 0x00]); // call +1
+
+        let err = p
+            .plan_function_entry_hook(PatchArch::X86_64, 0x100100, 0x100200, 0x100300, 5)
+            .unwrap_err();
+
+        assert!(err.contains("relative call"));
+    }
+
+    #[test]
+    fn plan_function_entry_hook_x86_64_rejects_rip_relative_stolen_bytes() {
+        let mut p = make_test_patcher();
+        p.data[0x100..0x107].copy_from_slice(&[0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00]);
+
+        let err = p
+            .plan_function_entry_hook(PatchArch::X86_64, 0x100100, 0x100200, 0x100300, 7)
+            .unwrap_err();
+
+        assert!(err.contains("RIP-relative"));
+    }
+
+    #[test]
+    fn plan_function_entry_patch_x86_64_pads_with_nops() {
+        let mut p = make_test_patcher();
+        let original = [0x55, 0x48, 0x89, 0xE5, 0x41, 0x57, 0x41, 0x56];
+        p.data[0x100..0x108].copy_from_slice(&original);
+
+        let plan = p
+            .plan_function_entry_patch(PatchArch::X86_64, 0x100100, 0x100200, original.len())
+            .unwrap();
+
+        assert_eq!(plan.entry_offset, 0x100);
+        assert_eq!(plan.original_bytes, original);
+        assert_eq!(plan.jump.encoding, HookJumpEncoding::X86_64Relative);
+        assert_eq!(
+            plan.patch_bytes,
+            vec![0xE9, 0xFB, 0x00, 0x00, 0x00, 0x90, 0x90, 0x90]
+        );
+        assert_eq!(plan.resume_va(), 0x100108);
+    }
+
+    #[test]
+    fn plan_function_entry_patch_x86_64_far_target_requires_larger_window() {
+        let p = make_test_patcher();
+        let err = p
+            .plan_function_entry_patch(PatchArch::X86_64, 0x100100, 0x1_0000_0000, 5)
+            .unwrap_err();
+        assert!(err.contains("needs 14 bytes"));
+    }
+
+    #[test]
+    fn plan_function_entry_patch_arm64_rejects_unaligned_overwrite_len() {
+        let p = make_test_patcher();
+        let err = p
+            .plan_function_entry_patch(PatchArch::Arm64, 0x100100, 0x100200, 6)
+            .unwrap_err();
+        assert!(err.contains("divisible by 4"));
+    }
+
+    #[test]
+    fn plan_function_entry_hook_arm64_rejects_pc_relative_stolen_bytes() {
+        let mut p = make_test_patcher();
+        p.data[0x100..0x104].copy_from_slice(&[0x10, 0x00, 0x00, 0x14]); // b +0x40
+
+        let err = p
+            .plan_function_entry_hook(PatchArch::Arm64, 0x100100, 0x100200, 0x100300, 4)
+            .unwrap_err();
+
+        assert!(err.contains("branch immediate"));
+    }
+
+    #[test]
+    fn plan_function_entry_hook_arm64_rejects_register_branch_stolen_bytes() {
+        let mut p = make_test_patcher();
+        p.data[0x100..0x104].copy_from_slice(&[0x00, 0x02, 0x1F, 0xD6]); // br x16
+
+        let err = p
+            .plan_function_entry_hook(PatchArch::Arm64e, 0x100100, 0x100200, 0x100300, 4)
+            .unwrap_err();
+
+        assert!(err.contains("register or authenticated branch"));
+    }
+
+    #[test]
+    fn plan_function_entry_patch_rejects_va_window_crossing_segment_gap() {
+        let p = make_test_patcher();
+        let err = p
+            .plan_function_entry_patch(PatchArch::X86_64, 0x100ffc, 8, 8)
+            .unwrap_err();
+
+        assert!(err.contains("not fully mappable"));
+    }
+
+    #[test]
+    fn nop_fill_x86() {
+        let mut p = make_test_patcher();
+        let original = p.nop_fill(0x100, 5, false).unwrap();
+        assert_eq!(original, vec![0x00; 5]);
+        assert_eq!(
+            p.read_bytes(0x100, 5).unwrap(),
+            &[0x90, 0x90, 0x90, 0x90, 0x90]
+        );
+    }
+
+    #[test]
+    fn nop_fill_arm64() {
+        let mut p = make_test_patcher();
+        let original = p.nop_fill(0x100, 8, true).unwrap();
+        assert_eq!(original, vec![0x00; 8]);
+        let nop_arm64 = [0x1F, 0x20, 0x03, 0xD5, 0x1F, 0x20, 0x03, 0xD5];
+        assert_eq!(p.read_bytes(0x100, 8).unwrap(), &nop_arm64);
+    }
+
+    #[test]
+    fn nop_fill_arm64_unaligned() {
+        let mut p = make_test_patcher();
+        let result = p.nop_fill(0x100, 5, true);
+        assert!(result.is_err());
+    }
+}

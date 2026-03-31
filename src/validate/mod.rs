@@ -202,20 +202,5 @@ fn check_symtab_bounds(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
 }
 
 fn format_prot(prot: VmProtection) -> String {
-    let r = if prot.contains(VmProtection::READ) {
-        'r'
-    } else {
-        '-'
-    };
-    let w = if prot.contains(VmProtection::WRITE) {
-        'w'
-    } else {
-        '-'
-    };
-    let x = if prot.contains(VmProtection::EXECUTE) {
-        'x'
-    } else {
-        '-'
-    };
-    format!("{r}{w}{x}")
+    prot.rwx_string()
 }

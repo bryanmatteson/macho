@@ -165,6 +165,9 @@ fn apply_delta_to_command(
             adjust_u32(encoded, endian, 32, delta); // lazy_bind_off
             adjust_u32(encoded, endian, 40, delta); // export_off
         }
+        LoadCommand::Main(_) => {
+            adjust_u64(encoded, endian, 8, delta); // entryoff
+        }
         LoadCommand::CodeSignature(_)
         | LoadCommand::SegmentSplitInfo(_)
         | LoadCommand::FunctionStarts(_)
@@ -189,6 +192,9 @@ fn apply_delta_to_command(
         }
         LoadCommand::Note(_) => {
             adjust_u64(encoded, endian, 24, delta); // offset
+        }
+        LoadCommand::FilesetEntry(_) => {
+            adjust_u64(encoded, endian, 16, delta); // fileoff
         }
         // Commands with no file offsets to adjust
         _ => {}

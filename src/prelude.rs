@@ -4,6 +4,9 @@ pub use crate::addr::{AddressMap, FatFileOffset, MappingEntry, Rva, ThinFileOffs
 // Error types
 pub use crate::error::{Error, Result};
 
+// Demangling helpers
+pub use crate::demangle::{SymbolDemangler, demangle_symbol, format_symbol};
+
 // Extension traits
 pub use crate::ext::{MachAnalysis, MachExt};
 
@@ -36,10 +39,14 @@ pub use crate::model::symbol::{StringTable, Symbol, SymbolTable, SymbolType};
 pub use crate::model::owned::{OwnedFatArch, OwnedFatBinary, OwnedMachFile};
 
 // ObjC types
+pub use crate::objc::graph::ObjCGraph;
 pub use crate::objc::{
     ObjCCategory, ObjCClass, ObjCIvar, ObjCMetadata, ObjCMethod, ObjCProperty, ObjCProtocol,
     parse_objc_metadata,
 };
+
+// Swift types
+pub use crate::swift::SwiftTypeIndex;
 
 // Code signature types
 pub use crate::codesign::{
@@ -54,10 +61,22 @@ pub use crate::dyld::{
 pub use crate::model::resolution::ResolutionContext;
 
 // Structural editing
-pub use crate::edit::MachEditor;
+pub use crate::edit::resign::ResignPlan;
+pub use crate::edit::transaction::{PatchOp, PatchPreview, PatchTransaction};
+pub use crate::edit::{
+    FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachEditor,
+    MachoPatcher, PatchArch, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry,
+    PatchSymbolTable, TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
+};
 
 // Top-level parse functions
 pub use crate::parse::{parse, parse_symbol_table, relocations_for_section};
 
 // Validation
 pub use crate::validate::{self, Diagnostic, DiagnosticCode, Severity};
+
+// Analysis / snapshot
+pub use crate::analysis::snapshot::{ContainerSnapshot, SliceSnapshot};
+
+// Diff
+pub use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport, diff_containers};

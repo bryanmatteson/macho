@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use macho::codesign::parse_code_signature;
-use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use std::path::PathBuf;
+
+use crate::commands::common::for_each_selected_mach;
 
 #[derive(clap::Args)]
 pub struct CodesignArgs {
@@ -22,24 +23,20 @@ pub fn run(args: CodesignArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    match &container {
-        MachContainer::Thin(mach) => print_codesign(mach, &args),
-        MachContainer::Fat(fat) => {
-            for arch in fat.arches() {
-                let name = arch.spec.name();
-                if let Some(ref f) = args.arch {
-                    if !name.eq_ignore_ascii_case(f) {
-                        continue;
-                    }
-                }
-                if fat.arches().len() > 1 {
-                    println!("=== {name} ===");
-                }
-                print_codesign(&arch.mach, &args);
+    for_each_selected_mach(
+        &container,
+        args.arch.as_deref(),
+        |mach, arch_name, show_header| {
+            if show_header {
+                println!("=== {arch_name} ===");
+            }
+            print_codesign(mach, &args);
+            if show_header {
                 println!();
             }
-        }
-    }
+            Ok(())
+        },
+    )?;
     Ok(())
 }
 

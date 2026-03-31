@@ -1,0 +1,5 @@
+[tools]
+    rust = "latest"
+
+[tasks]
+    link = "cargo install --path ."
