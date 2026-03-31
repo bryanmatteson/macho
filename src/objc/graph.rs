@@ -408,7 +408,11 @@ impl ObjCGraph {
             }
 
             let Some(node) = self.classes.get(name) else {
-                return if saw_class { Some(methods.into_values().collect()) } else { None };
+                return if saw_class {
+                    Some(methods.into_values().collect())
+                } else {
+                    None
+                };
             };
             saw_class = true;
             let candidates = match kind {
