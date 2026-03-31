@@ -97,7 +97,9 @@ fn synthetic_cross_slice_snapshot() -> ContainerSnapshot {
                 hash_type: "sha256".into(),
                 has_entitlements: false,
                 entitlements_xml: None,
+                entitlement_keys: Vec::new(),
                 has_der_entitlements: false,
+                entitlements_der_fingerprint: None,
                 has_cms_signature: true,
                 n_code_slots: 0,
                 code_limit: 0,
@@ -261,6 +263,51 @@ fn helper_queries_surface_common_and_divergent_names() {
         .collect();
     assert!(symbols.contains(&"only_arm64"));
     assert!(symbols.contains(&"only_x86_64"));
+}
+
+#[test]
+fn helper_queries_require_semantic_export_and_import_matches() {
+    let mut snap = synthetic_cross_slice_snapshot();
+    snap.slices[1].exports[0].kind = macho::analysis::snapshot::ExportKindSnapshot::Regular {
+        address: 0x2000,
+    };
+    snap.slices[1].imports[0].weak = true;
+
+    assert!(
+        common_exports(&snap).is_empty(),
+        "export names with different payloads should not be treated as common"
+    );
+    assert!(
+        common_imports(&snap).is_empty(),
+        "import names with different metadata should not be treated as common"
+    );
+}
+
+#[test]
+fn parity_reports_export_and_import_metadata_drift() {
+    let mut snap = synthetic_cross_slice_snapshot();
+    snap.slices[1].exports[0].kind = macho::analysis::snapshot::ExportKindSnapshot::Regular {
+        address: 0x2222,
+    };
+    snap.slices[1].imports[0].weak = true;
+
+    let parity = compute_parity(&snap.slices);
+    assert!(
+        parity
+            .divergences
+            .iter()
+            .any(|div| div.description.contains("export common differs across arches")),
+        "expected export metadata divergence: {:?}",
+        parity.divergences
+    );
+    assert!(
+        parity
+            .divergences
+            .iter()
+            .any(|div| div.description.contains("import shared differs across arches")),
+        "expected import metadata divergence: {:?}",
+        parity.divergences
+    );
 }
 
 #[test]

@@ -73,15 +73,7 @@ fn extract_header(mach: &MachFile<'_>) -> HeaderSnapshot {
 
     let uuid = mach.uuid().map(format_uuid);
 
-    let platform = mach
-        .load_commands()
-        .iter()
-        .find_map(|lc| lc.kind.as_build_version())
-        .map(|bv| PlatformSnapshot {
-            platform: bv.platform.name().to_string(),
-            min_os: bv.minos.to_string(),
-            sdk: bv.sdk.to_string(),
-        });
+    let platform = extract_platform_snapshot(mach);
 
     let flags: Vec<String> = {
         let mut out = Vec::new();
@@ -101,6 +93,17 @@ fn extract_header(mach: &MachFile<'_>) -> HeaderSnapshot {
         uuid,
         platform,
     }
+}
+
+fn extract_platform_snapshot(mach: &MachFile<'_>) -> Option<PlatformSnapshot> {
+    mach.load_commands()
+        .iter()
+        .find_map(|lc| lc.kind.as_build_version())
+        .map(|bv| PlatformSnapshot {
+            platform: bv.platform.name().to_string(),
+            min_os: bv.minos.to_string(),
+            sdk: bv.sdk.to_string(),
+        })
 }
 
 fn extract_load_commands(mach: &MachFile<'_>) -> Vec<LoadCommandSnapshot> {

@@ -133,53 +133,66 @@ impl AuditRule for SuspiciousEntitlements {
             Some(cs) => cs,
             None => return,
         };
-        let xml = match &cs.entitlements_xml {
-            Some(xml) => xml,
-            None => return,
-        };
+        if cs.entitlement_keys.is_empty() {
+            return;
+        }
 
         // Dangerous entitlement keys that weaken security posture
-        let dangerous_keys: &[(&str, &str, AuditSeverity)] = &[
+        let dangerous_keys: &[(&str, &str, AuditSeverity, bool)] = &[
             (
                 "com.apple.security.cs.allow-jit",
                 "allows JIT code generation, weakening code-signing guarantees",
                 AuditSeverity::Warning,
+                false,
             ),
             (
                 "com.apple.security.cs.disable-library-validation",
                 "disables library validation, allowing unsigned dylibs to be loaded",
                 AuditSeverity::Error,
+                false,
             ),
             (
                 "com.apple.security.cs.allow-unsigned-executable-memory",
                 "allows unsigned executable memory mappings",
                 AuditSeverity::Error,
+                false,
             ),
             (
                 "com.apple.security.cs.disable-executable-page-protection",
                 "disables executable page protection",
                 AuditSeverity::Critical,
+                false,
             ),
             (
                 "com.apple.security.get-task-allow",
                 "allows debugger attachment; should not ship in production builds",
                 AuditSeverity::Warning,
+                false,
             ),
             (
                 "com.apple.private.",
                 "uses private Apple entitlement prefix",
                 AuditSeverity::Warning,
+                true,
             ),
         ];
 
-        for (key, description, severity) in dangerous_keys {
-            if xml.contains(key) {
+        for (key, description, severity, prefix_match) in dangerous_keys {
+            let matched = if *prefix_match {
+                cs.entitlement_keys
+                    .iter()
+                    .any(|candidate| candidate.starts_with(key))
+            } else {
+                cs.entitlement_keys.iter().any(|candidate| candidate == key)
+            };
+
+            if matched {
                 findings.push(AuditFinding {
                     rule_id: self.id(),
                     severity: *severity,
                     title: format!("suspicious entitlement: {key}"),
                     body: description.to_string(),
-                    evidence: vec![format!("entitlements XML contains key: {key}")],
+                    evidence: vec![format!("entitlements contain key: {key}")],
                     remediation: Some(format!(
                         "Review whether {key} is required; remove if not needed"
                     )),
