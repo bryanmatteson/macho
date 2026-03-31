@@ -179,7 +179,15 @@ impl DepGraph {
         for exp in &self.exports {
             if let Some(ref reexport) = exp.reexport {
                 let ord = reexport.provider_ordinal as usize;
-                if ord > dylib_count {
+                if ord == 0 {
+                    issues.push(GraphIssue {
+                        severity: IssueSeverity::Error,
+                        message: format!(
+                            "reexport '{}' references ordinal 0 (self-image), which is invalid for reexports",
+                            exp.name,
+                        ),
+                    });
+                } else if ord > dylib_count {
                     issues.push(GraphIssue {
                         severity: IssueSeverity::Error,
                         message: format!(

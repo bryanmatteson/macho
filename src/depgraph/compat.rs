@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::constants::MachHeaderFlags;
+use crate::constants::{
+    MachHeaderFlags, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_WATCHOS,
+};
 use crate::depgraph::graph::DepGraph;
 use crate::error::Result;
 use crate::model::header::FileType;
@@ -162,16 +164,16 @@ fn get_platform(
         match &lc.kind {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),
             LoadCommand::VersionMinMacOS(d) => {
-                return Some((Platform::MACOS, d.version));
+                return Some((Platform(PLATFORM_MACOS), d.version));
             }
             LoadCommand::VersionMinIOS(d) => {
-                return Some((Platform::IOS, d.version));
+                return Some((Platform(PLATFORM_IOS), d.version));
             }
             LoadCommand::VersionMinTvOS(d) => {
-                return Some((Platform::TVOS, d.version));
+                return Some((Platform(PLATFORM_TVOS), d.version));
             }
             LoadCommand::VersionMinWatchOS(d) => {
-                return Some((Platform::WATCHOS, d.version));
+                return Some((Platform(PLATFORM_WATCHOS), d.version));
             }
             _ => {}
         }
@@ -399,4 +401,111 @@ fn check_import_coverage(
     }
 
     Ok(())
+}
+
+fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+    let flags = target.header().flags;
+    if flags.contains(MachHeaderFlags::FORCE_FLAT) {
+        findings.push(CompatFinding {
+            category: CompatCategory::NamespaceMode,
+            severity: CompatSeverity::Warning,
+            message: "target uses flat namespace binding (MH_FORCE_FLAT)".to_string(),
+        });
+    } else if flags.contains(MachHeaderFlags::TWOLEVEL) {
+        findings.push(CompatFinding {
+            category: CompatCategory::NamespaceMode,
+            severity: CompatSeverity::Info,
+            message: "target uses two-level namespace binding".to_string(),
+        });
+    } else {
+        findings.push(CompatFinding {
+            category: CompatCategory::NamespaceMode,
+            severity: CompatSeverity::Info,
+            message: "target has no explicit namespace-mode flags".to_string(),
+        });
+    }
+}
+
+fn check_rpaths(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+    let rpaths: Vec<&str> = target
+        .load_commands()
+        .iter()
+        .filter_map(|lc| lc.kind.as_rpath())
+        .collect();
+
+    if rpaths.is_empty() {
+        findings.push(CompatFinding {
+            category: CompatCategory::Rpath,
+            severity: CompatSeverity::Info,
+            message: "target has no LC_RPATH entries".to_string(),
+        });
+        return;
+    }
+
+    for rpath in rpaths {
+        let severity = if rpath.starts_with('/') {
+            CompatSeverity::Warning
+        } else {
+            CompatSeverity::Info
+        };
+        findings.push(CompatFinding {
+            category: CompatCategory::Rpath,
+            severity,
+            message: format!("target declares rpath '{rpath}'"),
+        });
+    }
+}
+
+fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+    let flags = target.header().flags;
+
+    if flags.contains(MachHeaderFlags::FORCE_FLAT) {
+        findings.push(CompatFinding {
+            category: CompatCategory::NamespaceMode,
+            severity: CompatSeverity::Warning,
+            message: "target uses flat namespace (FORCE_FLAT); symbol collisions may occur"
+                .to_string(),
+        });
+    } else if flags.contains(MachHeaderFlags::TWOLEVEL) {
+        findings.push(CompatFinding {
+            category: CompatCategory::NamespaceMode,
+            severity: CompatSeverity::Info,
+            message: "target uses two-level namespace".to_string(),
+        });
+    }
+}
+
+fn check_rpaths(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+    let rpaths: Vec<String> = target
+        .load_commands()
+        .iter()
+        .filter_map(|lc| lc.kind.as_rpath().map(|s| s.to_string()))
+        .collect();
+
+    // Check if any linked dylib uses @rpath and whether rpaths are defined
+    let has_rpath_dylib = target.load_commands().iter().any(|lc| {
+        matches!(
+            &lc.kind,
+            LoadCommand::LoadDylib(d)
+            | LoadCommand::LoadWeakDylib(d)
+            | LoadCommand::ReexportDylib(d)
+            | LoadCommand::LazyLoadDylib(d)
+            | LoadCommand::LoadUpwardDylib(d)
+            if d.name.starts_with("@rpath/")
+        )
+    });
+
+    if has_rpath_dylib && rpaths.is_empty() {
+        findings.push(CompatFinding {
+            category: CompatCategory::Rpath,
+            severity: CompatSeverity::Warning,
+            message: "target links dylibs via @rpath but defines no LC_RPATH entries".to_string(),
+        });
+    } else if !rpaths.is_empty() {
+        findings.push(CompatFinding {
+            category: CompatCategory::Rpath,
+            severity: CompatSeverity::Info,
+            message: format!("target defines {} rpath(s)", rpaths.len()),
+        });
+    }
 }

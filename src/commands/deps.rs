@@ -15,6 +15,9 @@ pub struct DepsArgs {
     /// Check compatibility against a provider binary
     #[arg(long = "check-compat")]
     check_compat: Option<PathBuf>,
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 pub fn run(args: DepsArgs) -> Result<()> {

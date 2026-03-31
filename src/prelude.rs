@@ -62,7 +62,9 @@ pub use crate::model::resolution::ResolutionContext;
 
 // Structural editing
 pub use crate::edit::resign::ResignPlan;
-pub use crate::edit::transaction::{PatchOp, PatchPreview, PatchTransaction};
+pub use crate::edit::transaction::{
+    PatchOp, PatchPreview, PatchTransaction, PreparedPatch, SignatureOutcome,
+};
 pub use crate::edit::{
     FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachEditor,
     MachoPatcher, PatchArch, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry,

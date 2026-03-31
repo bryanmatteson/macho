@@ -5,7 +5,11 @@ use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport};
 
 pub fn diff_slice_snapshots(old: &SliceSnapshot, new: &SliceSnapshot) -> DiffReport {
     let mut findings = Vec::new();
-    let arch = Some(format!("{} -> {}", old.arch, new.arch));
+    let arch = if old.arch == new.arch {
+        Some(old.arch.clone())
+    } else {
+        Some(format!("{} -> {}", old.arch, new.arch))
+    };
     diff_slice_details(old, new, &arch, &mut findings);
     DiffReport { findings }
 }
