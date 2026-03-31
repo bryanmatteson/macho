@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-use macho::analysis::snapshot::ContainerSnapshot;
 use macho::container_analysis::{ContainerReport, resolve};
 use std::path::PathBuf;
 
@@ -27,7 +26,7 @@ pub fn run(args: ContainerArgs) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
-    let mut snapshot = ContainerSnapshot::from_container(&container);
+    let mut snapshot = container.snapshot();
     if let Some(ref filter) = args.arch {
         filter_snapshot_by_arch(&mut snapshot, filter, &args.path)?;
     }

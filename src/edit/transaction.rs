@@ -1,49 +1,11 @@
 use crate::edit::MachEditor;
+pub use crate::edit::ops::PatchOp;
 use crate::error::{Error, Result};
 use crate::model::load_command::LoadCommand;
 use crate::model::mach::MachFile;
 use crate::validate;
 
 use serde::Serialize;
-
-#[derive(Debug, Clone)]
-pub enum PatchOp {
-    AddRpath(String),
-    RemoveRpath(String),
-    AddDylib {
-        name: String,
-        compat_version: u32,
-        current_version: u32,
-    },
-    RemoveCodeSignature,
-    AddCommand(LoadCommand),
-    RemoveCommand(usize),
-    ReplaceCommand(usize, LoadCommand),
-    /// Overwrite bytes at an absolute file offset in the built binary.
-    PatchBytes {
-        offset: u64,
-        bytes: Vec<u8>,
-    },
-}
-
-impl std::fmt::Display for PatchOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::AddRpath(p) => write!(f, "add rpath: {p}"),
-            Self::RemoveRpath(p) => write!(f, "remove rpath: {p}"),
-            Self::AddDylib { name, .. } => write!(f, "add dylib: {name}"),
-            Self::RemoveCodeSignature => write!(f, "remove code signature"),
-            Self::AddCommand(cmd) => write!(f, "add command: {}", cmd.name()),
-            Self::RemoveCommand(idx) => write!(f, "remove command at index {idx}"),
-            Self::ReplaceCommand(idx, cmd) => {
-                write!(f, "replace command at index {idx} with {}", cmd.name())
-            }
-            Self::PatchBytes { offset, bytes } => {
-                write!(f, "patch {} bytes at offset {offset:#x}", bytes.len())
-            }
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PatchPreview {
@@ -88,6 +50,18 @@ impl<'data> PatchTransaction<'data> {
         });
     }
 
+    pub fn add_command(&mut self, cmd: LoadCommand) {
+        self.ops.push(PatchOp::AddCommand(cmd));
+    }
+
+    pub fn remove_command(&mut self, index: usize) {
+        self.ops.push(PatchOp::RemoveCommand(index));
+    }
+
+    pub fn replace_command(&mut self, index: usize, cmd: LoadCommand) {
+        self.ops.push(PatchOp::ReplaceCommand(index, cmd));
+    }
+
     pub fn remove_code_signature(&mut self) {
         self.ops.push(PatchOp::RemoveCodeSignature);
     }
@@ -99,6 +73,12 @@ impl<'data> PatchTransaction<'data> {
     pub fn preview(&self) -> Result<PatchPreview> {
         let mut editor = MachEditor::new(self.mach);
         let old_count = editor.command_count();
+        let original_commands: Vec<LoadCommand> = self
+            .mach
+            .load_commands()
+            .iter()
+            .map(|lc| lc.kind.clone())
+            .collect();
 
         apply_ops(&mut editor, &self.ops)?;
         let new_count = editor.command_count();
@@ -120,19 +100,9 @@ impl<'data> PatchTransaction<'data> {
             .map(|d| format!("{}: {}", d.code.0, d.message))
             .collect();
 
-        let sig_invalidated = self.ops.iter().any(|op| {
-            matches!(
-                op,
-                PatchOp::RemoveCodeSignature
-                    | PatchOp::AddRpath(_)
-                    | PatchOp::RemoveRpath(_)
-                    | PatchOp::AddDylib { .. }
-                    | PatchOp::AddCommand(_)
-                    | PatchOp::RemoveCommand(_)
-                    | PatchOp::ReplaceCommand(_, _)
-                    | PatchOp::PatchBytes { .. }
-            )
-        }) && has_code_signature(self.mach);
+        let sig_invalidated = has_code_signature(self.mach)
+            && (editor.commands() != original_commands.as_slice()
+                || byte_patches_changed(self.mach.bytes(), &candidate, &self.ops));
 
         Ok(PatchPreview {
             operations: self.ops.iter().map(|op| op.to_string()).collect(),
@@ -210,8 +180,16 @@ fn apply_ops(editor: &mut MachEditor<'_>, ops: &[PatchOp]) -> Result<()> {
 fn apply_byte_patches(output: &mut [u8], ops: &[PatchOp]) -> Result<()> {
     for op in ops {
         if let PatchOp::PatchBytes { offset, bytes } = op {
-            let start = *offset as usize;
-            let end = start + bytes.len();
+            let start = usize::try_from(*offset).map_err(|_| Error::Bounds {
+                offset: *offset,
+                needed: bytes.len() as u64,
+                available: output.len() as u64,
+            })?;
+            let end = start.checked_add(bytes.len()).ok_or(Error::Bounds {
+                offset: *offset,
+                needed: bytes.len() as u64,
+                available: output.len() as u64,
+            })?;
             if end > output.len() {
                 return Err(Error::Bounds {
                     offset: *offset,
@@ -229,4 +207,22 @@ fn has_code_signature(mach: &MachFile<'_>) -> bool {
     mach.load_commands()
         .iter()
         .any(|lc| matches!(lc.kind, LoadCommand::CodeSignature(_)))
+}
+
+fn byte_patches_changed(original: &[u8], candidate: &[u8], ops: &[PatchOp]) -> bool {
+    for op in ops {
+        if let PatchOp::PatchBytes { offset, bytes } = op {
+            let Ok(start) = usize::try_from(*offset) else {
+                return true;
+            };
+            let end = start.saturating_add(bytes.len());
+            if end > original.len() || end > candidate.len() {
+                return true;
+            }
+            if original[start..end] != candidate[start..end] {
+                return true;
+            }
+        }
+    }
+    false
 }

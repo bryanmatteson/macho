@@ -1,8 +1,14 @@
 use macho::analysis::snapshot::{
-    AnalysisIssueSnapshot, ContainerFormat, ContainerSnapshot, DiagnosticSnapshot, HeaderSnapshot,
-    ObjCSnapshot, SliceSnapshot,
+    AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
+    DiagnosticSnapshot, FilesetEntrySnapshot, HeaderSnapshot, LoadCommandSnapshot, ObjCSnapshot,
+    PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
+use std::process::Command;
+
+fn macho_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_macho")
+}
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
@@ -39,6 +45,76 @@ fn synthetic_snapshot() -> ContainerSnapshot {
             diagnostics: Vec::new(),
         }],
     }
+}
+
+fn synthetic_fileset_snapshot(vm_addr: u64, file_offset: u64) -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].load_commands.push(LoadCommandSnapshot {
+        name: "LC_FILESET_ENTRY".into(),
+        summary: "com.example.member".into(),
+        fileset_entry: Some(FilesetEntrySnapshot {
+            entry_id: "com.example.member".into(),
+            vm_addr,
+            file_offset,
+        }),
+    });
+    snap
+}
+
+fn synthetic_load_command_snapshot(name: &str, summary: &str) -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].load_commands.push(LoadCommandSnapshot {
+        name: name.into(),
+        summary: summary.into(),
+        fileset_entry: None,
+    });
+    snap
+}
+
+fn synthetic_signed_snapshot() -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].codesign = Some(CodesignSnapshot {
+        identifier: Some("com.example.test".into()),
+        team_id: Some("TEAMID".into()),
+        hash_type: "sha256".into(),
+        has_entitlements: false,
+        entitlements_xml: None,
+        has_cms_signature: true,
+        n_code_slots: 0,
+        code_limit: 0,
+    });
+    snap.slices[0].load_commands.push(LoadCommandSnapshot {
+        name: "LC_CODE_SIGNATURE".into(),
+        summary: "off=0x100 size=0x40".into(),
+        fileset_entry: None,
+    });
+    snap
+}
+
+fn synthetic_metadata_snapshot(
+    uuid: &str,
+    platform: &str,
+    min_os: &str,
+    sdk: &str,
+) -> ContainerSnapshot {
+    let mut snap = synthetic_snapshot();
+    snap.slices[0].header.uuid = Some(uuid.into());
+    snap.slices[0].header.platform = Some(PlatformSnapshot {
+        platform: platform.into(),
+        min_os: min_os.into(),
+        sdk: sdk.into(),
+    });
+    snap.slices[0].load_commands.push(LoadCommandSnapshot {
+        name: "LC_UUID".into(),
+        summary: uuid.into(),
+        fileset_entry: None,
+    });
+    snap.slices[0].load_commands.push(LoadCommandSnapshot {
+        name: "LC_BUILD_VERSION".into(),
+        summary: format!("{platform} {min_os}"),
+        fileset_entry: None,
+    });
+    snap
 }
 
 #[test]
@@ -245,5 +321,193 @@ fn diff_reports_analysis_issue_changes() {
             .contains("analysis issue resolved in codesign"),
         "unexpected finding: {:?}",
         analysis[0]
+    );
+}
+
+#[test]
+fn diff_reports_fileset_entry_changes() {
+    let old = synthetic_fileset_snapshot(0x1000_0000, 0x2000);
+    let new = synthetic_fileset_snapshot(0x1000_0000, 0x2400);
+
+    let report = diff_containers(&old, &new);
+    let load_commands: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::LoadCommands)
+        .collect();
+
+    assert_eq!(
+        load_commands.len(),
+        2,
+        "expected add/remove pair: {load_commands:?}"
+    );
+    assert!(
+        load_commands
+            .iter()
+            .any(|finding| finding.message.contains("LC_FILESET_ENTRY")),
+        "missing fileset entry diff: {load_commands:?}"
+    );
+    assert!(
+        load_commands
+            .iter()
+            .any(|finding| finding.message.contains("file_offset")),
+        "missing file offset detail: {load_commands:?}"
+    );
+}
+
+#[test]
+fn diff_load_command_severity_distinguishes_dependencies_and_rpaths() {
+    let old_dylib = synthetic_load_command_snapshot("LC_LOAD_DYLIB", "/usr/lib/libfoo.dylib");
+    let no_dylib = synthetic_snapshot();
+    let dylib_report = diff_containers(&old_dylib, &no_dylib);
+    let dylib_findings: Vec<_> = dylib_report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::LoadCommands)
+        .collect();
+    assert_eq!(dylib_findings.len(), 1, "expected one dylib finding");
+    assert_eq!(dylib_findings[0].severity, ChangeSeverity::Breaking);
+
+    let old_rpath = synthetic_load_command_snapshot("LC_RPATH", "/tmp/old");
+    let no_rpath = synthetic_snapshot();
+    let rpath_report = diff_containers(&old_rpath, &no_rpath);
+    let rpath_findings: Vec<_> = rpath_report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::LoadCommands)
+        .collect();
+    assert_eq!(rpath_findings.len(), 1, "expected one rpath finding");
+    assert_eq!(rpath_findings[0].severity, ChangeSeverity::Warning);
+
+    let old_main = synthetic_load_command_snapshot("LC_MAIN", "entry_offset=0x1000");
+    let no_main = synthetic_snapshot();
+    let main_report = diff_containers(&old_main, &no_main);
+    let main_findings: Vec<_> = main_report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::LoadCommands)
+        .collect();
+    assert_eq!(main_findings.len(), 1, "expected one main finding");
+    assert_eq!(main_findings[0].severity, ChangeSeverity::Breaking);
+}
+
+#[test]
+fn diff_skips_code_signature_load_command_when_codesign_state_changes() {
+    let old = synthetic_signed_snapshot();
+    let mut new = synthetic_signed_snapshot();
+    new.slices[0].codesign = None;
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.domain == DiffDomain::Codesign),
+        "expected codesign diff"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|finding| finding.domain != DiffDomain::LoadCommands),
+        "code signature should not produce a separate load-command diff: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|finding| (&finding.domain, &finding.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn diff_ignores_metadata_load_commands_covered_by_header() {
+    let old =
+        synthetic_metadata_snapshot("AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE", "ios", "1.0", "1.0");
+    let new =
+        synthetic_metadata_snapshot("FFFFFFFF-1111-2222-3333-444444444444", "ios", "2.0", "2.0");
+
+    let report = diff_containers(&old, &new);
+    let load_commands: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::LoadCommands)
+        .collect();
+
+    assert!(
+        load_commands.is_empty(),
+        "metadata load commands should be covered by header diffs: {load_commands:?}"
+    );
+
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.domain == DiffDomain::Header
+                && finding.message.contains("UUID changed")),
+        "expected header UUID diff"
+    );
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.domain == DiffDomain::Header
+                && finding.message.contains("min OS changed")),
+        "expected header platform diff"
+    );
+}
+
+#[test]
+fn diff_cli_json_outputs_findings() {
+    let output = Command::new(macho_bin())
+        .args(["diff", "/usr/bin/true", "/usr/bin/false", "--json"])
+        .output()
+        .expect("run macho diff");
+
+    assert!(
+        output.status.success(),
+        "diff command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid diff JSON");
+    assert!(json["findings"].is_array());
+    assert!(
+        !json["findings"]
+            .as_array()
+            .expect("findings array")
+            .is_empty(),
+        "expected diff output to contain findings"
+    );
+}
+
+#[test]
+fn diff_cli_fail_on_info_exits_nonzero() {
+    let output = Command::new(macho_bin())
+        .args([
+            "diff",
+            "/usr/bin/true",
+            "/usr/bin/false",
+            "--json",
+            "--fail-on",
+            "info",
+        ])
+        .output()
+        .expect("run macho diff");
+
+    assert!(
+        !output.status.success(),
+        "expected fail-on threshold to trigger a non-zero exit status"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value =
+        serde_json::from_str(&stdout).expect("valid JSON on fail-on exit");
+    assert!(
+        !json["findings"]
+            .as_array()
+            .expect("findings array")
+            .is_empty(),
+        "expected findings to be preserved when failing"
     );
 }

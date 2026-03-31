@@ -21,10 +21,18 @@ pub struct ClassNode {
     pub is_swift: bool,
     pub instance_methods: Vec<MethodEntry>,
     pub class_methods: Vec<MethodEntry>,
+    pub effective_instance_methods: Vec<MethodEntry>,
+    pub effective_class_methods: Vec<MethodEntry>,
     pub properties: Vec<String>,
     pub ivars: Vec<String>,
     pub protocols: Vec<String>,
     pub categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AllMethods {
+    pub instance: Vec<MethodEntry>,
+    pub class: Vec<MethodEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -35,7 +43,7 @@ pub struct MethodEntry {
     pub imp_symbol: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum MethodOrigin {
     Class,
     Category(String),
@@ -52,13 +60,51 @@ pub struct ProtocolNode {
     pub conforming_classes: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MethodKind {
+    Instance,
+    Class,
+}
+
+impl MethodKind {
+    pub fn prefix(self) -> char {
+        match self {
+            Self::Instance => '-',
+            Self::Class => '+',
+        }
+    }
+
+    pub fn is_class(self) -> bool {
+        matches!(self, Self::Class)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SelectorOwner {
     pub class_name: String,
-    pub is_class_method: bool,
+    pub kind: MethodKind,
     pub origin: MethodOrigin,
     pub imp: u64,
     pub imp_symbol: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResolvedMethod {
+    pub class_name: String,
+    pub selector: String,
+    pub kind: MethodKind,
+    pub origin: MethodOrigin,
+    pub imp: u64,
+    pub imp_symbol: Option<String>,
+    pub resolution: MethodResolution,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "resolution", rename_all = "snake_case")]
+pub enum MethodResolution {
+    Direct,
+    Inherited { from: String },
 }
 
 impl ObjCGraph {
@@ -78,7 +124,6 @@ impl ObjCGraph {
         let mut protocols = BTreeMap::new();
         let mut selectors: BTreeMap<String, Vec<SelectorOwner>> = BTreeMap::new();
 
-        // Build class nodes
         for cls in &metadata.classes {
             let node = ClassNode {
                 name: cls.name.clone(),
@@ -104,19 +149,20 @@ impl ObjCGraph {
                         imp_symbol: addr_to_sym.get(&m.imp.0).cloned(),
                     })
                     .collect(),
+                effective_instance_methods: Vec::new(),
+                effective_class_methods: Vec::new(),
                 properties: cls.properties.iter().map(|p| p.name.clone()).collect(),
                 ivars: cls.ivars.iter().map(|iv| iv.name.clone()).collect(),
                 protocols: cls.protocols.clone(),
                 categories: Vec::new(),
             };
 
-            // Index selectors
             for m in &cls.instance_methods {
                 index_selector(
                     &mut selectors,
                     &m.name,
                     &cls.name,
-                    false,
+                    MethodKind::Instance,
                     MethodOrigin::Class,
                     m.imp.0,
                     addr_to_sym.get(&m.imp.0).cloned(),
@@ -127,7 +173,7 @@ impl ObjCGraph {
                     &mut selectors,
                     &m.name,
                     &cls.name,
-                    true,
+                    MethodKind::Class,
                     MethodOrigin::Class,
                     m.imp.0,
                     addr_to_sym.get(&m.imp.0).cloned(),
@@ -137,7 +183,6 @@ impl ObjCGraph {
             classes.insert(cls.name.clone(), node);
         }
 
-        // Fold categories
         for cat in &metadata.categories {
             if let Some(node) = classes.get_mut(&cat.class_name) {
                 node.categories.push(cat.name.clone());
@@ -145,7 +190,10 @@ impl ObjCGraph {
             }
         }
 
-        // Build protocol nodes
+        for node in classes.values_mut() {
+            finalize_class_node(node);
+        }
+
         for proto in &metadata.protocols {
             let conforming: Vec<String> = classes
                 .values()
@@ -157,26 +205,38 @@ impl ObjCGraph {
                 proto.name.clone(),
                 ProtocolNode {
                     name: proto.name.clone(),
-                    instance_methods: proto
-                        .instance_methods
-                        .iter()
-                        .map(|m| m.name.clone())
-                        .collect(),
-                    class_methods: proto.class_methods.iter().map(|m| m.name.clone()).collect(),
-                    optional_instance_methods: proto
-                        .optional_instance_methods
-                        .iter()
-                        .map(|m| m.name.clone())
-                        .collect(),
-                    optional_class_methods: proto
-                        .optional_class_methods
-                        .iter()
-                        .map(|m| m.name.clone())
-                        .collect(),
-                    adopted_protocols: proto.adopted_protocols.clone(),
-                    conforming_classes: conforming,
+                    instance_methods: sorted_unique(
+                        proto
+                            .instance_methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect(),
+                    ),
+                    class_methods: sorted_unique(
+                        proto.class_methods.iter().map(|m| m.name.clone()).collect(),
+                    ),
+                    optional_instance_methods: sorted_unique(
+                        proto
+                            .optional_instance_methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect(),
+                    ),
+                    optional_class_methods: sorted_unique(
+                        proto
+                            .optional_class_methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect(),
+                    ),
+                    adopted_protocols: sorted_unique(proto.adopted_protocols.clone()),
+                    conforming_classes: sorted_unique(conforming),
                 },
             );
+        }
+
+        for owners in selectors.values_mut() {
+            owners.sort_by(selector_owner_sort_key);
         }
 
         Self {
@@ -201,6 +261,14 @@ impl ObjCGraph {
             .unwrap_or(&[])
     }
 
+    pub fn implementations_of(&self, selector: &str, kind: MethodKind) -> Vec<SelectorOwner> {
+        self.selector_owners(selector)
+            .iter()
+            .filter(|owner| owner.kind == kind)
+            .cloned()
+            .collect()
+    }
+
     pub fn superclass_chain(&self, class_name: &str) -> Vec<&str> {
         let mut chain = Vec::new();
         let mut current = class_name;
@@ -208,7 +276,7 @@ impl ObjCGraph {
         while let Some(node) = self.classes.get(current) {
             if let Some(ref sup) = node.superclass {
                 if !seen.insert(sup.as_str()) {
-                    break; // cycle guard
+                    break;
                 }
                 chain.push(sup.as_str());
                 current = sup;
@@ -220,21 +288,137 @@ impl ObjCGraph {
     }
 
     pub fn effective_instance_methods(&self, class_name: &str) -> Vec<&MethodEntry> {
-        let mut methods = Vec::new();
-        let mut seen = BTreeSet::new();
+        self.classes
+            .get(class_name)
+            .map(|node| node.effective_instance_methods.iter().collect())
+            .unwrap_or_default()
+    }
 
-        // Own methods (categories override class methods for same selector)
-        if let Some(node) = self.classes.get(class_name) {
-            // Category methods first (last category wins in ObjC runtime)
-            for m in node.instance_methods.iter().rev() {
-                if seen.insert(&m.selector) {
-                    methods.push(m);
-                }
+    pub fn effective_class_methods(&self, class_name: &str) -> Vec<&MethodEntry> {
+        self.classes
+            .get(class_name)
+            .map(|node| node.effective_class_methods.iter().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn all_methods(&self, class_name: &str) -> Option<AllMethods> {
+        let node = self.classes.get(class_name)?;
+        Some(AllMethods {
+            instance: node.effective_instance_methods.clone(),
+            class: node.effective_class_methods.clone(),
+        })
+    }
+
+    pub fn find_method(
+        &self,
+        class_name: &str,
+        selector: &str,
+        kind: MethodKind,
+    ) -> Option<&MethodEntry> {
+        let node = self.classes.get(class_name)?;
+        match kind {
+            MethodKind::Instance => node
+                .effective_instance_methods
+                .iter()
+                .find(|m| m.selector == selector),
+            MethodKind::Class => node
+                .effective_class_methods
+                .iter()
+                .find(|m| m.selector == selector),
+        }
+    }
+
+    pub fn resolve_inherited(
+        &self,
+        class_name: &str,
+        selector: &str,
+        kind: MethodKind,
+    ) -> Option<ResolvedMethod> {
+        let node = self.classes.get(class_name)?;
+
+        if let Some(method) = self.find_method(class_name, selector, kind) {
+            return Some(ResolvedMethod {
+                class_name: class_name.to_string(),
+                selector: selector.to_string(),
+                kind,
+                origin: method.origin.clone(),
+                imp: method.imp,
+                imp_symbol: method.imp_symbol.clone(),
+                resolution: MethodResolution::Direct,
+            });
+        }
+
+        for ancestor in self.superclass_chain(&node.name) {
+            if let Some(method) = self.find_method(ancestor, selector, kind) {
+                return Some(ResolvedMethod {
+                    class_name: ancestor.to_string(),
+                    selector: selector.to_string(),
+                    kind,
+                    origin: method.origin.clone(),
+                    imp: method.imp,
+                    imp_symbol: method.imp_symbol.clone(),
+                    resolution: MethodResolution::Inherited {
+                        from: ancestor.to_string(),
+                    },
+                });
             }
         }
-        methods.reverse();
-        methods
+
+        None
     }
+
+    pub fn responds_to(&self, class_name: &str, selector: &str, kind: MethodKind) -> bool {
+        self.resolve_inherited(class_name, selector, kind).is_some()
+    }
+}
+
+fn finalize_class_node(node: &mut ClassNode) {
+    let instance_methods = std::mem::take(&mut node.instance_methods);
+    let class_methods = std::mem::take(&mut node.class_methods);
+
+    node.effective_instance_methods = build_effective_methods(&instance_methods);
+    node.effective_class_methods = build_effective_methods(&class_methods);
+
+    node.instance_methods = sort_method_entries(instance_methods);
+    node.class_methods = sort_method_entries(class_methods);
+    node.properties = sorted_unique(std::mem::take(&mut node.properties));
+    node.ivars = sorted_unique(std::mem::take(&mut node.ivars));
+    node.protocols = sorted_unique(std::mem::take(&mut node.protocols));
+    node.categories = sorted_unique(std::mem::take(&mut node.categories));
+}
+
+fn build_effective_methods(entries: &[MethodEntry]) -> Vec<MethodEntry> {
+    let mut map = BTreeMap::new();
+    for entry in entries {
+        map.insert(entry.selector.clone(), entry.clone());
+    }
+    map.into_values().collect()
+}
+
+fn sort_method_entries(mut entries: Vec<MethodEntry>) -> Vec<MethodEntry> {
+    entries.sort_by(method_entry_sort_key);
+    entries
+}
+
+fn method_entry_sort_key(left: &MethodEntry, right: &MethodEntry) -> std::cmp::Ordering {
+    left.selector
+        .cmp(&right.selector)
+        .then(method_origin_sort_key(&left.origin).cmp(&method_origin_sort_key(&right.origin)))
+        .then(left.imp.cmp(&right.imp))
+        .then(left.imp_symbol.cmp(&right.imp_symbol))
+}
+
+fn method_origin_sort_key(origin: &MethodOrigin) -> (u8, &str) {
+    match origin {
+        MethodOrigin::Class => (0, ""),
+        MethodOrigin::Category(name) => (1, name.as_str()),
+    }
+}
+
+fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn fold_category_methods(
@@ -257,7 +441,7 @@ fn fold_category_methods(
             selectors,
             &m.name,
             &cat.class_name,
-            false,
+            MethodKind::Instance,
             origin.clone(),
             m.imp.0,
             sym,
@@ -275,7 +459,7 @@ fn fold_category_methods(
             selectors,
             &m.name,
             &cat.class_name,
-            true,
+            MethodKind::Class,
             origin.clone(),
             m.imp.0,
             sym,
@@ -287,7 +471,7 @@ fn index_selector(
     selectors: &mut BTreeMap<String, Vec<SelectorOwner>>,
     selector: &str,
     class_name: &str,
-    is_class_method: bool,
+    kind: MethodKind,
     origin: MethodOrigin,
     imp: u64,
     imp_symbol: Option<String>,
@@ -297,11 +481,20 @@ fn index_selector(
         .or_default()
         .push(SelectorOwner {
             class_name: class_name.to_string(),
-            is_class_method,
+            kind,
             origin,
             imp,
             imp_symbol,
         });
+}
+
+fn selector_owner_sort_key(left: &SelectorOwner, right: &SelectorOwner) -> std::cmp::Ordering {
+    left.class_name
+        .cmp(&right.class_name)
+        .then(left.kind.prefix().cmp(&right.kind.prefix()))
+        .then(method_origin_sort_key(&left.origin).cmp(&method_origin_sort_key(&right.origin)))
+        .then(left.imp.cmp(&right.imp))
+        .then(left.imp_symbol.cmp(&right.imp_symbol))
 }
 
 fn build_address_symbol_map(mach: &MachFile<'_>) -> BTreeMap<u64, String> {

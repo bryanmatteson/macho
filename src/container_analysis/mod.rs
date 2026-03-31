@@ -4,6 +4,7 @@ pub mod resolve;
 use serde::Serialize;
 
 use crate::analysis::snapshot::ContainerSnapshot;
+use crate::model::container::MachContainer;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContainerReport {
@@ -27,6 +28,11 @@ pub struct FilesetEntry {
 }
 
 impl ContainerReport {
+    pub fn from_container(container: &MachContainer<'_>) -> Self {
+        let snapshot = ContainerSnapshot::from_container(container);
+        Self::from_snapshot(&snapshot)
+    }
+
     pub fn from_snapshot(snap: &ContainerSnapshot) -> Self {
         let arches: Vec<String> = snap.slices.iter().map(|s| s.arch.clone()).collect();
 

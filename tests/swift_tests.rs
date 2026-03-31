@@ -1,6 +1,6 @@
 use macho::model::container::MachContainer;
 use macho::swift::SwiftTypeIndex;
-use macho::swift::types::{SwiftTypeKind, SwiftTypeSource};
+use macho::swift::types::{SwiftType, SwiftTypeConfidence, SwiftTypeKind, SwiftTypeSource};
 
 fn swift_index_for(path: &str) -> SwiftTypeIndex {
     let data = std::fs::read(path).expect("read");
@@ -100,4 +100,27 @@ fn swift_type_index_serializes() {
     let json = serde_json::to_string(&index).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert!(parsed["types"].is_array());
+    assert!(parsed["types"][0]["confidence"].is_string());
+}
+
+#[test]
+fn swift_confidence_helpers_are_consistent() {
+    let index = swift_index_for("/usr/bin/plutil");
+    let high = index.high_confidence();
+    let partial = index.partial();
+    assert_eq!(high.len() + partial.len(), index.types.len());
+}
+
+#[test]
+fn swift_type_confidence_serializes() {
+    let ty = SwiftType {
+        name: "Demo.Widget".into(),
+        kind: SwiftTypeKind::Class,
+        mangled_name: Some("$s4Demo6WidgetC".into()),
+        address: Some(0x1000),
+        source: SwiftTypeSource::DemangledSymbol,
+        confidence: SwiftTypeConfidence::High,
+    };
+    let json = serde_json::to_value(&ty).expect("serialize");
+    assert_eq!(json["confidence"], "high");
 }

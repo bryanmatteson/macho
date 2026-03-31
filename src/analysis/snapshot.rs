@@ -73,7 +73,7 @@ pub struct LoadCommandSnapshot {
     pub fileset_entry: Option<FilesetEntrySnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FilesetEntrySnapshot {
     pub entry_id: String,
     pub vm_addr: u64,

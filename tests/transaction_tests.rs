@@ -112,6 +112,20 @@ fn transaction_remove_rpath_no_op_on_missing() {
 }
 
 #[test]
+fn transaction_noop_edit_does_not_invalidate_signature() {
+    with_thin_mach(|mach| {
+        let mut txn = PatchTransaction::new(mach);
+        txn.remove_rpath("/definitely/not/present");
+        let preview = txn.preview().expect("preview");
+
+        assert!(
+            !preview.signature_invalidated,
+            "no-op edits should not be treated as signature invalidation"
+        );
+    });
+}
+
+#[test]
 fn transaction_remove_code_signature() {
     with_thin_mach(|mach| {
         let mut txn = PatchTransaction::new(mach);
@@ -157,6 +171,18 @@ fn transaction_preview_no_validation_errors_on_valid_ops() {
             preview.validation_errors.is_empty(),
             "valid patch should produce no validation errors"
         );
+    });
+}
+
+#[test]
+fn transaction_patch_bytes_out_of_bounds_fails_cleanly() {
+    with_thin_mach(|mach| {
+        let mut txn = PatchTransaction::new(mach);
+        txn.patch_bytes(u64::MAX, vec![0x90]);
+
+        let err = txn.preview().expect_err("preview should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("out of bounds"), "unexpected error: {msg}");
     });
 }
 

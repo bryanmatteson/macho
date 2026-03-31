@@ -1,5 +1,9 @@
+use std::collections::BTreeMap;
+
 use macho::model::container::MachContainer;
-use macho::objc::graph::ObjCGraph;
+use macho::objc::graph::{
+    ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
+};
 use macho::objc::parse_objc_metadata;
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
@@ -86,6 +90,12 @@ fn graph_effective_methods_includes_all() {
                     .filter(|m| { matches!(m.origin, macho::objc::graph::MethodOrigin::Class) })
                     .count()
         );
+
+        assert_eq!(
+            effective.len(),
+            node.effective_instance_methods.len(),
+            "effective helper should match the canonical class snapshot"
+        );
     }
 }
 
@@ -97,6 +107,13 @@ fn graph_serializes_to_json() {
     assert!(parsed["classes"].is_object());
     assert!(parsed["protocols"].is_object());
     assert!(parsed["selectors"].is_object());
+    let any_owner = parsed["selectors"]
+        .as_object()
+        .and_then(|selectors| selectors.values().next())
+        .and_then(|owners| owners.as_array())
+        .and_then(|owners| owners.first())
+        .expect("expected selector owners");
+    assert!(any_owner["kind"].is_string());
 }
 
 #[test]
@@ -112,6 +129,113 @@ fn graph_protocol_conforming_classes() {
             );
         }
     }
+}
+
+#[test]
+fn graph_method_resolution_follows_inheritance() {
+    let superclass = ClassNode {
+        name: "BaseWidget".into(),
+        superclass: None,
+        is_swift: false,
+        instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        class_methods: vec![],
+        effective_instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        effective_class_methods: vec![],
+        properties: vec![],
+        ivars: vec![],
+        protocols: vec![],
+        categories: vec![],
+    };
+    let subclass = ClassNode {
+        name: "ChildWidget".into(),
+        superclass: Some("BaseWidget".into()),
+        is_swift: false,
+        instance_methods: vec![MethodEntry {
+            selector: "paint".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x2000,
+            imp_symbol: None,
+        }],
+        class_methods: vec![],
+        effective_instance_methods: vec![MethodEntry {
+            selector: "paint".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x2000,
+            imp_symbol: None,
+        }],
+        effective_class_methods: vec![],
+        properties: vec![],
+        ivars: vec![],
+        protocols: vec![],
+        categories: vec![],
+    };
+
+    let graph = ObjCGraph {
+        classes: BTreeMap::from([
+            (superclass.name.clone(), superclass),
+            (subclass.name.clone(), subclass),
+        ]),
+        protocols: BTreeMap::<String, ProtocolNode>::new(),
+        selectors: BTreeMap::from([(
+            "draw".into(),
+            vec![SelectorOwner {
+                class_name: "BaseWidget".into(),
+                kind: MethodKind::Instance,
+                origin: MethodOrigin::Class,
+                imp: 0x1000,
+                imp_symbol: None,
+            }],
+        )]),
+    };
+
+    assert!(
+        graph
+            .find_method("ChildWidget", "draw", MethodKind::Instance)
+            .is_none(),
+        "inherited selector should not be found as a direct implementation"
+    );
+    assert!(
+        graph.responds_to("ChildWidget", "draw", MethodKind::Instance),
+        "inherited selector should still be reported as handled"
+    );
+
+    let resolved = graph
+        .resolve_inherited("ChildWidget", "draw", MethodKind::Instance)
+        .expect("should resolve inherited implementation");
+    assert_eq!(resolved.class_name, "BaseWidget");
+    assert!(matches!(
+        resolved.resolution,
+        macho::objc::graph::MethodResolution::Inherited { .. }
+    ));
+}
+
+#[test]
+fn graph_all_methods_matches_effective_lists() {
+    let graph = graph_for("/usr/bin/plutil").expect("should have ObjC metadata");
+    let (all_methods, node) = graph
+        .classes
+        .values()
+        .find_map(|class| {
+            graph
+                .all_methods(&class.name)
+                .map(|all_methods| (all_methods, class))
+        })
+        .expect("expected a class with methods");
+    assert_eq!(
+        all_methods.instance.len(),
+        node.effective_instance_methods.len()
+    );
+    assert_eq!(all_methods.class.len(), node.effective_class_methods.len());
 }
 
 #[test]

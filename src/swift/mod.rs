@@ -5,11 +5,11 @@ pub use types::SwiftTypeIndex;
 use crate::demangle::demangle_symbol;
 use crate::model::mach::MachFile;
 use crate::parse::parse_symbol_table;
+use std::collections::btree_map::Entry;
 
 impl SwiftTypeIndex {
     pub fn build(mach: &MachFile<'_>) -> Self {
-        let mut types = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
+        let mut types = std::collections::BTreeMap::new();
 
         // 1. From demangled symbols — process descriptors first (they carry
         //    accurate kind info), then metadata accessors for anything not yet
@@ -25,9 +25,7 @@ impl SwiftTypeIndex {
                         continue;
                     }
                     if let Some(swift_type) = extract_swift_type(&demangled, sym.name, sym.value) {
-                        if seen.insert(swift_type.name.clone()) {
-                            types.push(swift_type);
-                        }
+                        insert_swift_type(&mut types, swift_type);
                     }
                 }
             }
@@ -41,9 +39,7 @@ impl SwiftTypeIndex {
                         continue;
                     }
                     if let Some(swift_type) = extract_swift_type(&demangled, sym.name, sym.value) {
-                        if seen.insert(swift_type.name.clone()) {
-                            types.push(swift_type);
-                        }
+                        insert_swift_type(&mut types, swift_type);
                     }
                 }
             }
@@ -52,20 +48,25 @@ impl SwiftTypeIndex {
         // 2. From ObjC classes marked as Swift
         if let Ok(meta) = crate::objc::parse_objc_metadata(mach) {
             for cls in &meta.classes {
-                if cls.is_swift && seen.insert(cls.name.clone()) {
-                    types.push(types::SwiftType {
-                        name: cls.name.clone(),
-                        kind: types::SwiftTypeKind::Class,
-                        mangled_name: None,
-                        address: None,
-                        source: types::SwiftTypeSource::ObjCMetadata,
-                    });
+                if cls.is_swift {
+                    insert_swift_type(
+                        &mut types,
+                        types::SwiftType {
+                            name: cls.name.clone(),
+                            kind: types::SwiftTypeKind::Class,
+                            mangled_name: None,
+                            address: None,
+                            source: types::SwiftTypeSource::ObjCMetadata,
+                            confidence: types::SwiftTypeConfidence::High,
+                        },
+                    );
                 }
             }
         }
 
-        types.sort_by(|a, b| a.name.cmp(&b.name));
-        SwiftTypeIndex { types }
+        SwiftTypeIndex {
+            types: types.into_values().collect(),
+        }
     }
 }
 
@@ -111,6 +112,11 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
         mangled_name: Some(mangled.to_string()),
         address: Some(address),
         source: types::SwiftTypeSource::DemangledSymbol,
+        confidence: if kind == types::SwiftTypeKind::Unknown {
+            types::SwiftTypeConfidence::Partial
+        } else {
+            types::SwiftTypeConfidence::High
+        },
     })
 }
 
@@ -175,4 +181,117 @@ fn clean_type_name(raw: &str) -> String {
     }
 
     name.to_string()
+}
+
+fn insert_swift_type(
+    types: &mut std::collections::BTreeMap<String, types::SwiftType>,
+    candidate: types::SwiftType,
+) {
+    match types.entry(candidate.name.clone()) {
+        Entry::Vacant(entry) => {
+            entry.insert(candidate);
+        }
+        Entry::Occupied(mut entry) => {
+            if should_replace(entry.get(), &candidate) {
+                entry.insert(merge_swift_types(candidate, entry.get()));
+            }
+        }
+    }
+}
+
+fn should_replace(existing: &types::SwiftType, candidate: &types::SwiftType) -> bool {
+    confidence_rank(candidate.confidence) > confidence_rank(existing.confidence)
+}
+
+fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
+    match confidence {
+        types::SwiftTypeConfidence::High => 1,
+        types::SwiftTypeConfidence::Partial => 0,
+    }
+}
+
+fn merge_swift_types(
+    mut preferred: types::SwiftType,
+    other: &types::SwiftType,
+) -> types::SwiftType {
+    if preferred.mangled_name.is_none() {
+        preferred.mangled_name = other.mangled_name.clone();
+    }
+    if preferred.address.is_none() {
+        preferred.address = other.address;
+    }
+    preferred
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_high_confidence_over_partial() {
+        let mut types = std::collections::BTreeMap::new();
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Unknown,
+                mangled_name: Some("$s4Demo6WidgetC".into()),
+                address: Some(0x1000),
+                source: types::SwiftTypeSource::DemangledSymbol,
+                confidence: types::SwiftTypeConfidence::Partial,
+            },
+        );
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: None,
+                address: None,
+                source: types::SwiftTypeSource::ObjCMetadata,
+                confidence: types::SwiftTypeConfidence::High,
+            },
+        );
+
+        let ty = types.get("Demo.Widget").expect("type should be present");
+        assert_eq!(ty.kind, types::SwiftTypeKind::Class);
+        assert_eq!(ty.source, types::SwiftTypeSource::ObjCMetadata);
+        assert_eq!(ty.confidence, types::SwiftTypeConfidence::High);
+        assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
+        assert_eq!(ty.address, Some(0x1000));
+    }
+
+    #[test]
+    fn preserves_symbol_details_when_replacing_partial_metadata() {
+        let mut types = std::collections::BTreeMap::new();
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Unknown,
+                mangled_name: Some("$s4Demo6WidgetC".into()),
+                address: Some(0x2000),
+                source: types::SwiftTypeSource::DemangledSymbol,
+                confidence: types::SwiftTypeConfidence::Partial,
+            },
+        );
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: None,
+                address: None,
+                source: types::SwiftTypeSource::ObjCMetadata,
+                confidence: types::SwiftTypeConfidence::High,
+            },
+        );
+
+        let ty = types.get("Demo.Widget").expect("type should be present");
+        assert_eq!(ty.kind, types::SwiftTypeKind::Class);
+        assert_eq!(ty.source, types::SwiftTypeSource::ObjCMetadata);
+        assert_eq!(ty.confidence, types::SwiftTypeConfidence::High);
+        assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
+        assert_eq!(ty.address, Some(0x2000));
+    }
 }

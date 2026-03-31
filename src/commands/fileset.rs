@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
-use macho::analysis::snapshot::ContainerSnapshot;
+use macho::container_analysis::ContainerReport;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use crate::commands::common::for_each_selected_mach;
@@ -46,38 +47,46 @@ fn run_list(path: &std::path::Path, arch: Option<&str>) -> Result<()> {
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
-    let snapshot = ContainerSnapshot::from_container(&container);
+    let snapshot = container.snapshot();
+    let report = ContainerReport::from_snapshot(&snapshot);
 
     let mut found = false;
-    for slice in &snapshot.slices {
-        if let Some(filter) = arch {
-            if !slice.arch.eq_ignore_ascii_case(filter) {
-                continue;
+    if let Some(fileset) = report.fileset.as_ref() {
+        let mut entries_by_arch: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+        for entry in &fileset.entries {
+            if let Some(filter) = arch {
+                if !entry.arch.eq_ignore_ascii_case(filter) {
+                    continue;
+                }
             }
+            entries_by_arch
+                .entry(entry.arch.as_str())
+                .or_default()
+                .push(entry);
         }
-        let entries: Vec<_> = slice
-            .load_commands
-            .iter()
-            .filter(|lc| lc.name == "LC_FILESET_ENTRY")
-            .filter_map(|lc| lc.fileset_entry.as_ref())
-            .collect();
 
-        if entries.is_empty() {
-            continue;
-        }
-        found = true;
-
-        println!("[{}] {} fileset entries:", slice.arch, entries.len());
-        for entry in &entries {
-            println!(
-                "  {} vm={:#x} fileoff={:#x}",
-                entry.entry_id, entry.vm_addr, entry.file_offset
-            );
+        for (arch_name, entries) in entries_by_arch {
+            found = true;
+            println!("[{}] {} fileset entries:", arch_name, entries.len());
+            for entry in entries {
+                println!(
+                    "  {} vm={:#x} fileoff={:#x}",
+                    entry.entry_id, entry.vm_addr, entry.file_offset
+                );
+            }
         }
     }
 
     if !found {
-        println!("No fileset entries found (binary is not MH_FILESET).");
+        if let Some(filter) = arch {
+            if report.fileset.is_some() {
+                println!("No fileset entries matched architecture '{filter}'.");
+            } else {
+                println!("No fileset entries found (binary is not MH_FILESET).");
+            }
+        } else {
+            println!("No fileset entries found (binary is not MH_FILESET).");
+        }
     }
 
     Ok(())

@@ -1,6 +1,7 @@
 use clap::Parser;
 
 mod commands;
+mod output;
 
 #[derive(Parser)]
 #[command(name = "macho", version, about = "Mach-O binary inspection tool")]
@@ -41,6 +42,12 @@ enum Commands {
     Container(commands::container::ContainerArgs),
     /// List and inspect fileset entries
     Fileset(commands::fileset::FilesetArgs),
+    /// Analyze dependencies, imports, exports, and compatibility
+    Deps(commands::deps::DepsArgs),
+    /// Discover and search string regions
+    Strings(commands::data_surface::StringsArgs),
+    /// Analyze C++ vtables
+    Vtables(commands::data_surface::VtablesArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,5 +68,8 @@ fn main() -> anyhow::Result<()> {
         Commands::Swift(args) => commands::swift::run(args),
         Commands::Container(args) => commands::container::run(args),
         Commands::Fileset(args) => commands::fileset::run(args),
+        Commands::Deps(args) => commands::deps::run(args),
+        Commands::Strings(args) => commands::data_surface::run_strings(args),
+        Commands::Vtables(args) => commands::data_surface::run_vtables(args),
     }
 }

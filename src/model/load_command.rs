@@ -9,7 +9,7 @@ pub struct ParsedLoadCommand {
     pub raw_size: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadCommand {
     Segment32(SegmentCommandData),
     Segment64(SegmentCommandData),
@@ -299,12 +299,12 @@ pub fn format_uuid(uuid: &[u8; 16]) -> String {
 
 // Data structs for each load command variant
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SegmentCommandData {
     pub segment_index: usize,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SymtabData {
     pub sym_offset: u32,
     pub nsyms: u32,
@@ -312,7 +312,7 @@ pub struct SymtabData {
     pub str_size: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DysymtabData {
     pub ilocalsym: u32,
     pub nlocalsym: u32,
@@ -334,7 +334,7 @@ pub struct DysymtabData {
     pub nlocrel: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DyldInfoData {
     pub rebase_off: u32,
     pub rebase_size: u32,
@@ -348,24 +348,24 @@ pub struct DyldInfoData {
     pub export_size: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkeditData {
     pub data_offset: u32,
     pub data_size: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryPointData {
     pub entry_offset: u64,
     pub stack_size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UuidData {
     pub uuid: [u8; 16],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildVersionData {
     pub platform: Platform,
     pub minos: PackedVersion,
@@ -373,24 +373,24 @@ pub struct BuildVersionData {
     pub tools: Vec<BuildToolVersion>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildToolVersion {
     pub tool: Tool,
     pub version: PackedVersion,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceVersionData {
     pub version: SourceVersion,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionMinData {
     pub version: PackedVersion,
     pub sdk: PackedVersion,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DylibData {
     pub name: String,
     pub timestamp: u32,
@@ -398,60 +398,60 @@ pub struct DylibData {
     pub compatibility_version: PackedVersion,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StringData {
     pub value: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionInfoData {
     pub crypt_offset: u32,
     pub crypt_size: u32,
     pub crypt_id: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkerOptionData {
     pub strings: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoteData {
     pub data_owner: String,
     pub offset: u64,
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesetEntryData {
     pub vm_addr: u64,
     pub file_offset: u64,
     pub entry_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrebindCksumData {
     pub cksum: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TwolevelHintsData {
     pub offset: u32,
     pub nhints: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutinesData {
     pub init_address: u64,
     pub init_module: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawData {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownLoadCommand {
     pub cmd: u32,
     pub data: Vec<u8>,

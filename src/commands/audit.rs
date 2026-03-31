@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
 use macho::analysis::snapshot::ContainerSnapshot;
-use macho::audit::{AuditFinding, AuditSeverity, audit_slice};
+use macho::audit::{AuditFinding, AuditReport, AuditSeverity, audit_slice};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::commands::common::filter_snapshot_by_arch;
+use crate::output::sarif;
 
 #[derive(clap::Args)]
 pub struct AuditArgs {
@@ -41,36 +41,31 @@ pub fn run(args: AuditArgs) -> Result<()> {
     }
 
     let min_sev = parse_severity(&args.min_severity)?;
+    let fail_sev = args.fail_on.as_deref().map(parse_severity).transpose()?;
 
-    let mut all_findings: Vec<(String, Vec<AuditFinding>)> = Vec::new();
-    for slice in &snapshot.slices {
-        let report = audit_slice(slice);
-        let filtered: Vec<AuditFinding> = report
-            .findings
-            .into_iter()
-            .filter(|f| f.severity >= min_sev)
-            .collect();
-        if !filtered.is_empty() {
-            all_findings.push((slice.arch.clone(), filtered));
-        }
+    let raw_reports: Vec<AuditReport> = snapshot.slices.iter().map(audit_slice).collect();
+    let mut reports = raw_reports.clone();
+    for report in &mut reports {
+        report.findings.retain(|f| f.severity >= min_sev);
     }
 
     if args.sarif {
-        print_sarif(&args.path, &all_findings)?;
+        println!("{}", sarif::render(&args.path, &reports)?);
     } else if args.json {
-        print_json(&all_findings)?;
+        print_json(&reports)?;
     } else {
-        print_text(&all_findings);
+        print_text(&reports);
     }
 
-    if let Some(ref threshold) = args.fail_on {
-        let fail_sev = parse_severity(threshold)?;
-        let any_match = all_findings
+    if let Some(fail_sev) = fail_sev {
+        let any_match = raw_reports
             .iter()
-            .flat_map(|(_, findings)| findings)
+            .flat_map(|report| &report.findings)
             .any(|f| f.severity >= fail_sev);
         if any_match {
-            process::exit(1);
+            anyhow::bail!(
+                "audit findings reached fail threshold {fail_sev}; use --min-severity to filter output or choose a higher --fail-on value"
+            );
         }
     }
 
@@ -87,179 +82,78 @@ fn parse_severity(s: &str) -> Result<AuditSeverity> {
     }
 }
 
-fn print_text(all: &[(String, Vec<AuditFinding>)]) {
-    let total: usize = all.iter().map(|(_, f)| f.len()).sum();
+fn print_text(reports: &[AuditReport]) {
+    let total: usize = reports.iter().map(|report| report.findings.len()).sum();
     if total == 0 {
         println!("No audit findings.");
         return;
     }
 
-    for (arch, findings) in all {
-        for f in findings {
-            println!("[{:>8}] [{arch}] {}: {}", f.severity, f.rule_id, f.title);
-            if !f.evidence.is_empty() {
-                for e in &f.evidence {
-                    println!("           evidence: {e}");
+    let mut first_arch = true;
+    for report in reports {
+        if report.findings.is_empty() {
+            continue;
+        }
+
+        if !first_arch {
+            println!();
+        }
+        first_arch = false;
+
+        println!("{}", report.arch);
+        let mut current_severity: Option<AuditSeverity> = None;
+        for f in &report.findings {
+            if current_severity != Some(f.severity) {
+                if current_severity.is_some() {
+                    println!();
                 }
+                current_severity = Some(f.severity);
+                println!("  {}:", f.severity);
+            }
+
+            println!("    {}: {}", f.rule_id, f.title);
+            println!("      {}", f.body);
+            for e in &f.evidence {
+                println!("      evidence: {e}");
             }
             if let Some(ref rem) = f.remediation {
-                println!("           fix: {rem}");
+                println!("      fix: {rem}");
             }
         }
     }
 
-    let counts = count_severities(all);
+    let counts = count_severities(reports);
     println!(
         "\n{total} finding(s): {} critical, {} error, {} warning, {} info",
         counts.0, counts.1, counts.2, counts.3
     );
 }
 
-fn print_json(all: &[(String, Vec<AuditFinding>)]) -> Result<()> {
-    let mut map = serde_json::Map::new();
-    for (arch, findings) in all {
-        map.insert(arch.clone(), serde_json::to_value(findings)?);
-    }
-    if map.len() == 1 {
-        let (_, val) = map.into_iter().next().unwrap();
-        println!("{}", serde_json::to_string_pretty(&val)?);
-    } else {
-        println!("{}", serde_json::to_string_pretty(&map)?);
-    }
+#[derive(Serialize)]
+struct AuditJsonSlice<'a> {
+    arch: &'a str,
+    findings: &'a [AuditFinding],
+}
+
+fn print_json(reports: &[AuditReport]) -> Result<()> {
+    let payload: Vec<AuditJsonSlice<'_>> = reports
+        .iter()
+        .map(|report| AuditJsonSlice {
+            arch: &report.arch,
+            findings: &report.findings,
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&payload)?);
     Ok(())
 }
 
-#[derive(Serialize)]
-struct SarifReport {
-    #[serde(rename = "$schema")]
-    schema: &'static str,
-    version: &'static str,
-    runs: Vec<SarifRun>,
-}
-
-#[derive(Serialize)]
-struct SarifRun {
-    tool: SarifTool,
-    results: Vec<SarifResult>,
-}
-
-#[derive(Serialize)]
-struct SarifTool {
-    driver: SarifDriver,
-}
-
-#[derive(Serialize)]
-struct SarifDriver {
-    name: &'static str,
-    version: &'static str,
-    rules: Vec<SarifRuleDescriptor>,
-}
-
-#[derive(Serialize)]
-struct SarifRuleDescriptor {
-    id: String,
-    #[serde(rename = "shortDescription")]
-    short_description: SarifMessage,
-}
-
-#[derive(Serialize)]
-struct SarifResult {
-    #[serde(rename = "ruleId")]
-    rule_id: String,
-    level: &'static str,
-    message: SarifMessage,
-    locations: Vec<SarifLocation>,
-}
-
-#[derive(Serialize)]
-struct SarifLocation {
-    #[serde(rename = "physicalLocation")]
-    physical_location: SarifPhysicalLocation,
-}
-
-#[derive(Serialize)]
-struct SarifPhysicalLocation {
-    #[serde(rename = "artifactLocation")]
-    artifact_location: SarifArtifactLocation,
-}
-
-#[derive(Serialize)]
-struct SarifArtifactLocation {
-    uri: String,
-}
-
-#[derive(Serialize)]
-struct SarifMessage {
-    text: String,
-}
-
-fn print_sarif(path: &Path, all: &[(String, Vec<AuditFinding>)]) -> Result<()> {
-    let raw_path = path.display().to_string();
-    let uri = if raw_path.starts_with('/') {
-        format!("file://{raw_path}")
-    } else {
-        raw_path
-    };
-    let mut seen_rules = std::collections::BTreeSet::new();
-    let mut rule_descs = Vec::new();
-    let mut results = Vec::new();
-
-    for (arch, findings) in all {
-        for f in findings {
-            if seen_rules.insert(f.rule_id) {
-                rule_descs.push(SarifRuleDescriptor {
-                    id: f.rule_id.to_string(),
-                    short_description: SarifMessage {
-                        text: f.title.clone(),
-                    },
-                });
-            }
-            results.push(SarifResult {
-                rule_id: f.rule_id.to_string(),
-                level: match f.severity {
-                    AuditSeverity::Info => "note",
-                    AuditSeverity::Warning => "warning",
-                    AuditSeverity::Error | AuditSeverity::Critical => "error",
-                },
-                message: SarifMessage {
-                    text: format!("[{arch}] {}", f.title),
-                },
-                locations: vec![SarifLocation {
-                    physical_location: SarifPhysicalLocation {
-                        artifact_location: SarifArtifactLocation { uri: uri.clone() },
-                    },
-                }],
-            });
-        }
-    }
-
-    let report = SarifReport {
-        schema: "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/main/sarif-2.1/schema/sarif-schema-2.1.0.json",
-        version: "2.1.0",
-        runs: vec![SarifRun {
-            tool: SarifTool {
-                driver: SarifDriver {
-                    name: "macho audit",
-                    version: env!("CARGO_PKG_VERSION"),
-                    rules: rule_descs,
-                },
-            },
-            results,
-        }],
-    };
-
-    let json = serde_json::to_string_pretty(&report)?;
-    println!("{json}");
-    Ok(())
-}
-
-fn count_severities(all: &[(String, Vec<AuditFinding>)]) -> (usize, usize, usize, usize) {
+fn count_severities(reports: &[AuditReport]) -> (usize, usize, usize, usize) {
     let mut crit = 0;
     let mut err = 0;
     let mut warn = 0;
     let mut info = 0;
-    for (_, findings) in all {
-        for f in findings {
+    for report in reports {
+        for f in &report.findings {
             match f.severity {
                 AuditSeverity::Critical => crit += 1,
                 AuditSeverity::Error => err += 1,

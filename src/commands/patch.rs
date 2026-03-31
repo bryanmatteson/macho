@@ -4,7 +4,10 @@ use macho::edit::transaction::{PatchOp, PatchTransaction};
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::owned::OwnedFatBinary;
+use std::fs::Permissions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::common::arch_name_for_mach;
 
@@ -174,6 +177,10 @@ fn run_patch(
 ) -> Result<()> {
     let file = std::fs::File::open(input)
         .with_context(|| format!("failed to open {}", input.display()))?;
+    let template_permissions = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", input.display()))?
+        .permissions();
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.display()))?;
@@ -189,9 +196,15 @@ fn run_patch(
                 }
             }
 
-            let prepared = prepare_patch(mach, &ops, opts.force)?;
+            let prepared = prepare_patch(mach, &ops)?;
             let arch_name = arch_name_for_mach(mach);
             emit_preview(&[(&arch_name, &prepared)], opts.dry_run);
+            if !opts.force && !prepared.preview.validation_errors.is_empty() {
+                let details = prepared.preview.validation_errors.join("\n  ");
+                anyhow::bail!(
+                    "candidate binary has validation errors (use --force to override):\n  {details}"
+                );
+            }
             prepared.bytes
         }
         MachContainer::Fat(fat) => {
@@ -206,11 +219,7 @@ fn run_patch(
                 .into_iter()
                 .map(|index| {
                     let arch = &fat.arches()[index];
-                    Ok((
-                        index,
-                        arch.spec.name(),
-                        prepare_patch(&arch.mach, &ops, opts.force)?,
-                    ))
+                    Ok((index, arch.spec.name(), prepare_patch(&arch.mach, &ops)?))
                 })
                 .collect::<Result<_>>()?;
 
@@ -219,6 +228,26 @@ fn run_patch(
                 .map(|(_, arch_name, prepared)| (arch_name.as_str(), prepared))
                 .collect();
             emit_preview(&preview_items, opts.dry_run);
+            if !opts.force
+                && prepared
+                    .iter()
+                    .any(|(_, _, prepared)| !prepared.preview.validation_errors.is_empty())
+            {
+                let details: Vec<String> = prepared
+                    .iter()
+                    .flat_map(|(_, arch_name, prepared)| {
+                        prepared
+                            .preview
+                            .validation_errors
+                            .iter()
+                            .map(move |err| format!("{arch_name}: {err}"))
+                    })
+                    .collect();
+                anyhow::bail!(
+                    "candidate binary has validation errors (use --force to override):\n  {}",
+                    details.join("\n  ")
+                );
+            }
 
             let mut owned = OwnedFatBinary::from_fat(fat, &mmap);
             for (index, _, prepared) in &prepared {
@@ -257,8 +286,7 @@ fn run_patch(
     drop(mmap);
     drop(file);
 
-    std::fs::write(&output_path, &output_bytes)
-        .with_context(|| format!("failed to write {}", output_path.display()))?;
+    atomic_write(&output_path, &output_bytes, template_permissions)?;
 
     println!(
         "Wrote {} bytes to {}",
@@ -291,13 +319,46 @@ fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>> {
         .collect()
 }
 
+fn atomic_write(path: &Path, bytes: &[u8], permissions: Permissions) -> Result<()> {
+    let tmp_path = temp_path_for(path);
+    {
+        let mut file = std::fs::File::create(&tmp_path)
+            .with_context(|| format!("failed to create temporary file {}", tmp_path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write temporary file {}", tmp_path.display()))?;
+        file.set_permissions(permissions).with_context(|| {
+            format!("failed to preserve permissions for {}", tmp_path.display())
+        })?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush temporary file {}", tmp_path.display()))?;
+    }
+
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err).context(format!("failed to replace {}", path.display()));
+    }
+
+    Ok(())
+}
+
+fn temp_path_for(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path.file_name().and_then(|s| s.to_str()).unwrap_or("macho");
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let pid = std::process::id();
+    parent.join(format!(".{stem}.{pid}.{nanos}.tmp"))
+}
+
 struct PreparedPatch {
     preview: macho::edit::transaction::PatchPreview,
     resign_plan: ResignPlan,
     bytes: Vec<u8>,
 }
 
-fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp], force: bool) -> Result<PreparedPatch> {
+fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> {
     let resign_plan = ResignPlan::from_mach(mach);
 
     let mut txn = PatchTransaction::new(mach);
@@ -306,18 +367,7 @@ fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp], force: bool) -> Result<Pr
     }
 
     let preview = txn.preview()?;
-    if !preview.validation_errors.is_empty() && !force {
-        let details = preview.validation_errors.join("\n  ");
-        anyhow::bail!(
-            "candidate binary has validation errors (use --force to override):\n  {details}"
-        );
-    }
-
-    let bytes = if force {
-        txn.build_unchecked()?
-    } else {
-        txn.commit()?
-    };
+    let bytes = txn.build_unchecked()?;
 
     Ok(PreparedPatch {
         preview,
@@ -328,7 +378,7 @@ fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp], force: bool) -> Result<Pr
 
 fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
     if dry_run {
-        println!("Dry run — changes that would be applied:");
+        println!("Dry run - changes that would be applied:");
     }
 
     for (index, (arch_name, prepared)) in items.iter().enumerate() {

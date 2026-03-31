@@ -23,3 +23,7 @@ pub fn all_rules() -> Vec<Box<dyn AuditRule>> {
         Box::new(container::MissingPagezero),
     ]
 }
+
+pub fn all_rule_ids() -> Vec<&'static str> {
+    all_rules().into_iter().map(|rule| rule.id()).collect()
+}

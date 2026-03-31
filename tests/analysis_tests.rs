@@ -52,6 +52,41 @@ fn malformed_codesign_binary() -> Vec<u8> {
     buf
 }
 
+fn minimal_fileset_binary(entry_id: &str, vm_addr: u64, file_offset: u64) -> Vec<u8> {
+    const MH_MAGIC_64: u32 = 0xFEEDFACF;
+    const CPU_TYPE_ARM64: u32 = 0x0100000C;
+    const MH_FILESET: u32 = 0xC;
+    const LC_REQ_DYLD: u32 = 0x8000_0000;
+    const LC_FILESET_ENTRY: u32 = 0x35 | LC_REQ_DYLD;
+
+    let str_offset = 32u32;
+    let cmdsize = ((str_offset as usize + entry_id.len() + 1 + 7) & !7) as u32;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
+    data.extend_from_slice(&(CPU_TYPE_ARM64 as i32).to_le_bytes());
+    data.extend_from_slice(&0i32.to_le_bytes());
+    data.extend_from_slice(&MH_FILESET.to_le_bytes());
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&cmdsize.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    data.extend_from_slice(&LC_FILESET_ENTRY.to_le_bytes());
+    data.extend_from_slice(&cmdsize.to_le_bytes());
+    data.extend_from_slice(&vm_addr.to_le_bytes());
+    data.extend_from_slice(&file_offset.to_le_bytes());
+    data.extend_from_slice(&str_offset.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(entry_id.as_bytes());
+    data.push(0);
+    while data.len() % 8 != 0 {
+        data.push(0);
+    }
+
+    data
+}
+
 #[test]
 fn snapshot_fat_binary_has_multiple_slices() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
@@ -175,5 +210,38 @@ fn snapshot_records_codesign_analysis_issues() {
         issue.message.contains("failed to parse code signature"),
         "unexpected issue: {}",
         issue.message
+    );
+}
+
+#[test]
+fn snapshot_contains_fileset_entry_details() {
+    let data = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
+    let container = macho::parse(&data).expect("parse");
+    let snap = ContainerSnapshot::from_container(&container);
+    let slice = &snap.slices[0];
+
+    let lc = slice
+        .load_commands
+        .iter()
+        .find(|lc| lc.name == "LC_FILESET_ENTRY")
+        .expect("expected LC_FILESET_ENTRY");
+    let entry = lc
+        .fileset_entry
+        .as_ref()
+        .expect("expected fileset entry details");
+
+    assert_eq!(entry.entry_id, "com.example.member");
+    assert_eq!(entry.vm_addr, 0x1000_0000);
+    assert_eq!(entry.file_offset, 0x2000);
+}
+
+#[test]
+fn container_all_signed_tracks_codesign_state() {
+    let data = malformed_codesign_binary();
+    let container = macho::parse(&data).expect("parse");
+
+    assert!(
+        !container.all_signed(),
+        "malformed signature should count as unsigned at the container surface"
     );
 }

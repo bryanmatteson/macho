@@ -1,6 +1,6 @@
 mod compare;
 
-pub use compare::diff_containers;
+pub use compare::{diff_containers, diff_slice_snapshots};
 
 use serde::Serialize;
 use std::fmt;
@@ -96,16 +96,36 @@ impl DiffReport {
             return;
         }
 
-        let mut by_severity: Vec<_> = self.findings.iter().collect();
-        by_severity.sort_by(|a, b| {
-            b.severity
-                .cmp(&a.severity)
-                .then_with(|| a.domain.cmp(&b.domain))
-        });
+        let mut grouped: std::collections::BTreeMap<
+            ChangeSeverity,
+            std::collections::BTreeMap<DiffDomain, Vec<&DiffFinding>>,
+        > = std::collections::BTreeMap::new();
+        for finding in &self.findings {
+            grouped
+                .entry(finding.severity)
+                .or_default()
+                .entry(finding.domain)
+                .or_default()
+                .push(finding);
+        }
 
-        for f in &by_severity {
-            let arch = f.arch.as_deref().unwrap_or("*");
-            println!("[{:>8}] [{arch}] {}: {}", f.severity, f.domain, f.message);
+        for severity in [
+            ChangeSeverity::Breaking,
+            ChangeSeverity::Warning,
+            ChangeSeverity::Info,
+        ] {
+            let Some(domains) = grouped.get(&severity) else {
+                continue;
+            };
+            println!("[{severity}]");
+            for (domain, findings) in domains {
+                println!("  {domain}");
+                for f in findings {
+                    let arch = f.arch.as_deref().unwrap_or("*");
+                    println!("    [{arch}] {}", f.message);
+                }
+            }
+            println!();
         }
 
         let breaking = self

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use macho::analysis::snapshot::ContainerSnapshot;
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -68,6 +69,7 @@ pub fn run(args: DiffArgs) -> Result<()> {
             other => anyhow::bail!("unknown severity: {other} (use info, warning, or breaking)"),
         };
         if report.findings.iter().any(|f| f.severity >= min_severity) {
+            std::io::stdout().flush()?;
             process::exit(1);
         }
     }

@@ -1,0 +1,301 @@
+use crate::addr::map::AddressMap;
+use crate::addr::types::{ThinFileOffset, Va};
+use crate::dyld::exports::parse_exports;
+use crate::dyld::types::ExportKind;
+use crate::error::Result;
+use crate::model::mach::MachFile;
+use crate::model::symbol::SymbolType;
+use crate::objc::parse_objc_metadata;
+use crate::parse::parse_symbol_table;
+
+#[derive(Debug, Clone)]
+pub struct SymbolRangeIndex {
+    entries: Vec<RangeEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RangeEntry {
+    pub start: Va,
+    pub end: Va,
+    pub entity: CodeEntity,
+    pub source: RangeSource,
+    pub is_alt_entry: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum CodeEntity {
+    Symbol {
+        name: String,
+        external: bool,
+    },
+    ObjCMethod {
+        class_name: String,
+        selector: String,
+        is_class_method: bool,
+    },
+    Export {
+        name: String,
+    },
+    Anonymous {
+        section_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RangeSource {
+    Nlist,
+    ExportTrie,
+    ObjCMetadata,
+    Inferred,
+}
+
+struct RawEntry {
+    va: Va,
+    entity: CodeEntity,
+    source: RangeSource,
+    is_alt_entry: bool,
+}
+
+impl SymbolRangeIndex {
+    pub fn build(mach: &MachFile<'_>) -> Result<Self> {
+        let mut raw: Vec<RawEntry> = Vec::new();
+
+        // Collect defined nlist symbols
+        if let Ok(symtab) = parse_symbol_table(mach) {
+            for sym in symtab.symbols() {
+                if sym.sym_type == SymbolType::Section && sym.value != 0 {
+                    raw.push(RawEntry {
+                        va: Va(sym.value),
+                        entity: CodeEntity::Symbol {
+                            name: sym.name.to_string(),
+                            external: sym.external,
+                        },
+                        source: RangeSource::Nlist,
+                        is_alt_entry: sym.is_alt_entry(),
+                    });
+                }
+            }
+        }
+
+        // Collect exports with addresses (only add if not already covered by nlist)
+        if let Ok(exports) = parse_exports(mach) {
+            for exp in &exports {
+                let addr = match &exp.kind {
+                    ExportKind::Regular { address } => *address,
+                    ExportKind::ThreadLocal { address } => *address,
+                    ExportKind::Absolute { address } => *address,
+                    _ => continue,
+                };
+                if addr == 0 {
+                    continue;
+                }
+                let va = Va(addr);
+                // Skip if we already have an nlist at this exact address
+                if raw
+                    .iter()
+                    .any(|e| e.va == va && e.source == RangeSource::Nlist)
+                {
+                    continue;
+                }
+                raw.push(RawEntry {
+                    va,
+                    entity: CodeEntity::Export {
+                        name: exp.name.clone(),
+                    },
+                    source: RangeSource::ExportTrie,
+                    is_alt_entry: false,
+                });
+            }
+        }
+
+        // Collect ObjC method implementations
+        if let Ok(objc) = parse_objc_metadata(mach) {
+            for class in &objc.classes {
+                for method in &class.instance_methods {
+                    if method.imp.0 != 0 {
+                        if raw
+                            .iter()
+                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
+                        {
+                            continue;
+                        }
+                        raw.push(RawEntry {
+                            va: method.imp,
+                            entity: CodeEntity::ObjCMethod {
+                                class_name: class.name.clone(),
+                                selector: method.name.clone(),
+                                is_class_method: false,
+                            },
+                            source: RangeSource::ObjCMetadata,
+                            is_alt_entry: false,
+                        });
+                    }
+                }
+                for method in &class.class_methods {
+                    if method.imp.0 != 0 {
+                        if raw
+                            .iter()
+                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
+                        {
+                            continue;
+                        }
+                        raw.push(RawEntry {
+                            va: method.imp,
+                            entity: CodeEntity::ObjCMethod {
+                                class_name: class.name.clone(),
+                                selector: method.name.clone(),
+                                is_class_method: true,
+                            },
+                            source: RangeSource::ObjCMetadata,
+                            is_alt_entry: false,
+                        });
+                    }
+                }
+            }
+            for cat in &objc.categories {
+                for method in &cat.instance_methods {
+                    if method.imp.0 != 0 {
+                        if raw
+                            .iter()
+                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
+                        {
+                            continue;
+                        }
+                        raw.push(RawEntry {
+                            va: method.imp,
+                            entity: CodeEntity::ObjCMethod {
+                                class_name: cat.class_name.clone(),
+                                selector: method.name.clone(),
+                                is_class_method: false,
+                            },
+                            source: RangeSource::ObjCMetadata,
+                            is_alt_entry: false,
+                        });
+                    }
+                }
+                for method in &cat.class_methods {
+                    if method.imp.0 != 0 {
+                        if raw
+                            .iter()
+                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
+                        {
+                            continue;
+                        }
+                        raw.push(RawEntry {
+                            va: method.imp,
+                            entity: CodeEntity::ObjCMethod {
+                                class_name: cat.class_name.clone(),
+                                selector: method.name.clone(),
+                                is_class_method: true,
+                            },
+                            source: RangeSource::ObjCMetadata,
+                            is_alt_entry: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Sort by VA
+        raw.sort_by_key(|e| e.va);
+
+        // Deduplicate entries at the same VA (prefer Nlist > ExportTrie > ObjCMetadata)
+        raw.dedup_by(|b, a| a.va == b.va);
+
+        // Build section boundaries for sizing the last entry in each section
+        let mut section_ends: Vec<(Va, Va)> = Vec::new(); // (start, end)
+        for seg in mach.segments() {
+            for sect in &seg.sections {
+                if sect.size > 0 {
+                    section_ends.push((sect.addr, Va(sect.addr.0 + sect.size)));
+                }
+            }
+        }
+        section_ends.sort_by_key(|&(start, _)| start);
+
+        // Size each entry by gap to next entry, clamped to section end
+        let len = raw.len();
+        let mut entries = Vec::with_capacity(len);
+        for i in 0..len {
+            let start = raw[i].va;
+            let end = if i + 1 < len {
+                // Next entry's start, but don't cross section boundary
+                let next_start = raw[i + 1].va;
+                let section_end = find_section_end(&section_ends, start);
+                match section_end {
+                    Some(se) if se < next_start => se,
+                    _ => next_start,
+                }
+            } else {
+                // Last entry: use section end
+                find_section_end(&section_ends, start).unwrap_or(Va(start.0 + 1))
+            };
+
+            entries.push(RangeEntry {
+                start,
+                end,
+                entity: std::mem::replace(
+                    &mut raw[i].entity,
+                    CodeEntity::Anonymous {
+                        section_name: String::new(),
+                    },
+                ),
+                source: raw[i].source,
+                is_alt_entry: raw[i].is_alt_entry,
+            });
+        }
+
+        Ok(Self { entries })
+    }
+
+    pub fn lookup_va(&self, va: Va) -> Option<&RangeEntry> {
+        // Binary search for the entry containing this VA
+        let idx = self.entries.partition_point(|e| e.start <= va);
+        if idx == 0 {
+            return None;
+        }
+        let entry = &self.entries[idx - 1];
+        if va >= entry.start && va < entry.end {
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    pub fn lookup_file_offset(
+        &self,
+        offset: ThinFileOffset,
+        address_map: &AddressMap,
+    ) -> Option<&RangeEntry> {
+        let va = address_map.thin_offset_to_va(offset).ok()?;
+        self.lookup_va(va)
+    }
+
+    pub fn entries(&self) -> &[RangeEntry] {
+        &self.entries
+    }
+
+    pub fn entries_in_range(&self, start: Va, end: Va) -> &[RangeEntry] {
+        let lo = self.entries.partition_point(|e| e.start < start);
+        let hi = self.entries.partition_point(|e| e.start < end);
+        &self.entries[lo..hi]
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+fn find_section_end(section_ends: &[(Va, Va)], va: Va) -> Option<Va> {
+    // Find the section that contains this VA
+    for &(start, end) in section_ends {
+        if va >= start && va < end {
+            return Some(end);
+        }
+    }
+    None
+}

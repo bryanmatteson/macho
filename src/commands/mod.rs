@@ -2,6 +2,8 @@ pub mod audit;
 pub mod codesign;
 pub mod common;
 pub mod container;
+pub mod data_surface;
+pub mod deps;
 pub mod diff;
 pub mod exports;
 pub mod fileset;

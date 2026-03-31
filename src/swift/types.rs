@@ -29,6 +29,20 @@ impl SwiftTypeIndex {
     pub fn protocols(&self) -> Vec<&SwiftType> {
         self.by_kind(SwiftTypeKind::Protocol)
     }
+
+    pub fn high_confidence(&self) -> Vec<&SwiftType> {
+        self.types
+            .iter()
+            .filter(|t| t.confidence.is_high())
+            .collect()
+    }
+
+    pub fn partial(&self) -> Vec<&SwiftType> {
+        self.types
+            .iter()
+            .filter(|t| !t.confidence.is_high())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +52,20 @@ pub struct SwiftType {
     pub mangled_name: Option<String>,
     pub address: Option<u64>,
     pub source: SwiftTypeSource,
+    pub confidence: SwiftTypeConfidence,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwiftTypeConfidence {
+    High,
+    Partial,
+}
+
+impl SwiftTypeConfidence {
+    pub fn is_high(self) -> bool {
+        matches!(self, Self::High)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

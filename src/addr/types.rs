@@ -1,10 +1,12 @@
 use std::fmt;
 use std::ops::{Add, Sub};
 
+use serde::Serialize;
+
 macro_rules! addr_type {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
         pub struct $name(pub u64);
 
         impl $name {

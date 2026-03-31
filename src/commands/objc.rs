@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use macho::model::mach::MachFile;
-use macho::objc::graph::ObjCGraph;
+use macho::objc::graph::{MethodKind, ObjCGraph};
 use macho::objc::{self, render};
 use std::path::{Path, PathBuf};
 
@@ -185,7 +185,7 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
                         "  {} : {} ({} methods{cats})",
                         node.name,
                         node.superclass.as_deref().unwrap_or("?"),
-                        node.instance_methods.len() + node.class_methods.len(),
+                        node.effective_instance_methods.len() + node.effective_class_methods.len(),
                     );
                 }
             }
@@ -215,8 +215,11 @@ fn print_class_node(node: &macho::objc::graph::ClassNode, graph: &ObjCGraph) {
         println!("  protocols: {}", node.protocols.join(", "));
     }
 
-    println!("  instance methods ({}):", node.instance_methods.len());
-    for m in &node.instance_methods {
+    println!(
+        "  instance methods ({}):",
+        node.effective_instance_methods.len()
+    );
+    for m in &node.effective_instance_methods {
         let origin = match &m.origin {
             macho::objc::graph::MethodOrigin::Class => String::new(),
             macho::objc::graph::MethodOrigin::Category(cat) => format!(" [from {cat}]"),
@@ -224,9 +227,9 @@ fn print_class_node(node: &macho::objc::graph::ClassNode, graph: &ObjCGraph) {
         println!("    -{} {:#x}{origin}", m.selector, m.imp);
     }
 
-    if !node.class_methods.is_empty() {
-        println!("  class methods ({}):", node.class_methods.len());
-        for m in &node.class_methods {
+    if !node.effective_class_methods.is_empty() {
+        println!("  class methods ({}):", node.effective_class_methods.len());
+        for m in &node.effective_class_methods {
             let origin = match &m.origin {
                 macho::objc::graph::MethodOrigin::Class => String::new(),
                 macho::objc::graph::MethodOrigin::Category(cat) => format!(" [from {cat}]"),
@@ -269,14 +272,15 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>) -> Result<
                     owners.len()
                 );
                 for owner in owners {
-                    let prefix = if owner.is_class_method { "+" } else { "-" };
                     let origin = match &owner.origin {
                         macho::objc::graph::MethodOrigin::Class => String::new(),
                         macho::objc::graph::MethodOrigin::Category(cat) => format!(" [from {cat}]"),
                     };
                     println!(
-                        "  {prefix}[{} {sel_name}] {:#x}{origin}",
-                        owner.class_name, owner.imp
+                        "  {}[{} {sel_name}] {:#x}{origin}",
+                        owner.kind.prefix(),
+                        owner.class_name,
+                        owner.imp
                     );
                 }
             }
@@ -418,15 +422,29 @@ fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>) -> Result<()>
 
         let mut xref_count = 0;
         for node in &classes {
-            for m in &node.instance_methods {
+            for m in &node.effective_instance_methods {
                 if let Some(ref sym) = m.imp_symbol {
-                    println!("  -[{} {}] {:#x} -> {}", node.name, m.selector, m.imp, sym);
+                    println!(
+                        "  {}[{} {}] {:#x} -> {}",
+                        MethodKind::Instance.prefix(),
+                        node.name,
+                        m.selector,
+                        m.imp,
+                        sym
+                    );
                     xref_count += 1;
                 }
             }
-            for m in &node.class_methods {
+            for m in &node.effective_class_methods {
                 if let Some(ref sym) = m.imp_symbol {
-                    println!("  +[{} {}] {:#x} -> {}", node.name, m.selector, m.imp, sym);
+                    println!(
+                        "  {}[{} {}] {:#x} -> {}",
+                        MethodKind::Class.prefix(),
+                        node.name,
+                        m.selector,
+                        m.imp,
+                        sym
+                    );
                     xref_count += 1;
                 }
             }

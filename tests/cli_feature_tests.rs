@@ -3,6 +3,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use macho::model::container::MachContainer;
+use macho::swift::SwiftTypeIndex;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 fn macho_bin() -> &'static str {
     env!("CARGO_BIN_EXE_macho")
@@ -111,6 +115,38 @@ fn container_json_reports_fileset_entry_offsets() {
     assert_eq!(entry["entry_id"], "com.example.member");
     assert_eq!(entry["vm_addr"], 0x1000_0000u64);
     assert_eq!(entry["file_offset"], 0x2000u64);
+}
+
+#[test]
+fn fileset_list_reports_no_match_for_filtered_arch() {
+    let path = temp_file_path("fileset-filter");
+    let bytes = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
+    std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
+
+    let output = Command::new(macho_bin())
+        .args([
+            "fileset",
+            "list",
+            path.to_str().expect("utf8 path"),
+            "--arch",
+            "x86_64",
+        ])
+        .output()
+        .expect("failed to run macho fileset list");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        output.status.success(),
+        "fileset command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No fileset entries matched architecture 'x86_64'."),
+        "unexpected stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -256,6 +292,107 @@ fn fat_patch_add_rpath_all_arches_by_default() {
             arch.spec.name()
         );
     }
+
+    let _ = std::fs::remove_file(&output_path);
+}
+
+#[test]
+fn swift_json_kind_filter_applies_to_output() {
+    let data = std::fs::read("/usr/bin/plutil").expect("read /usr/bin/plutil");
+    let container = macho::parse(&data).expect("parse /usr/bin/plutil");
+    let fat = match &container {
+        MachContainer::Fat(fat) if !fat.arches().is_empty() => fat,
+        _ => return,
+    };
+
+    let selected_arch = fat.arches()[0].spec.name();
+    let selected_kind = SwiftTypeIndex::build(&fat.arches()[0].mach)
+        .types
+        .first()
+        .map(|ty| ty.kind)
+        .expect("expected Swift types in selected arch");
+    let kind_arg = selected_kind.to_string();
+    let expected_kind = serde_json::to_value(selected_kind).expect("serialize kind");
+
+    let output = Command::new(macho_bin())
+        .args([
+            "swift",
+            "/usr/bin/plutil",
+            "--arch",
+            &selected_arch,
+            "--kind",
+            &kind_arg,
+            "--json",
+        ])
+        .output()
+        .expect("failed to run macho swift");
+
+    assert!(
+        output.status.success(),
+        "swift command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
+    let types = json["types"]
+        .as_array()
+        .expect("filtered index types array");
+
+    assert!(
+        !types.is_empty(),
+        "filtered Swift JSON output should contain at least one type"
+    );
+    assert!(
+        types.iter().all(|ty| ty["kind"] == expected_kind),
+        "JSON output should honor the requested kind filter"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn patch_preserves_execute_bit() {
+    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
+    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    if !matches!(container, MachContainer::Fat(_)) {
+        return;
+    }
+
+    let input_mode = std::fs::metadata("/usr/bin/true")
+        .expect("metadata for /usr/bin/true")
+        .permissions()
+        .mode()
+        & 0o111;
+    assert_ne!(input_mode, 0, "test binary should be executable");
+
+    let output_path = temp_file_path("preserve-mode");
+    let output = Command::new(macho_bin())
+        .args([
+            "patch",
+            "add-rpath",
+            "/usr/bin/true",
+            "/tmp/macho-preserve-mode",
+            "--output",
+            output_path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("failed to run macho patch add-rpath");
+
+    assert!(
+        output.status.success(),
+        "patch command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let output_mode = std::fs::metadata(&output_path)
+        .expect("metadata for patched output")
+        .permissions()
+        .mode()
+        & 0o111;
+    assert_eq!(
+        output_mode, input_mode,
+        "patched output should preserve execute bits"
+    );
 
     let _ = std::fs::remove_file(&output_path);
 }

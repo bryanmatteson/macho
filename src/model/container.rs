@@ -1,4 +1,8 @@
 use crate::addr::{FatFileOffset, ThinFileOffset};
+use crate::analysis::snapshot::{ContainerFormat, ContainerSnapshot, SliceSnapshot};
+use crate::container_analysis::parity;
+use crate::container_analysis::resolve;
+use crate::container_analysis::{ContainerReport, FilesetReport};
 use crate::error::{Error, Result};
 use crate::model::fat::{ArchSpec, FatHeader};
 use crate::model::header::{CpuSubtype, CpuType};
@@ -42,6 +46,62 @@ pub struct FatBinary<'data> {
 impl<'data> FatBinary<'data> {
     pub fn arches(&self) -> &[FatArch<'data>] {
         &self.arches
+    }
+
+    pub fn snapshot(&self) -> ContainerSnapshot {
+        ContainerSnapshot {
+            format: ContainerFormat::Fat,
+            slices: self
+                .arches
+                .iter()
+                .map(|arch| {
+                    let mut snap = SliceSnapshot::from_mach(&arch.mach);
+                    snap.arch = arch.spec.name();
+                    snap
+                })
+                .collect(),
+        }
+    }
+
+    pub fn container_report(&self) -> ContainerReport {
+        ContainerReport::from_snapshot(&self.snapshot())
+    }
+
+    pub fn parity_report(&self) -> Option<parity::ArchParityReport> {
+        let snapshot = self.snapshot();
+        if snapshot.slices.len() > 1 {
+            Some(parity::compute_parity(&snapshot.slices))
+        } else {
+            None
+        }
+    }
+
+    pub fn fileset_report(&self) -> Option<FilesetReport> {
+        self.container_report().fileset
+    }
+
+    pub fn resolve_cross_image(&self) -> resolve::CrossImageResolution {
+        resolve::resolve_cross_image(&self.snapshot())
+    }
+
+    pub fn common_exports(&self) -> Vec<String> {
+        resolve::common_exports(&self.snapshot())
+    }
+
+    pub fn divergent_exports(&self) -> Vec<resolve::ExportOwnership> {
+        resolve::divergent_exports(&self.snapshot())
+    }
+
+    pub fn common_imports(&self) -> Vec<String> {
+        resolve::common_imports(&self.snapshot())
+    }
+
+    pub fn all_signed(&self) -> bool {
+        resolve::all_signed(&self.snapshot())
+    }
+
+    pub fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<crate::diff::DiffReport> {
+        resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
     }
 
     /// Find an arch by CPU type only (returns first match).
@@ -96,6 +156,52 @@ impl<'data> MachContainer<'data> {
             Self::Thin(mach) => vec![mach],
             Self::Fat(fat) => fat.arches.iter().map(|a| &a.mach).collect(),
         }
+    }
+
+    pub fn snapshot(&self) -> ContainerSnapshot {
+        match self {
+            Self::Thin(_) => ContainerSnapshot::from_container(self),
+            Self::Fat(fat) => fat.snapshot(),
+        }
+    }
+
+    pub fn container_report(&self) -> ContainerReport {
+        ContainerReport::from_container(self)
+    }
+
+    pub fn parity_report(&self) -> Option<parity::ArchParityReport> {
+        match self {
+            Self::Thin(_) => None,
+            Self::Fat(fat) => fat.parity_report(),
+        }
+    }
+
+    pub fn fileset_report(&self) -> Option<FilesetReport> {
+        self.container_report().fileset
+    }
+
+    pub fn resolve_cross_image(&self) -> resolve::CrossImageResolution {
+        resolve::resolve_cross_image(&self.snapshot())
+    }
+
+    pub fn common_exports(&self) -> Vec<String> {
+        resolve::common_exports(&self.snapshot())
+    }
+
+    pub fn divergent_exports(&self) -> Vec<resolve::ExportOwnership> {
+        resolve::divergent_exports(&self.snapshot())
+    }
+
+    pub fn common_imports(&self) -> Vec<String> {
+        resolve::common_imports(&self.snapshot())
+    }
+
+    pub fn all_signed(&self) -> bool {
+        resolve::all_signed(&self.snapshot())
+    }
+
+    pub fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<crate::diff::DiffReport> {
+        resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
     }
 
     /// Returns the first (or only) MachFile. Panics only if a fat binary has

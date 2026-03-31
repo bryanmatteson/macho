@@ -1,5 +1,20 @@
 use macho::analysis::snapshot::ContainerSnapshot;
 use macho::audit::{AuditSeverity, audit_slice};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn macho_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_macho")
+}
+
+fn temp_file_path(name: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_nanos();
+    std::env::temp_dir().join(format!("macho-{name}-{nanos}.bin"))
+}
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
@@ -7,7 +22,7 @@ fn snapshot_for(path: &str) -> ContainerSnapshot {
     ContainerSnapshot::from_container(&container)
 }
 
-fn malformed_codesign_snapshot() -> ContainerSnapshot {
+fn malformed_codesign_binary() -> Vec<u8> {
     const MH_MAGIC_64: u32 = 0xFEEDFACF;
     const CPU_TYPE_ARM64: u32 = 0x0100000C;
     const MH_EXECUTE: u32 = 2;
@@ -48,8 +63,37 @@ fn malformed_codesign_snapshot() -> ContainerSnapshot {
     data.extend_from_slice(&code_sig_size.to_le_bytes());
     data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0, 1, 2, 3]);
 
+    data
+}
+
+fn malformed_codesign_snapshot() -> ContainerSnapshot {
+    let data = malformed_codesign_binary();
     let container = macho::parse(&data).expect("parse malformed codesign binary");
     ContainerSnapshot::from_container(&container)
+}
+
+fn write_malformed_codesign_fixture() -> PathBuf {
+    let path = temp_file_path("audit-fixture");
+    let data = malformed_codesign_binary();
+    std::fs::write(&path, data).expect("write malformed binary");
+    path
+}
+
+fn write_relative_malformed_codesign_fixture() -> (PathBuf, PathBuf) {
+    let cwd = std::env::current_dir().expect("current dir");
+    let path = cwd
+        .join("target")
+        .join("audit-fixtures")
+        .join(format!("audit relative {}.bin", std::process::id()));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create fixture dir");
+    }
+    std::fs::write(&path, malformed_codesign_binary()).expect("write malformed binary");
+    let relative = path
+        .strip_prefix(&cwd)
+        .expect("relative path")
+        .to_path_buf();
+    (path, relative)
 }
 
 #[test]
@@ -201,5 +245,234 @@ fn audit_reports_unreadable_code_signature_instead_of_unsigned() {
             .iter()
             .all(|finding| finding.rule_id != "CS001"),
         "malformed signature should not be reported as unsigned"
+    );
+}
+
+#[test]
+fn audit_json_cli_filters_and_serializes_lowercase_severity() {
+    let path = write_malformed_codesign_fixture();
+
+    let output = Command::new(macho_bin())
+        .args([
+            "audit",
+            "--json",
+            "--min-severity",
+            "error",
+            path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run macho audit --json");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(output.status.success(), "audit command failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    let slices = payload.as_array().expect("top-level array");
+    assert_eq!(slices.len(), 1);
+
+    let findings = slices[0]["findings"].as_array().expect("findings array");
+    assert!(
+        !findings.is_empty(),
+        "expected at least one finding in JSON output"
+    );
+
+    for finding in findings {
+        let severity = finding["severity"].as_str().expect("severity string");
+        assert!(
+            matches!(severity, "error" | "critical"),
+            "min-severity filtering should remove warnings/info, got {severity}"
+        );
+        assert!(
+            !finding["rule_id"]
+                .as_str()
+                .expect("rule_id string")
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn audit_sarif_cli_emits_machine_readable_document() {
+    let path = write_malformed_codesign_fixture();
+
+    let output = Command::new(macho_bin())
+        .args([
+            "audit",
+            "--sarif",
+            "--min-severity",
+            "error",
+            path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run macho audit --sarif");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(output.status.success(), "audit command failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sarif: serde_json::Value = serde_json::from_str(&stdout).expect("valid SARIF JSON");
+    assert_eq!(sarif["version"], "2.1.0");
+    assert_eq!(sarif["runs"][0]["tool"]["driver"]["name"], "macho audit");
+
+    let rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+        .as_array()
+        .expect("rules array");
+    assert!(
+        !rules.is_empty(),
+        "expected at least one SARIF rule descriptor"
+    );
+
+    let results = sarif["runs"][0]["results"]
+        .as_array()
+        .expect("results array");
+    assert!(
+        !results.is_empty(),
+        "expected SARIF results for malformed binary"
+    );
+
+    for result in results {
+        assert_eq!(result["level"], "error");
+        assert!(result["ruleId"].is_string());
+        assert!(result["message"]["text"].is_string());
+        assert!(
+            result["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+                .as_str()
+                .expect("uri string")
+                .starts_with("file://")
+        );
+    }
+}
+
+#[test]
+fn audit_fail_on_exits_nonzero_after_emitting_json_output() {
+    let path = write_malformed_codesign_fixture();
+
+    let output = Command::new(macho_bin())
+        .args([
+            "audit",
+            "--json",
+            "--fail-on",
+            "error",
+            path.to_str().expect("utf8 path"),
+        ])
+        .output()
+        .expect("run macho audit --json --fail-on");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(
+        !output.status.success(),
+        "audit command should fail when threshold is met"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let payload: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+    assert!(
+        payload.as_array().is_some(),
+        "stdout should still contain the JSON report"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("audit findings reached fail threshold"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn audit_sarif_cli_encodes_file_uri() {
+    let path = temp_file_path("audit sarif uri");
+    std::fs::write(&path, malformed_codesign_binary()).expect("write malformed binary");
+
+    let output = Command::new(macho_bin())
+        .args(["audit", "--sarif", path.to_str().expect("utf8 path")])
+        .output()
+        .expect("run macho audit --sarif");
+
+    let _ = std::fs::remove_file(&path);
+
+    assert!(output.status.success(), "audit command failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sarif: serde_json::Value = serde_json::from_str(&stdout).expect("valid SARIF JSON");
+    let uri = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        ["artifactLocation"]["uri"]
+        .as_str()
+        .expect("uri string");
+
+    assert!(
+        uri.starts_with("file:///"),
+        "expected file URI for absolute path, got {uri}"
+    );
+    assert!(
+        !uri.contains(' '),
+        "SARIF URI must be percent-encoded, got {uri}"
+    );
+    assert!(
+        uri.contains("%20"),
+        "expected spaces to be percent-encoded in SARIF URI, got {uri}"
+    );
+}
+
+#[test]
+fn audit_fail_on_invalid_severity_fails_before_printing_output() {
+    let output = Command::new(macho_bin())
+        .args([
+            "audit",
+            "--json",
+            "--fail-on",
+            "definitely_not_real",
+            "/usr/bin/true",
+        ])
+        .output()
+        .expect("run macho audit with invalid fail-on");
+
+    assert!(
+        !output.status.success(),
+        "audit command should fail for invalid severity"
+    );
+
+    assert!(
+        String::from_utf8_lossy(&output.stdout).is_empty(),
+        "command should not emit output before validating fail-on"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown severity: definitely_not_real"),
+        "unexpected stderr: {stderr}"
+    );
+}
+
+#[test]
+fn audit_sarif_cli_canonicalizes_relative_input_paths() {
+    let (abs, rel) = write_relative_malformed_codesign_fixture();
+
+    let output = Command::new(macho_bin())
+        .args(["audit", "--sarif", rel.to_str().expect("utf8 path")])
+        .output()
+        .expect("run macho audit --sarif on relative path");
+
+    let _ = std::fs::remove_file(&abs);
+
+    assert!(output.status.success(), "audit command failed");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let sarif: serde_json::Value = serde_json::from_str(&stdout).expect("valid SARIF JSON");
+    let uri = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+        ["artifactLocation"]["uri"]
+        .as_str()
+        .expect("uri string");
+
+    assert!(
+        uri.starts_with("file:///"),
+        "expected canonical absolute file URI, got {uri}"
+    );
+    assert!(
+        uri.contains("audit-fixtures"),
+        "expected canonicalized file URI to include the relative fixture path, got {uri}"
     );
 }

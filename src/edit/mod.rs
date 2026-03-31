@@ -1,8 +1,11 @@
 pub mod encoder;
 pub mod layout;
+pub mod ops;
 pub mod patch;
 pub mod resign;
 pub mod transaction;
+
+pub use ops::PatchOp;
 
 pub use patch::{
     FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachoPatcher,

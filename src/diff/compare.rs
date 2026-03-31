@@ -3,6 +3,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::analysis::snapshot::*;
 use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport};
 
+pub fn diff_slice_snapshots(old: &SliceSnapshot, new: &SliceSnapshot) -> DiffReport {
+    let mut findings = Vec::new();
+    let arch = Some(format!("{} -> {}", old.arch, new.arch));
+    diff_slice_details(old, new, &arch, &mut findings);
+    DiffReport { findings }
+}
+
 pub fn diff_containers(old: &ContainerSnapshot, new: &ContainerSnapshot) -> DiffReport {
     let mut findings = Vec::new();
 
@@ -31,7 +38,8 @@ pub fn diff_containers(old: &ContainerSnapshot, new: &ContainerSnapshot) -> Diff
     for arch in old_arches.intersection(&new_arches) {
         let old_slice = old.slices.iter().find(|s| s.arch == *arch).unwrap();
         let new_slice = new.slices.iter().find(|s| s.arch == *arch).unwrap();
-        diff_slices(old_slice, new_slice, &mut findings);
+        let arch = Some(old_slice.arch.clone());
+        diff_slice_details(old_slice, new_slice, &arch, &mut findings);
     }
 
     DiffReport { findings }
@@ -54,23 +62,22 @@ fn diff_container_format(
     }
 }
 
-fn diff_slices(old: &SliceSnapshot, new: &SliceSnapshot, findings: &mut Vec<DiffFinding>) {
-    let arch = Some(old.arch.clone());
-    diff_headers(&old.header, &new.header, &arch, findings);
-    diff_load_commands(&old.load_commands, &new.load_commands, &arch, findings);
-    diff_segments(&old.segments, &new.segments, &arch, findings);
-    diff_symbols(&old.symbols, &new.symbols, &arch, findings);
-    diff_exports(&old.exports, &new.exports, &arch, findings);
-    diff_imports(&old.imports, &new.imports, &arch, findings);
-    diff_objc(&old.objc, &new.objc, &arch, findings);
-    diff_codesign(
-        old.codesign.as_ref(),
-        new.codesign.as_ref(),
-        &arch,
-        findings,
-    );
-    diff_analysis_issues(&old.analysis_issues, &new.analysis_issues, &arch, findings);
-    diff_diagnostics(&old.diagnostics, &new.diagnostics, &arch, findings);
+fn diff_slice_details(
+    old: &SliceSnapshot,
+    new: &SliceSnapshot,
+    arch: &Option<String>,
+    findings: &mut Vec<DiffFinding>,
+) {
+    diff_headers(&old.header, &new.header, arch, findings);
+    diff_load_commands(&old.load_commands, &new.load_commands, arch, findings);
+    diff_segments(&old.segments, &new.segments, arch, findings);
+    diff_symbols(&old.symbols, &new.symbols, arch, findings);
+    diff_exports(&old.exports, &new.exports, arch, findings);
+    diff_imports(&old.imports, &new.imports, arch, findings);
+    diff_objc(&old.objc, &new.objc, arch, findings);
+    diff_codesign(old.codesign.as_ref(), new.codesign.as_ref(), arch, findings);
+    diff_analysis_issues(&old.analysis_issues, &new.analysis_issues, arch, findings);
+    diff_diagnostics(&old.diagnostics, &new.diagnostics, arch, findings);
 }
 
 fn diff_headers(
@@ -190,84 +197,87 @@ fn diff_load_commands(
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
 ) {
-    let old_names: BTreeMap<&str, usize> = count_by(old.iter().map(|lc| lc.name.as_str()));
-    let new_names: BTreeMap<&str, usize> = count_by(new.iter().map(|lc| lc.name.as_str()));
-
-    let all_names: BTreeSet<&str> = old_names.keys().chain(new_names.keys()).copied().collect();
-    for name in all_names {
-        let o = old_names.get(name).copied().unwrap_or(0);
-        let n = new_names.get(name).copied().unwrap_or(0);
-        if o != n {
-            let sev = load_command_severity(name);
-            findings.push(DiffFinding {
-                domain: DiffDomain::LoadCommands,
-                severity: sev,
-                arch: arch.clone(),
-                message: format!("{name} count: {o} -> {n}"),
-            });
-        }
-    }
-
-    // Compare rpaths specifically
-    let old_rpaths: BTreeSet<&str> = old
+    let old = old
         .iter()
-        .filter(|lc| lc.name == "LC_RPATH")
-        .map(|lc| lc.summary.as_str())
-        .collect();
-    let new_rpaths: BTreeSet<&str> = new
+        .filter(|lc| should_compare_load_command(&lc.name))
+        .collect::<Vec<_>>();
+    let new = new
         .iter()
-        .filter(|lc| lc.name == "LC_RPATH")
-        .map(|lc| lc.summary.as_str())
-        .collect();
-    for removed in old_rpaths.difference(&new_rpaths) {
+        .filter(|lc| should_compare_load_command(&lc.name))
+        .collect::<Vec<_>>();
+
+    let old_cmds: BTreeMap<LoadCommandFingerprint, usize> =
+        count_items(old.into_iter().map(load_command_fingerprint));
+    let new_cmds: BTreeMap<LoadCommandFingerprint, usize> =
+        count_items(new.into_iter().map(load_command_fingerprint));
+
+    for (cmd, removed) in diff_counts(&new_cmds, &old_cmds) {
         findings.push(DiffFinding {
             domain: DiffDomain::LoadCommands,
-            severity: ChangeSeverity::Warning,
+            severity: load_command_change_severity(cmd.name.as_str(), true),
             arch: arch.clone(),
-            message: format!("rpath removed: {removed}"),
+            message: format!(
+                "load command removed: {}{}",
+                describe_load_command(&cmd),
+                format_count_suffix(removed)
+            ),
         });
     }
-    for added in new_rpaths.difference(&old_rpaths) {
+    for (cmd, added) in diff_counts(&old_cmds, &new_cmds) {
         findings.push(DiffFinding {
             domain: DiffDomain::LoadCommands,
-            severity: ChangeSeverity::Info,
+            severity: load_command_change_severity(cmd.name.as_str(), false),
             arch: arch.clone(),
-            message: format!("rpath added: {added}"),
-        });
-    }
-
-    // Compare dylib loads
-    let old_dylibs: BTreeSet<&str> = old
-        .iter()
-        .filter(|lc| lc.name.contains("DYLIB"))
-        .map(|lc| lc.summary.as_str())
-        .collect();
-    let new_dylibs: BTreeSet<&str> = new
-        .iter()
-        .filter(|lc| lc.name.contains("DYLIB"))
-        .map(|lc| lc.summary.as_str())
-        .collect();
-    for removed in old_dylibs.difference(&new_dylibs) {
-        findings.push(DiffFinding {
-            domain: DiffDomain::LoadCommands,
-            severity: ChangeSeverity::Breaking,
-            arch: arch.clone(),
-            message: format!("dylib dependency removed: {removed}"),
-        });
-    }
-    for added in new_dylibs.difference(&old_dylibs) {
-        findings.push(DiffFinding {
-            domain: DiffDomain::LoadCommands,
-            severity: ChangeSeverity::Warning,
-            arch: arch.clone(),
-            message: format!("dylib dependency added: {added}"),
+            message: format!(
+                "load command added: {}{}",
+                describe_load_command(&cmd),
+                format_count_suffix(added)
+            ),
         });
     }
 }
 
-fn load_command_severity(name: &str) -> ChangeSeverity {
+fn should_compare_load_command(name: &str) -> bool {
+    !matches!(
+        name,
+        "LC_UUID" | "LC_BUILD_VERSION" | "LC_SEGMENT" | "LC_SEGMENT_64" | "LC_CODE_SIGNATURE"
+    )
+}
+
+fn load_command_change_severity(name: &str, removed: bool) -> ChangeSeverity {
     match name {
-        "LC_CODE_SIGNATURE" | "LC_SEGMENT_64" | "LC_SEGMENT" | "LC_MAIN" => ChangeSeverity::Warning,
+        "LC_LOAD_DYLIB"
+        | "LC_LOAD_WEAK_DYLIB"
+        | "LC_REEXPORT_DYLIB"
+        | "LC_LOAD_UPWARD_DYLIB"
+        | "LC_LAZY_LOAD_DYLIB" => {
+            if removed {
+                ChangeSeverity::Breaking
+            } else {
+                ChangeSeverity::Warning
+            }
+        }
+        "LC_RPATH" | "LC_FILESET_ENTRY" => {
+            if removed {
+                ChangeSeverity::Warning
+            } else {
+                ChangeSeverity::Info
+            }
+        }
+        "LC_MAIN" => {
+            if removed {
+                ChangeSeverity::Breaking
+            } else {
+                ChangeSeverity::Warning
+            }
+        }
+        "LC_ID_DYLIB" | "LC_DYLD_EXPORTS_TRIE" | "LC_DYLD_CHAINED_FIXUPS" => {
+            if removed {
+                ChangeSeverity::Warning
+            } else {
+                ChangeSeverity::Info
+            }
+        }
         _ => ChangeSeverity::Info,
     }
 }
@@ -867,14 +877,6 @@ fn diff_diagnostics(
     }
 }
 
-fn count_by<'a>(items: impl Iterator<Item = &'a str>) -> BTreeMap<&'a str, usize> {
-    let mut map = BTreeMap::new();
-    for item in items {
-        *map.entry(item).or_insert(0) += 1;
-    }
-    map
-}
-
 fn count_items<T>(items: impl Iterator<Item = T>) -> BTreeMap<T, usize>
 where
     T: Ord,
@@ -884,6 +886,38 @@ where
         *map.entry(item).or_insert(0) += 1;
     }
     map
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct LoadCommandFingerprint {
+    name: String,
+    summary: String,
+    fileset_entry: Option<FilesetEntrySnapshot>,
+}
+
+fn load_command_fingerprint(lc: &LoadCommandSnapshot) -> LoadCommandFingerprint {
+    LoadCommandFingerprint {
+        name: lc.name.clone(),
+        summary: lc.summary.clone(),
+        fileset_entry: lc.fileset_entry.clone(),
+    }
+}
+
+fn describe_load_command(cmd: &LoadCommandFingerprint) -> String {
+    if cmd.name == "LC_FILESET_ENTRY" {
+        if let Some(entry) = cmd.fileset_entry.as_ref() {
+            return format!(
+                "{} {} vm_addr={:#x} file_offset={:#x}",
+                cmd.name, entry.entry_id, entry.vm_addr, entry.file_offset
+            );
+        }
+    }
+
+    if cmd.summary.is_empty() {
+        cmd.name.clone()
+    } else {
+        format!("{} {}", cmd.name, cmd.summary)
+    }
 }
 
 fn diff_counts<T>(baseline: &BTreeMap<T, usize>, candidate: &BTreeMap<T, usize>) -> Vec<(T, usize)>
