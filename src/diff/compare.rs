@@ -696,8 +696,10 @@ fn diff_objc(
             ChangeSeverity::Warning,
             arch,
             findings,
-            oc.properties.iter().map(|value| value.as_str()).collect(),
-            nc.properties.iter().map(|value| value.as_str()).collect(),
+            (
+                oc.properties.iter().map(|value| value.as_str()).collect(),
+                nc.properties.iter().map(|value| value.as_str()).collect(),
+            ),
             |value, removed| {
                 format!(
                     "ObjC class {name} property {}: {value}",
@@ -711,8 +713,10 @@ fn diff_objc(
             ChangeSeverity::Warning,
             arch,
             findings,
-            oc.ivars.iter().map(|value| value.as_str()).collect(),
-            nc.ivars.iter().map(|value| value.as_str()).collect(),
+            (
+                oc.ivars.iter().map(|value| value.as_str()).collect(),
+                nc.ivars.iter().map(|value| value.as_str()).collect(),
+            ),
             |value, removed| {
                 format!(
                     "ObjC class {name} ivar {}: {value}",
@@ -726,8 +730,10 @@ fn diff_objc(
             ChangeSeverity::Warning,
             arch,
             findings,
-            oc.protocols.iter().map(|value| value.as_str()).collect(),
-            nc.protocols.iter().map(|value| value.as_str()).collect(),
+            (
+                oc.protocols.iter().map(|value| value.as_str()).collect(),
+                nc.protocols.iter().map(|value| value.as_str()).collect(),
+            ),
             |value, removed| {
                 format!(
                     "ObjC class {name} protocol {}: {value}",
@@ -801,8 +807,10 @@ fn diff_objc(
             ChangeSeverity::Warning,
             arch,
             findings,
-            oc.protocols.iter().map(|value| value.as_str()).collect(),
-            nc.protocols.iter().map(|value| value.as_str()).collect(),
+            (
+                oc.protocols.iter().map(|value| value.as_str()).collect(),
+                nc.protocols.iter().map(|value| value.as_str()).collect(),
+            ),
             |value, removed| {
                 format!(
                     "ObjC category {cat} on {cls} protocol {}: {value}",
@@ -859,14 +867,16 @@ fn diff_objc(
             ChangeSeverity::Warning,
             arch,
             findings,
-            op.adopted_protocols
-                .iter()
-                .map(|value| value.as_str())
-                .collect(),
-            np.adopted_protocols
-                .iter()
-                .map(|value| value.as_str())
-                .collect(),
+            (
+                op.adopted_protocols
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect(),
+                np.adopted_protocols
+                    .iter()
+                    .map(|value| value.as_str())
+                    .collect(),
+            ),
             |value, removed| {
                 format!(
                     "protocol {name}: adopted protocol {}: {value}",
@@ -1208,9 +1218,7 @@ fn describe_export_kind(kind: &ExportKindSnapshot) -> String {
     }
 }
 
-fn imports_by_name<'a>(
-    imports: &'a [ImportSnapshot],
-) -> BTreeMap<&'a str, Vec<&'a ImportSnapshot>> {
+fn imports_by_name(imports: &[ImportSnapshot]) -> BTreeMap<&str, Vec<&ImportSnapshot>> {
     let mut map: BTreeMap<&str, Vec<&ImportSnapshot>> = BTreeMap::new();
     for import in imports {
         map.entry(import.name.as_str()).or_default().push(import);
@@ -1283,12 +1291,12 @@ fn diff_string_set<F>(
     remove_severity: ChangeSeverity,
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
-    old: BTreeSet<&str>,
-    new: BTreeSet<&str>,
+    values: (BTreeSet<&str>, BTreeSet<&str>),
     mut message: F,
 ) where
     F: FnMut(&str, bool) -> String,
 {
+    let (old, new) = values;
     for value in old.difference(&new) {
         findings.push(DiffFinding {
             domain,

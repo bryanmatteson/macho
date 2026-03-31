@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use serde::Serialize;
+
 use crate::addr::map::AddressMap;
 use crate::addr::types::{ThinFileOffset, Va};
 use crate::dyld::exports::parse_exports;
@@ -10,12 +12,12 @@ use crate::model::symbol::SymbolType;
 use crate::objc::parse_objc_metadata;
 use crate::parse::parse_symbol_table;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SymbolRangeIndex {
     entries: Vec<RangeEntry>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RangeEntry {
     pub start: Va,
     pub end: Va,
@@ -24,7 +26,8 @@ pub struct RangeEntry {
     pub is_alt_entry: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CodeEntity {
     Symbol {
         name: String,
@@ -43,7 +46,8 @@ pub enum CodeEntity {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RangeSource {
     Nlist,
     ExportTrie,

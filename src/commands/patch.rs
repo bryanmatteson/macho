@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
-use macho::edit::transaction::{
-    PatchOp, PatchTransaction, PreparedPatch, SignatureOutcome,
-};
+use macho::edit::transaction::{PatchOp, PatchTransaction, PreparedPatch, SignatureOutcome};
 use macho::model::container::MachContainer;
 use macho::model::mach::MachFile;
 use macho::model::owned::OwnedFatBinary;
@@ -382,62 +380,70 @@ fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> 
 }
 
 fn emit_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) {
+    print!("{}", format_preview(items, dry_run));
+}
+
+fn format_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) -> String {
+    let mut output = String::new();
     if dry_run {
-        println!("Dry run - changes that would be applied:");
+        output.push_str("Dry run - changes that would be applied:\n");
     }
 
     for (index, (arch_name, prepared)) in items.iter().enumerate() {
         if items.len() > 1 {
             if index > 0 {
-                println!();
+                output.push('\n');
             }
-            println!("=== {arch_name} ===");
+            output.push_str(&format!("=== {arch_name} ===\n"));
         }
 
         for op in &prepared.preview.operations {
-            println!("  {op}");
+            output.push_str(&format!("  {op}\n"));
         }
-        println!(
-            "Load commands: {} -> {}",
+        output.push_str(&format!(
+            "Load commands: {} -> {}\n",
             prepared.preview.old_command_count, prepared.preview.new_command_count
-        );
+        ));
         if !prepared.preview.semantic_diff.findings.is_empty() {
-            println!("Semantic changes:");
+            output.push_str("Semantic changes:\n");
             for finding in &prepared.preview.semantic_diff.findings {
-                println!(
+                output.push_str(&format!(
                     "  [{}:{}] {}",
                     finding.severity, finding.domain, finding.message
-                );
+                ));
+                output.push('\n');
             }
         }
         if !prepared.preview.validation_errors.is_empty() {
-            println!("Validation errors:");
+            output.push_str("Validation errors:\n");
             for e in &prepared.preview.validation_errors {
-                println!("  {e}");
+                output.push_str(&format!("  {e}\n"));
             }
         }
         if !prepared.preview.validation_warnings.is_empty() {
-            println!("Validation warnings:");
+            output.push_str("Validation warnings:\n");
             for w in &prepared.preview.validation_warnings {
-                println!("  {w}");
+                output.push_str(&format!("  {w}\n"));
             }
         }
         match prepared.preview.signature_outcome {
             SignatureOutcome::Unchanged => {}
             SignatureOutcome::Invalidated => {
-                println!("\nWarning: code signature will be invalidated.");
+                output.push_str("\nWarning: code signature will be invalidated.\n");
                 if let Some(plan) = &prepared.preview.resign_plan {
-                    print!("{plan}");
+                    output.push_str(&plan.to_string());
                 }
             }
             SignatureOutcome::Removed => {
-                println!("\nCode signature will be removed; output will be unsigned.");
+                output.push_str("\nCode signature will be removed; output will be unsigned.\n");
                 if let Some(plan) = &prepared.preview.resign_plan {
-                    print!("{plan}");
+                    output.push_str(&plan.to_string());
                 }
             }
         }
     }
+
+    output
 }
 
 fn has_raw_byte_patch(ops: &[PatchOp]) -> bool {
@@ -481,4 +487,72 @@ fn validation_errors_for_mach(mach: &MachFile<'_>) -> Vec<String> {
         .filter(|diag| diag.severity == validate::Severity::Error)
         .map(|diag| format!("{}: {}", diag.code.0, diag.message))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use macho::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport};
+    use macho::edit::transaction::PatchPreview;
+
+    fn prepared_patch(
+        operations: Vec<&str>,
+        findings: Vec<DiffFinding>,
+        signature_outcome: SignatureOutcome,
+    ) -> PreparedPatch {
+        PreparedPatch {
+            preview: PatchPreview {
+                operations: operations.into_iter().map(str::to_owned).collect(),
+                old_command_count: 10,
+                new_command_count: 11,
+                validation_errors: Vec::new(),
+                validation_warnings: Vec::new(),
+                semantic_diff: DiffReport { findings },
+                signature_outcome,
+                resign_plan: None,
+            },
+            bytes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn format_preview_surfaces_semantic_diff_and_signature_invalidation() {
+        let prepared = prepared_patch(
+            vec!["add rpath: /tmp/test"],
+            vec![DiffFinding {
+                domain: DiffDomain::LoadCommands,
+                severity: ChangeSeverity::Info,
+                arch: Some("arm64e".to_string()),
+                message: "load command added: LC_RPATH".to_string(),
+            }],
+            SignatureOutcome::Invalidated,
+        );
+
+        let output = format_preview(&[("arm64e", &prepared)], true);
+
+        assert!(output.contains("Dry run - changes that would be applied:"));
+        assert!(output.contains("Semantic changes:"));
+        assert!(output.contains("load command added: LC_RPATH"));
+        assert!(output.contains("Warning: code signature will be invalidated."));
+    }
+
+    #[test]
+    fn format_preview_reports_unsigned_output_when_signature_removed() {
+        let prepared = prepared_patch(
+            vec!["remove code signature"],
+            vec![DiffFinding {
+                domain: DiffDomain::Codesign,
+                severity: ChangeSeverity::Warning,
+                arch: Some("arm64e".to_string()),
+                message: "code signature removed".to_string(),
+            }],
+            SignatureOutcome::Removed,
+        );
+
+        let output = format_preview(&[("arm64e", &prepared)], true);
+
+        assert!(output.contains("Semantic changes:"));
+        assert!(output.contains("code signature removed"));
+        assert!(output.contains("Code signature will be removed; output will be unsigned."));
+    }
 }

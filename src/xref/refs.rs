@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::addr::types::{ThinFileOffset, Va};
 use crate::constants::*;
 use crate::dyld::bind::parse_bind_entries;
@@ -9,25 +11,27 @@ use crate::model::relocation::Relocation;
 use crate::model::section::SectionType;
 use crate::parse::{parse_symbol_table, relocations_for_section};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct XrefIndex {
     refs: Vec<Xref>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Xref {
     pub source: Va,
     pub target: XrefTarget,
     pub kind: XrefKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum XrefTarget {
-    Internal(Va),
+    Internal { va: Va },
     Import { name: String, ordinal: i32 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum XrefKind {
     Stub,
     ChainedBind,
@@ -76,7 +80,7 @@ impl XrefIndex {
     /// need reverse lookups, consider building a secondary index externally.
     pub fn refs_to(&self, target: Va) -> impl Iterator<Item = &Xref> {
         self.refs.iter().filter(move |r| match &r.target {
-            XrefTarget::Internal(va) => *va == target,
+            XrefTarget::Internal { va } => *va == target,
             _ => false,
         })
     }
@@ -191,7 +195,7 @@ fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
                         ordinal: sym.library_ordinal() as i32,
                     }
                 } else {
-                    XrefTarget::Internal(Va(sym.value))
+                    XrefTarget::Internal { va: Va(sym.value) }
                 };
 
                 refs.push(Xref {
@@ -239,7 +243,7 @@ fn collect_chained_fixup_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
             FixupKind::Rebase { target } | FixupKind::AuthRebase { target, .. } => {
                 refs.push(Xref {
                     source: source_va,
-                    target: XrefTarget::Internal(Va(*target)),
+                    target: XrefTarget::Internal { va: Va(*target) },
                     kind: XrefKind::ChainedRebase,
                 });
             }
@@ -283,7 +287,7 @@ fn collect_relocation_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
         if sect.nreloc == 0 {
             continue;
         }
-        let relocs = match relocations_for_section(mach, &sect) {
+        let relocs = match relocations_for_section(mach, sect) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -300,7 +304,7 @@ fn collect_relocation_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
                                     ordinal: sym.library_ordinal() as i32,
                                 }
                             } else {
-                                XrefTarget::Internal(Va(sym.value))
+                                XrefTarget::Internal { va: Va(sym.value) }
                             };
                             refs.push(Xref {
                                 source: source_va,
@@ -386,7 +390,7 @@ fn collect_arm64_branches(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
 
             refs.push(Xref {
                 source: source_va,
-                target: XrefTarget::Internal(target_va),
+                target: XrefTarget::Internal { va: target_va },
                 kind: XrefKind::DirectBranch,
             });
         }
@@ -430,7 +434,7 @@ fn collect_x86_64_calls(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
 
                 refs.push(Xref {
                     source: source_va,
-                    target: XrefTarget::Internal(target_va),
+                    target: XrefTarget::Internal { va: target_va },
                     kind: XrefKind::DirectBranch,
                 });
 

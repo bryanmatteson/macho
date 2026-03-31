@@ -346,7 +346,7 @@ fn xref_index_refs_to_internal() {
         let index = XrefIndex::build(mach).expect("failed to build xref index");
 
         for xref in index.all_refs() {
-            if let XrefTarget::Internal(target) = &xref.target {
+            if let XrefTarget::Internal { va: target } = &xref.target {
                 let to_refs: Vec<_> = index.refs_to(*target).collect();
                 assert!(!to_refs.is_empty());
                 return;
@@ -399,7 +399,7 @@ fn direct_branches_target_known_symbols() {
         let resolved = branches
             .iter()
             .filter(|b| {
-                if let XrefTarget::Internal(va) = &b.target {
+                if let XrefTarget::Internal { va } = &b.target {
                     ranges.lookup_va(*va).is_some()
                 } else {
                     false
@@ -628,7 +628,7 @@ fn direct_branch_targets_are_plausible() {
         let in_range = branches
             .iter()
             .filter(|b| {
-                if let XrefTarget::Internal(va) = &b.target {
+                if let XrefTarget::Internal { va } = &b.target {
                     va.0 >= min_va && va.0 < max_va
                 } else {
                     false

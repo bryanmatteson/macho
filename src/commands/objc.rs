@@ -173,7 +173,7 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
                     .transpose()?
                     .unwrap_or(serde_json::Value::Null)
             } else {
-                serde_json::to_value(&graph)?
+                serde_json::to_value(graph)?
             };
             result.insert(arch_name.to_string(), val);
             Ok(())
@@ -210,7 +210,7 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
 
             if let Some(cls) = class {
                 if let Some(node) = graph.class(cls) {
-                    print_class_node(node, &graph);
+                    print_class_node(node, graph);
                 } else {
                     println!("Class {cls} not found");
                 }

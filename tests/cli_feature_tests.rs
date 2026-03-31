@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+mod support;
+
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -7,20 +8,13 @@ use macho::model::container::MachContainer;
 use macho::objc::graph::ObjCGraph;
 use macho::objc::parse_objc_metadata;
 use macho::swift::SwiftTypeIndex;
+use support::{copy_macho_fixture, temp_file_path};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 fn macho_bin() -> &'static str {
     env!("CARGO_BIN_EXE_macho")
-}
-
-fn temp_file_path(name: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    std::env::temp_dir().join(format!("macho-{name}-{nanos}.bin"))
 }
 
 fn minimal_fileset_binary(entry_id: &str, vm_addr: u64, file_offset: u64) -> Vec<u8> {
@@ -99,8 +93,14 @@ fn objc_graph_fixture(path: &str) -> Option<(String, ObjCGraph)> {
 
 #[test]
 fn snapshot_arch_filter_requires_match() {
+    let fixture = copy_macho_fixture("/usr/bin/true", "snapshot-true");
     let output = Command::new(macho_bin())
-        .args(["snapshot", "--arch", "definitely_not_real", "/usr/bin/true"])
+        .args([
+            "snapshot",
+            "--arch",
+            "definitely_not_real",
+            fixture.path().to_str().expect("utf8 path"),
+        ])
         .output()
         .expect("failed to run macho snapshot");
 
@@ -180,13 +180,14 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
 
 #[test]
 fn container_json_accepts_selected_parity_domains() {
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "container-plutil");
     let output = Command::new(macho_bin())
         .args([
             "container",
             "--json",
             "--parity-domain",
             "imports",
-            "/usr/bin/plutil",
+            fixture.path().to_str().expect("utf8 path"),
         ])
         .output()
         .expect("failed to run macho container");
@@ -242,8 +243,10 @@ fn fileset_inspect_reports_single_not_found_message() {
 
 #[test]
 fn fat_patch_bytes_requires_arch() {
-    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
-    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let fixture = copy_macho_fixture("/usr/bin/true", "fat-patch-bytes");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     if !matches!(container, MachContainer::Fat(_)) {
         return;
     }
@@ -252,7 +255,7 @@ fn fat_patch_bytes_requires_arch() {
         .args([
             "patch",
             "patch-bytes",
-            "/usr/bin/true",
+            fixture_path,
             "--offset",
             "0x100",
             "--hex",
@@ -276,8 +279,10 @@ fn fat_patch_bytes_requires_arch() {
 
 #[test]
 fn fat_patch_add_rpath_selected_arch_only() {
-    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
-    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let fixture = copy_macho_fixture("/usr/bin/true", "fat-selected-true");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
         MachContainer::Fat(fat) if fat.arches().len() >= 2 => fat,
         _ => return,
@@ -292,7 +297,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
         .args([
             "patch",
             "add-rpath",
-            "/usr/bin/true",
+            fixture_path,
             &rpath,
             "--arch",
             &selected_arch,
@@ -340,8 +345,10 @@ fn fat_patch_add_rpath_selected_arch_only() {
 
 #[test]
 fn fat_patch_add_rpath_all_arches_by_default() {
-    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
-    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let fixture = copy_macho_fixture("/usr/bin/true", "fat-all-true");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
         MachContainer::Fat(fat) => fat,
         _ => return,
@@ -354,7 +361,7 @@ fn fat_patch_add_rpath_all_arches_by_default() {
         .args([
             "patch",
             "add-rpath",
-            "/usr/bin/true",
+            fixture_path,
             &rpath,
             "--output",
             output_path.to_str().expect("utf8 path"),
@@ -389,8 +396,10 @@ fn fat_patch_add_rpath_all_arches_by_default() {
 
 #[test]
 fn swift_json_kind_filter_applies_to_output() {
-    let data = std::fs::read("/usr/bin/plutil").expect("read /usr/bin/plutil");
-    let container = macho::parse(&data).expect("parse /usr/bin/plutil");
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "swift-plutil");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
         MachContainer::Fat(fat) if !fat.arches().is_empty() => fat,
         _ => return,
@@ -408,7 +417,7 @@ fn swift_json_kind_filter_applies_to_output() {
     let output = Command::new(macho_bin())
         .args([
             "swift",
-            "/usr/bin/plutil",
+            fixture_path,
             "--arch",
             &selected_arch,
             "--kind",
@@ -442,15 +451,17 @@ fn swift_json_kind_filter_applies_to_output() {
 
 #[test]
 fn objc_graph_json_returns_null_for_slice_without_metadata() {
-    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
-    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let fixture = copy_macho_fixture("/usr/bin/true", "objc-graph-true");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     let arch = ImageInspector::new(container.first_mach())
         .info()
         .arch
         .clone();
 
     let output = Command::new(macho_bin())
-        .args(["objc", "graph", "/usr/bin/true", "--arch", &arch, "--json"])
+        .args(["objc", "graph", fixture_path, "--arch", &arch, "--json"])
         .output()
         .expect("failed to run macho objc graph");
 
@@ -467,7 +478,9 @@ fn objc_graph_json_returns_null_for_slice_without_metadata() {
 
 #[test]
 fn objc_selectors_json_reports_owners() {
-    let Some((arch, graph)) = objc_graph_fixture("/usr/bin/plutil") else {
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-selectors-plutil");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let Some((arch, graph)) = objc_graph_fixture(fixture_path) else {
         return;
     };
     let (selector, owners) = graph
@@ -480,7 +493,7 @@ fn objc_selectors_json_reports_owners() {
         .args([
             "objc",
             "selectors",
-            "/usr/bin/plutil",
+            fixture_path,
             "--arch",
             &arch,
             "--name",
@@ -512,7 +525,9 @@ fn objc_selectors_json_reports_owners() {
 
 #[test]
 fn objc_xrefs_json_reports_symbol_links() {
-    let Some((arch, graph)) = objc_graph_fixture("/usr/bin/plutil") else {
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-xrefs-plutil");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let Some((arch, graph)) = objc_graph_fixture(fixture_path) else {
         return;
     };
     let Some((class_name, selector, symbol)) = graph.classes.values().find_map(|class| {
@@ -541,7 +556,7 @@ fn objc_xrefs_json_reports_symbol_links() {
         .args([
             "objc",
             "xrefs",
-            "/usr/bin/plutil",
+            fixture_path,
             "--arch",
             &arch,
             "--class",
@@ -573,14 +588,16 @@ fn objc_xrefs_json_reports_symbol_links() {
 #[test]
 #[cfg(unix)]
 fn patch_preserves_execute_bit() {
-    let data = std::fs::read("/usr/bin/true").expect("read /usr/bin/true");
-    let container = macho::parse(&data).expect("parse /usr/bin/true");
+    let fixture = copy_macho_fixture("/usr/bin/true", "preserve-mode-true");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
     if !matches!(container, MachContainer::Fat(_)) {
         return;
     }
 
-    let input_mode = std::fs::metadata("/usr/bin/true")
-        .expect("metadata for /usr/bin/true")
+    let input_mode = std::fs::metadata(fixture.path())
+        .expect("metadata for fixture")
         .permissions()
         .mode()
         & 0o111;
@@ -591,7 +608,7 @@ fn patch_preserves_execute_bit() {
         .args([
             "patch",
             "add-rpath",
-            "/usr/bin/true",
+            fixture_path,
             "/tmp/macho-preserve-mode",
             "--output",
             output_path.to_str().expect("utf8 path"),

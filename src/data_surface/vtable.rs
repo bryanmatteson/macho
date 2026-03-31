@@ -476,8 +476,5 @@ fn classify_slot(
 /// double-underscore.
 fn is_pure_virtual_name(name: &str) -> bool {
     let stripped = name.strip_prefix('_').unwrap_or(name);
-    matches!(
-        stripped,
-        "__cxa_pure_virtual" | "__cxa_deleted_virtual"
-    )
+    matches!(stripped, "__cxa_pure_virtual" | "__cxa_deleted_virtual")
 }

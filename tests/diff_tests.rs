@@ -271,7 +271,10 @@ fn diff_report_serializes_to_json() {
     let json = serde_json::to_string_pretty(&report).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert!(parsed["findings"].is_array());
-    if let Some(first) = parsed["findings"].as_array().and_then(|findings| findings.first()) {
+    if let Some(first) = parsed["findings"]
+        .as_array()
+        .and_then(|findings| findings.first())
+    {
         assert!(first["domain"].is_string());
         assert!(first["severity"].is_string());
     }

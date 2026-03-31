@@ -156,10 +156,7 @@ fn check_arch(target: &MachFile<'_>, provider: &MachFile<'_>, findings: &mut Vec
 
 fn get_platform(
     mach: &MachFile<'_>,
-) -> Option<(
-    Platform,
-    crate::model::load_command::PackedVersion,
-)> {
+) -> Option<(Platform, crate::model::load_command::PackedVersion)> {
     for lc in mach.load_commands() {
         match &lc.kind {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),

@@ -1,8 +1,8 @@
 use crate::analysis::snapshot::SliceSnapshot;
 use crate::diff::{DiffReport, diff_slice_snapshots};
 use crate::edit::MachEditor;
-use crate::edit::resign::ResignPlan;
 pub use crate::edit::ops::PatchOp;
+use crate::edit::resign::ResignPlan;
 use crate::error::{Error, Result};
 use crate::model::load_command::LoadCommand;
 use crate::model::mach::MachFile;

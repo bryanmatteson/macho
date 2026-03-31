@@ -84,8 +84,8 @@ pub use crate::analysis::snapshot::{ContainerSnapshot, SliceSnapshot};
 pub use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport, diff_containers};
 
 // Inspection API
-pub use crate::inspect::{DylibLinkKind, ImageInfo, ImageInspector, LinkedDylib, PlatformInfo};
 pub use crate::inspect::resolve::{resolve_all_rpaths, resolve_path};
+pub use crate::inspect::{DylibLinkKind, ImageInfo, ImageInspector, LinkedDylib, PlatformInfo};
 
 // Symbol ranges and cross-references
 pub use crate::xref::{

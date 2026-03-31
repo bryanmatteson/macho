@@ -92,9 +92,12 @@ pub fn render(path: &Path, reports: &[AuditReport]) -> Result<String> {
                     full_description: Some(SarifMessage {
                         text: finding.body.clone(),
                     }),
-                    help: finding.remediation.as_ref().map(|remediation| SarifMessage {
-                        text: remediation.clone(),
-                    }),
+                    help: finding
+                        .remediation
+                        .as_ref()
+                        .map(|remediation| SarifMessage {
+                            text: remediation.clone(),
+                        }),
                 });
             }
 
