@@ -271,6 +271,26 @@ fn diff_report_serializes_to_json() {
     let json = serde_json::to_string_pretty(&report).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert!(parsed["findings"].is_array());
+    if let Some(first) = parsed["findings"].as_array().and_then(|findings| findings.first()) {
+        assert!(first["domain"].is_string());
+        assert!(first["severity"].is_string());
+    }
+}
+
+#[test]
+fn diff_json_uses_machine_readable_domain_and_severity_names() {
+    let report = macho::diff::DiffReport {
+        findings: vec![macho::diff::DiffFinding {
+            domain: DiffDomain::LoadCommands,
+            severity: ChangeSeverity::Breaking,
+            arch: Some("arm64".into()),
+            message: "load command removed".into(),
+        }],
+    };
+
+    let json = serde_json::to_value(&report).expect("serialize");
+    assert_eq!(json["findings"][0]["domain"], "load_commands");
+    assert_eq!(json["findings"][0]["severity"], "breaking");
 }
 
 #[test]

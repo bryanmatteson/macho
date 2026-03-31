@@ -124,3 +124,18 @@ fn swift_type_confidence_serializes() {
     let json = serde_json::to_value(&ty).expect("serialize");
     assert_eq!(json["confidence"], "high");
 }
+
+#[test]
+fn swift_type_json_uses_machine_readable_kind_and_source_names() {
+    let ty = SwiftType {
+        name: "Demo.Widget".into(),
+        kind: SwiftTypeKind::Class,
+        mangled_name: Some("$s4Demo6WidgetC".into()),
+        address: Some(0x1000),
+        source: SwiftTypeSource::DemangledSymbol,
+        confidence: SwiftTypeConfidence::High,
+    };
+    let json = serde_json::to_value(&ty).expect("serialize");
+    assert_eq!(json["kind"], "class");
+    assert_eq!(json["source"], "demangled_symbol");
+}

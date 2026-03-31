@@ -45,6 +45,7 @@ pub struct MethodEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", content = "category", rename_all = "snake_case")]
 pub enum MethodOrigin {
     Class,
     Category(String),
@@ -304,10 +305,9 @@ impl ObjCGraph {
     }
 
     pub fn all_methods(&self, class_name: &str) -> Option<AllMethods> {
-        let node = self.classes.get(class_name)?;
         Some(AllMethods {
-            instance: node.effective_instance_methods.clone(),
-            class: node.effective_class_methods.clone(),
+            instance: self.collect_all_methods(class_name, MethodKind::Instance)?,
+            class: self.collect_all_methods(class_name, MethodKind::Class)?,
         })
     }
 
@@ -394,6 +394,36 @@ impl ObjCGraph {
 
     pub fn responds_to(&self, class_name: &str, selector: &str, kind: MethodKind) -> bool {
         self.resolve_inherited(class_name, selector, kind).is_some()
+    }
+
+    fn collect_all_methods(&self, class_name: &str, kind: MethodKind) -> Option<Vec<MethodEntry>> {
+        let mut current = Some(class_name);
+        let mut seen = BTreeSet::new();
+        let mut methods = BTreeMap::new();
+
+        while let Some(name) = current {
+            if !seen.insert(name) {
+                break;
+            }
+
+            let node = self.classes.get(name)?;
+            let candidates = match kind {
+                MethodKind::Instance => &node.effective_instance_methods,
+                MethodKind::Class => &node.effective_class_methods,
+            };
+
+            for method in candidates {
+                methods
+                    .entry(method.selector.clone())
+                    .or_insert_with(|| method.clone());
+            }
+
+            current = node.superclass.as_deref();
+        }
+
+        let mut methods: Vec<MethodEntry> = methods.into_values().collect();
+        methods.sort_by(method_entry_sort_key);
+        Some(methods)
     }
 }
 

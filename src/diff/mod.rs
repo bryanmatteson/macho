@@ -7,8 +7,11 @@ use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum ChangeSeverity {
+    #[serde(rename = "info")]
     Info,
+    #[serde(rename = "warning")]
     Warning,
+    #[serde(rename = "breaking")]
     Breaking,
 }
 
@@ -24,17 +27,29 @@ impl fmt::Display for ChangeSeverity {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum DiffDomain {
+    #[serde(rename = "container")]
     Container,
+    #[serde(rename = "header")]
     Header,
+    #[serde(rename = "load_commands")]
     LoadCommands,
+    #[serde(rename = "segments")]
     Segments,
+    #[serde(rename = "symbols")]
     Symbols,
+    #[serde(rename = "exports")]
     Exports,
+    #[serde(rename = "imports")]
     Imports,
+    #[serde(rename = "fixups")]
     Fixups,
+    #[serde(rename = "objc")]
     ObjC,
+    #[serde(rename = "codesign")]
     Codesign,
+    #[serde(rename = "analysis")]
     Analysis,
+    #[serde(rename = "validation")]
     Validation,
 }
 

@@ -244,6 +244,92 @@ fn graph_all_methods_matches_effective_lists() {
 }
 
 #[test]
+fn graph_all_methods_includes_inherited_methods_without_overriding_direct_ones() {
+    let superclass = ClassNode {
+        name: "BaseWidget".into(),
+        superclass: None,
+        is_swift: false,
+        instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        class_methods: vec![],
+        effective_instance_methods: vec![MethodEntry {
+            selector: "draw".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x1000,
+            imp_symbol: None,
+        }],
+        effective_class_methods: vec![],
+        properties: vec![],
+        ivars: vec![],
+        protocols: vec![],
+        categories: vec![],
+    };
+    let subclass = ClassNode {
+        name: "ChildWidget".into(),
+        superclass: Some("BaseWidget".into()),
+        is_swift: false,
+        instance_methods: vec![MethodEntry {
+            selector: "paint".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x2000,
+            imp_symbol: None,
+        }],
+        class_methods: vec![],
+        effective_instance_methods: vec![MethodEntry {
+            selector: "paint".into(),
+            origin: MethodOrigin::Class,
+            imp: 0x2000,
+            imp_symbol: None,
+        }],
+        effective_class_methods: vec![],
+        properties: vec![],
+        ivars: vec![],
+        protocols: vec![],
+        categories: vec![],
+    };
+
+    let graph = ObjCGraph {
+        classes: BTreeMap::from([
+            (superclass.name.clone(), superclass),
+            (subclass.name.clone(), subclass),
+        ]),
+        protocols: BTreeMap::<String, ProtocolNode>::new(),
+        selectors: BTreeMap::new(),
+    };
+
+    let methods = graph
+        .all_methods("ChildWidget")
+        .expect("expected child class methods");
+    let selectors: Vec<_> = methods
+        .instance
+        .iter()
+        .map(|method| method.selector.as_str())
+        .collect();
+
+    assert!(selectors.contains(&"paint"));
+    assert!(selectors.contains(&"draw"));
+    assert_eq!(methods.instance.len(), 2);
+}
+
+#[test]
+fn graph_method_origin_json_is_tagged_and_machine_readable() {
+    let class_json =
+        serde_json::to_value(MethodOrigin::Class).expect("serialize class method origin");
+    assert_eq!(class_json, serde_json::json!({ "kind": "class" }));
+
+    let category_json = serde_json::to_value(MethodOrigin::Category("Debug".into()))
+        .expect("serialize category method origin");
+    assert_eq!(
+        category_json,
+        serde_json::json!({ "kind": "category", "category": "Debug" })
+    );
+}
+
+#[test]
 fn graph_folds_category_protocols_into_class_and_protocol_views() {
     let metadata = ObjCMetadata {
         classes: vec![ObjCClass {

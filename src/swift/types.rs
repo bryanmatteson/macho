@@ -69,6 +69,7 @@ impl SwiftTypeConfidence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SwiftTypeKind {
     Class,
     Struct,
@@ -92,6 +93,8 @@ impl std::fmt::Display for SwiftTypeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SwiftTypeSource {
+    #[serde(rename = "demangled_symbol")]
     DemangledSymbol,
+    #[serde(rename = "objc_metadata")]
     ObjCMetadata,
 }
