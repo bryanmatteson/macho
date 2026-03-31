@@ -89,7 +89,7 @@ pub fn run(args: DepsArgs) -> Result<()> {
     }
 
     if has_incompatible {
-        std::process::exit(1);
+        anyhow::bail!("dependency compatibility check found incompatible imports");
     }
 
     Ok(())

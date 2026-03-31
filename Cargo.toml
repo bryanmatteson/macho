@@ -28,3 +28,6 @@
     serde_json     = "1"
     cpp_demangle   = "0.5.1"
     rustc-demangle = "0.1"
+
+[dev-dependencies]
+    gag = "1"

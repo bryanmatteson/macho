@@ -1,6 +1,5 @@
 mod support;
 
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use macho::inspect::ImageInspector;
@@ -8,14 +7,10 @@ use macho::model::container::MachContainer;
 use macho::objc::graph::ObjCGraph;
 use macho::objc::parse_objc_metadata;
 use macho::swift::SwiftTypeIndex;
-use support::{copy_macho_fixture, temp_file_path};
+use support::{copy_macho_fixture, run_cli, temp_file_path};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-
-fn macho_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_macho")
-}
 
 fn minimal_fileset_binary(entry_id: &str, vm_addr: u64, file_offset: u64) -> Vec<u8> {
     const MH_MAGIC_64: u32 = 0xFEEDFACF;
@@ -94,15 +89,12 @@ fn objc_graph_fixture(path: &str) -> Option<(String, ObjCGraph)> {
 #[test]
 fn snapshot_arch_filter_requires_match() {
     let fixture = copy_macho_fixture("/usr/bin/true", "snapshot-true");
-    let output = Command::new(macho_bin())
-        .args([
-            "snapshot",
-            "--arch",
-            "definitely_not_real",
-            fixture.path().to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("failed to run macho snapshot");
+    let output = run_cli([
+        "snapshot",
+        "--arch",
+        "definitely_not_real",
+        fixture.path().to_str().expect("utf8 path"),
+    ]);
 
     assert!(
         !output.status.success(),
@@ -122,10 +114,7 @@ fn container_json_reports_fileset_entry_offsets() {
     let bytes = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
     std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
 
-    let output = Command::new(macho_bin())
-        .args(["container", "--json", path.to_str().expect("utf8 path")])
-        .output()
-        .expect("failed to run macho container");
+    let output = run_cli(["container", "--json", path.to_str().expect("utf8 path")]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -152,16 +141,13 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
     let bytes = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
     std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "fileset",
-            "list",
-            path.to_str().expect("utf8 path"),
-            "--arch",
-            "x86_64",
-        ])
-        .output()
-        .expect("failed to run macho fileset list");
+    let output = run_cli([
+        "fileset",
+        "list",
+        path.to_str().expect("utf8 path"),
+        "--arch",
+        "x86_64",
+    ]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -181,16 +167,13 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
 #[test]
 fn container_json_accepts_selected_parity_domains() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "container-plutil");
-    let output = Command::new(macho_bin())
-        .args([
-            "container",
-            "--json",
-            "--parity-domain",
-            "imports",
-            fixture.path().to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("failed to run macho container");
+    let output = run_cli([
+        "container",
+        "--json",
+        "--parity-domain",
+        "imports",
+        fixture.path().to_str().expect("utf8 path"),
+    ]);
 
     assert!(
         output.status.success(),
@@ -214,15 +197,12 @@ fn fileset_inspect_reports_single_not_found_message() {
     let bytes = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
     std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "fileset",
-            "inspect",
-            path.to_str().expect("utf8 path"),
-            "missing.entry",
-        ])
-        .output()
-        .expect("failed to run macho fileset inspect");
+    let output = run_cli([
+        "fileset",
+        "inspect",
+        path.to_str().expect("utf8 path"),
+        "missing.entry",
+    ]);
 
     let _ = std::fs::remove_file(&path);
 
@@ -251,19 +231,16 @@ fn fat_patch_bytes_requires_arch() {
         return;
     }
 
-    let output = Command::new(macho_bin())
-        .args([
-            "patch",
-            "patch-bytes",
-            fixture_path,
-            "--offset",
-            "0x100",
-            "--hex",
-            "00010203",
-            "--dry-run",
-        ])
-        .output()
-        .expect("failed to run macho patch patch-bytes");
+    let output = run_cli([
+        "patch",
+        "patch-bytes",
+        fixture_path,
+        "--offset",
+        "0x100",
+        "--hex",
+        "00010203",
+        "--dry-run",
+    ]);
 
     assert!(
         !output.status.success(),
@@ -293,19 +270,16 @@ fn fat_patch_add_rpath_selected_arch_only() {
     let rpath = format!("/tmp/{}", unique_marker("macho-fat-selected"));
     let output_path = temp_file_path("fat-selected-rpath");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "patch",
-            "add-rpath",
-            fixture_path,
-            &rpath,
-            "--arch",
-            &selected_arch,
-            "--output",
-            output_path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("failed to run macho patch add-rpath");
+    let output = run_cli([
+        "patch",
+        "add-rpath",
+        fixture_path,
+        &rpath,
+        "--arch",
+        &selected_arch,
+        "--output",
+        output_path.to_str().expect("utf8 path"),
+    ]);
 
     assert!(
         output.status.success(),
@@ -357,17 +331,14 @@ fn fat_patch_add_rpath_all_arches_by_default() {
     let rpath = format!("/tmp/{}", unique_marker("macho-fat-all"));
     let output_path = temp_file_path("fat-all-rpath");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "patch",
-            "add-rpath",
-            fixture_path,
-            &rpath,
-            "--output",
-            output_path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("failed to run macho patch add-rpath");
+    let output = run_cli([
+        "patch",
+        "add-rpath",
+        fixture_path,
+        &rpath,
+        "--output",
+        output_path.to_str().expect("utf8 path"),
+    ]);
 
     assert!(
         output.status.success(),
@@ -414,18 +385,15 @@ fn swift_json_kind_filter_applies_to_output() {
     let kind_arg = selected_kind.to_string();
     let expected_kind = serde_json::to_value(selected_kind).expect("serialize kind");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "swift",
-            fixture_path,
-            "--arch",
-            &selected_arch,
-            "--kind",
-            &kind_arg,
-            "--json",
-        ])
-        .output()
-        .expect("failed to run macho swift");
+    let output = run_cli([
+        "swift",
+        fixture_path,
+        "--arch",
+        &selected_arch,
+        "--kind",
+        &kind_arg,
+        "--json",
+    ]);
 
     assert!(
         output.status.success(),
@@ -460,10 +428,7 @@ fn objc_graph_json_returns_null_for_slice_without_metadata() {
         .arch
         .clone();
 
-    let output = Command::new(macho_bin())
-        .args(["objc", "graph", fixture_path, "--arch", &arch, "--json"])
-        .output()
-        .expect("failed to run macho objc graph");
+    let output = run_cli(["objc", "graph", fixture_path, "--arch", &arch, "--json"]);
 
     assert!(
         output.status.success(),
@@ -489,19 +454,16 @@ fn objc_selectors_json_reports_owners() {
         .find(|(_, owners)| !owners.is_empty())
         .expect("expected at least one selector");
 
-    let output = Command::new(macho_bin())
-        .args([
-            "objc",
-            "selectors",
-            fixture_path,
-            "--arch",
-            &arch,
-            "--name",
-            selector,
-            "--json",
-        ])
-        .output()
-        .expect("failed to run macho objc selectors");
+    let output = run_cli([
+        "objc",
+        "selectors",
+        fixture_path,
+        "--arch",
+        &arch,
+        "--name",
+        selector,
+        "--json",
+    ]);
 
     assert!(
         output.status.success(),
@@ -552,19 +514,16 @@ fn objc_xrefs_json_reports_symbol_links() {
         return;
     };
 
-    let output = Command::new(macho_bin())
-        .args([
-            "objc",
-            "xrefs",
-            fixture_path,
-            "--arch",
-            &arch,
-            "--class",
-            &class_name,
-            "--json",
-        ])
-        .output()
-        .expect("failed to run macho objc xrefs");
+    let output = run_cli([
+        "objc",
+        "xrefs",
+        fixture_path,
+        "--arch",
+        &arch,
+        "--class",
+        &class_name,
+        "--json",
+    ]);
 
     assert!(
         output.status.success(),
@@ -604,17 +563,14 @@ fn patch_preserves_execute_bit() {
     assert_ne!(input_mode, 0, "test binary should be executable");
 
     let output_path = temp_file_path("preserve-mode");
-    let output = Command::new(macho_bin())
-        .args([
-            "patch",
-            "add-rpath",
-            fixture_path,
-            "/tmp/macho-preserve-mode",
-            "--output",
-            output_path.to_str().expect("utf8 path"),
-        ])
-        .output()
-        .expect("failed to run macho patch add-rpath");
+    let output = run_cli([
+        "patch",
+        "add-rpath",
+        fixture_path,
+        "/tmp/macho-preserve-mode",
+        "--output",
+        output_path.to_str().expect("utf8 path"),
+    ]);
 
     assert!(
         output.status.success(),

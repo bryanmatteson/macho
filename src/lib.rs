@@ -1,7 +1,11 @@
+extern crate self as macho;
+
 pub mod addr;
 pub mod analysis;
 pub mod audit;
+pub mod cli;
 pub mod codesign;
+pub(crate) mod commands;
 pub mod constants;
 pub mod container_analysis;
 pub mod data_surface;
@@ -17,6 +21,7 @@ pub mod inspect;
 pub mod io;
 pub mod model;
 pub mod objc;
+pub(crate) mod output;
 pub mod parse;
 pub mod prelude;
 pub mod swift;

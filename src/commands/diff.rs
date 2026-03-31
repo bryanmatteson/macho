@@ -3,7 +3,6 @@ use macho::analysis::snapshot::ContainerSnapshot;
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process;
 
 use crate::commands::common::filter_snapshot_by_arch;
 
@@ -70,7 +69,7 @@ pub fn run(args: DiffArgs) -> Result<()> {
         };
         if report.findings.iter().any(|f| f.severity >= min_severity) {
             std::io::stdout().flush()?;
-            process::exit(1);
+            anyhow::bail!("diff findings reached fail threshold {threshold}");
         }
     }
 
