@@ -20,6 +20,7 @@ pub struct StringRegion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StringRegionKind {
     CString,
     ObjCString,

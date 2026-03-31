@@ -28,6 +28,7 @@ pub struct VtableSlot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SlotTarget {
     Function { name: String, va: Va },
     PureVirtual,
@@ -108,7 +109,7 @@ impl VtableIndex {
                         all_defined_vas[idx + 1] - vtable_va
                     } else {
                         // Last symbol - use a reasonable cap
-                        1024 * ptr_size
+                        256 * ptr_size
                     }
                 }
                 Err(_) => 1024 * ptr_size,
@@ -468,10 +469,15 @@ fn classify_slot(
 }
 
 /// Check if a symbol name refers to __cxa_pure_virtual or __cxa_deleted_virtual.
+///
+/// Mach-O prepends one underscore to C names, so the standard library symbols
+/// appear as `___cxa_pure_virtual` (3 underscores) in the symbol table. We
+/// strip one leading underscore and match the C-level name with its own leading
+/// double-underscore.
 fn is_pure_virtual_name(name: &str) -> bool {
     let stripped = name.strip_prefix('_').unwrap_or(name);
-    stripped == "__cxa_pure_virtual"
-        || stripped == "_cxa_pure_virtual"
-        || stripped == "__cxa_deleted_virtual"
-        || stripped == "_cxa_deleted_virtual"
+    matches!(
+        stripped,
+        "__cxa_pure_virtual" | "__cxa_deleted_virtual"
+    )
 }
