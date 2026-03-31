@@ -6,7 +6,10 @@ use macho::model::container::MachContainer;
 use macho::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
 };
-use macho::objc::{ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, parse_objc_metadata};
+use macho::objc::{
+    ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, ObjCProperty, ObjCProtocol,
+    parse_objc_metadata,
+};
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
     let data = std::fs::read(path).expect("read");
@@ -238,6 +241,63 @@ fn graph_all_methods_matches_effective_lists() {
         node.effective_instance_methods.len()
     );
     assert_eq!(all_methods.class.len(), node.effective_class_methods.len());
+}
+
+#[test]
+fn graph_folds_category_protocols_into_class_and_protocol_views() {
+    let metadata = ObjCMetadata {
+        classes: vec![ObjCClass {
+            name: "Widget".into(),
+            superclass_name: Some("NSObject".into()),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            ivars: Vec::new(),
+            properties: vec![ObjCProperty {
+                name: "title".into(),
+                attributes: "T@\"NSString\",&,N,V_title".into(),
+            }],
+            protocols: vec!["WidgetBase".into()],
+            instance_size: 0,
+            is_meta: false,
+            is_swift: false,
+        }],
+        categories: vec![ObjCCategory {
+            name: "Debug".into(),
+            class_name: "Widget".into(),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            protocols: vec!["Debuggable".into()],
+        }],
+        protocols: vec![
+            ObjCProtocol {
+                name: "WidgetBase".into(),
+                instance_methods: Vec::new(),
+                class_methods: Vec::new(),
+                optional_instance_methods: Vec::new(),
+                optional_class_methods: Vec::new(),
+                properties: Vec::new(),
+                adopted_protocols: Vec::new(),
+            },
+            ObjCProtocol {
+                name: "Debuggable".into(),
+                instance_methods: Vec::new(),
+                class_methods: Vec::new(),
+                optional_instance_methods: Vec::new(),
+                optional_class_methods: Vec::new(),
+                properties: Vec::new(),
+                adopted_protocols: Vec::new(),
+            },
+        ],
+    };
+
+    let graph = ObjCGraph::build(&metadata);
+    let class = graph.class("Widget").expect("expected Widget class");
+    assert!(class.protocols.contains(&"Debuggable".to_string()));
+
+    let protocol = graph
+        .protocol("Debuggable")
+        .expect("expected Debuggable protocol");
+    assert!(protocol.conforming_classes.contains(&"Widget".to_string()));
 }
 
 #[test]

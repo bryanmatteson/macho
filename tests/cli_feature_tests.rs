@@ -232,7 +232,12 @@ fn fileset_inspect_reports_single_not_found_message() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout.matches("Fileset entry 'missing.entry' not found").count(), 1);
+    assert_eq!(
+        stdout
+            .matches("Fileset entry 'missing.entry' not found")
+            .count(),
+        1
+    );
 }
 
 #[test]

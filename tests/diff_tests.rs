@@ -624,7 +624,11 @@ fn diff_reports_import_variant_changes_for_duplicate_names() {
         .filter(|finding| finding.domain == DiffDomain::Imports)
         .collect();
 
-    assert_eq!(findings.len(), 1, "unexpected import findings: {findings:?}");
+    assert_eq!(
+        findings.len(),
+        1,
+        "unexpected import findings: {findings:?}"
+    );
     assert!(findings[0].message.contains("variants changed"));
     assert!(findings[0].message.contains("ordinal=2 weak=false"));
     assert!(findings[0].message.contains("ordinal=3 weak=true"));
@@ -655,11 +659,31 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
         .map(|finding| finding.message.as_str())
         .collect();
 
-    assert!(objc_messages.iter().any(|message| message.contains("superclass changed")));
-    assert!(objc_messages.iter().any(|message| message.contains("Swift marker changed")));
-    assert!(objc_messages.iter().any(|message| message.contains("property added: subtitle")));
-    assert!(objc_messages.iter().any(|message| message.contains("ivar added: _subtitle")));
-    assert!(objc_messages.iter().any(|message| message.contains("protocol added: Serializable")));
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("superclass changed"))
+    );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("Swift marker changed"))
+    );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("property added: subtitle"))
+    );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("ivar added: _subtitle"))
+    );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("protocol added: Serializable"))
+    );
     assert!(
         objc_messages
             .iter()
@@ -787,35 +811,61 @@ fn diff_reports_import_provider_variant_changes() {
 #[test]
 fn diff_reports_objc_superclass_and_property_changes() {
     let mut old = synthetic_snapshot();
-    old.slices[0].objc.classes.push(macho::analysis::snapshot::ObjCClassSnapshot {
-        name: "Widget".into(),
-        superclass: Some("NSObject".into()),
-        instance_methods: Vec::new(),
-        class_methods: Vec::new(),
-        properties: vec!["title".into()],
-        protocols: vec!["NSCopying".into()],
-        ivars: vec!["_title".into()],
-        is_swift: false,
-    });
+    old.slices[0]
+        .objc
+        .classes
+        .push(macho::analysis::snapshot::ObjCClassSnapshot {
+            name: "Widget".into(),
+            superclass: Some("NSObject".into()),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            properties: vec!["title".into()],
+            protocols: vec!["NSCopying".into()],
+            ivars: vec!["_title".into()],
+            is_swift: false,
+        });
 
     let mut new = synthetic_snapshot();
-    new.slices[0].objc.classes.push(macho::analysis::snapshot::ObjCClassSnapshot {
-        name: "Widget".into(),
-        superclass: Some("BaseWidget".into()),
-        instance_methods: Vec::new(),
-        class_methods: Vec::new(),
-        properties: vec!["subtitle".into()],
-        protocols: vec!["NSCoding".into()],
-        ivars: vec!["_subtitle".into()],
-        is_swift: true,
-    });
+    new.slices[0]
+        .objc
+        .classes
+        .push(macho::analysis::snapshot::ObjCClassSnapshot {
+            name: "Widget".into(),
+            superclass: Some("BaseWidget".into()),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            properties: vec!["subtitle".into()],
+            protocols: vec!["NSCoding".into()],
+            ivars: vec!["_subtitle".into()],
+            is_swift: true,
+        });
 
     let report = diff_containers(&old, &new);
-    let messages: Vec<_> = report.findings.iter().map(|finding| finding.message.as_str()).collect();
-    assert!(messages.iter().any(|message| message.contains("superclass changed")));
-    assert!(messages.iter().any(|message| message.contains("property removed: title")));
-    assert!(messages.iter().any(|message| message.contains("property added: subtitle")));
-    assert!(messages.iter().any(|message| message.contains("Swift marker changed")));
+    let messages: Vec<_> = report
+        .findings
+        .iter()
+        .map(|finding| finding.message.as_str())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("superclass changed"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("property removed: title"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("property added: subtitle"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("Swift marker changed"))
+    );
 }
 
 #[test]

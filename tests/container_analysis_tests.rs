@@ -4,7 +4,9 @@ use macho::analysis::snapshot::{
     ImportSnapshot, ObjCSnapshot, SliceSnapshot,
 };
 use macho::container_analysis::ContainerReport;
-use macho::container_analysis::parity::{ParityDomain, compute_parity, compute_parity_with_domains};
+use macho::container_analysis::parity::{
+    ParityDomain, compute_parity, compute_parity_with_domains,
+};
 use macho::container_analysis::resolve::{
     all_signed, common_exports, common_imports, diff_slices, divergent_exports, resolve_cross_image,
 };

@@ -450,11 +450,81 @@ fn extract_codesign(
         hash_type: cd.hash_type.name().to_string(),
         has_entitlements: sig.entitlements_xml().is_some() || sig.entitlements_der().is_some(),
         entitlements_xml: sig.entitlements_xml().map(|s| s.to_string()),
+        entitlement_keys: collect_entitlement_keys(sig.entitlements_xml(), sig.entitlements_der()),
         has_der_entitlements: sig.entitlements_der().is_some(),
+        entitlements_der_fingerprint: sig.entitlements_der().map(stable_fingerprint),
         has_cms_signature: sig.cms_signature_present(),
         n_code_slots: cd.n_code_slots,
         code_limit: cd.code_limit as u64,
     })
+}
+
+fn collect_entitlement_keys(xml: Option<&str>, der: Option<&[u8]>) -> Vec<String> {
+    let mut keys = extract_xml_entitlement_keys(xml.unwrap_or_default());
+    if let Some(der) = der {
+        keys.extend(extract_der_entitlement_candidates(der));
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn extract_xml_entitlement_keys(xml: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut rest = xml;
+    while let Some(start) = rest.find("<key>") {
+        let after_start = &rest[start + 5..];
+        let Some(end) = after_start.find("</key>") else {
+            break;
+        };
+        let key = after_start[..end].trim();
+        if !key.is_empty() {
+            keys.push(key.to_string());
+        }
+        rest = &after_start[end + 6..];
+    }
+    keys
+}
+
+fn extract_der_entitlement_candidates(data: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = Vec::new();
+
+    for &byte in data {
+        let ch = byte as char;
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            current.push(byte);
+        } else {
+            push_entitlement_candidate(&mut out, &mut current);
+        }
+    }
+
+    push_entitlement_candidate(&mut out, &mut current);
+    out
+}
+
+fn push_entitlement_candidate(out: &mut Vec<String>, current: &mut Vec<u8>) {
+    if current.len() < 3 {
+        current.clear();
+        return;
+    }
+
+    if let Ok(candidate) = std::str::from_utf8(current) {
+        if candidate.contains('.') || candidate.contains('-') {
+            out.push(candidate.to_string());
+        }
+    }
+
+    current.clear();
+}
+
+fn stable_fingerprint(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &byte in bytes {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn extract_diagnostics(mach: &MachFile<'_>) -> Vec<DiagnosticSnapshot> {

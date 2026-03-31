@@ -126,6 +126,20 @@ impl<'data> ImageInspector<'data> {
             .as_ref()
             .map_err(|e| e.clone())
     }
+
+    pub fn range_index(&self) -> Result<&SymbolRangeIndex> {
+        self.range_index
+            .get_or_init(|| SymbolRangeIndex::build(self.mach))
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn xref_index(&self) -> Result<&XrefIndex> {
+        self.xref_index
+            .get_or_init(|| XrefIndex::build(self.mach))
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
 }
 
 impl std::fmt::Debug for ImageInspector<'_> {
@@ -321,4 +335,41 @@ fn extract_target_triple(mach: &MachFile<'_>) -> Option<String> {
             None
         }
     })
+}
+
+fn extract_imports_cached(mach: &MachFile<'_>) -> Result<Vec<ImportSnapshot>> {
+    // Try chained fixups first (modern binaries)
+    if let Ok(fixups) = parse_chained_fixups(mach) {
+        let mut imports: Vec<ImportSnapshot> = fixups
+            .imports
+            .iter()
+            .map(|imp| ImportSnapshot {
+                name: imp.name.to_string(),
+                lib_ordinal: imp.lib_ordinal,
+                weak: imp.weak,
+            })
+            .collect();
+        imports.sort_by(|a, b| a.name.cmp(&b.name).then(a.lib_ordinal.cmp(&b.lib_ordinal)));
+        imports.dedup_by(|a, b| a.name == b.name && a.lib_ordinal == b.lib_ordinal);
+        return Ok(imports);
+    }
+
+    // Fall back to legacy bind entries
+    if let Ok((regular, weak, lazy)) = parse_bind_entries(mach) {
+        let mut imports: Vec<ImportSnapshot> = regular
+            .into_iter()
+            .chain(weak)
+            .chain(lazy)
+            .map(|bind| ImportSnapshot {
+                name: bind.symbol_name.to_string(),
+                lib_ordinal: bind.lib_ordinal as i32,
+                weak: bind.weak,
+            })
+            .collect();
+        imports.sort_by(|a, b| a.name.cmp(&b.name).then(a.lib_ordinal.cmp(&b.lib_ordinal)));
+        imports.dedup_by(|a, b| a.name == b.name && a.lib_ordinal == b.lib_ordinal);
+        return Ok(imports);
+    }
+
+    Ok(Vec::new())
 }

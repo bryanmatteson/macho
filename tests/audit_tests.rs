@@ -630,7 +630,10 @@ fn audit_flags_absolute_reexport_dylib_paths() {
     ));
 
     assert!(
-        report.findings.iter().any(|finding| finding.rule_id == "LP003"),
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "LP003"),
         "expected LP003 for reexport dylib path, got: {:?}",
         report
             .findings

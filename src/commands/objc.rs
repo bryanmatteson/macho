@@ -106,6 +106,10 @@ struct ObjCXref {
     imp_symbol: String,
 }
 
+fn has_objc_graph_data(graph: &ObjCGraph) -> bool {
+    !(graph.classes.is_empty() && graph.protocols.is_empty() && graph.selectors.is_empty())
+}
+
 fn run_list(
     path: &Path,
     arch_filter: &Option<String>,
@@ -158,6 +162,10 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
                     return Ok(());
                 }
             };
+            if !has_objc_graph_data(graph) {
+                result.insert(arch_name.to_string(), serde_json::Value::Null);
+                return Ok(());
+            }
             let val = if let Some(cls) = class {
                 graph
                     .class(cls)
@@ -192,6 +200,13 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
                     return Ok(());
                 }
             };
+            if !has_objc_graph_data(graph) {
+                println!("[{arch_name}] No ObjC metadata found.");
+                if show_header {
+                    println!();
+                }
+                return Ok(());
+            }
 
             if let Some(cls) = class {
                 if let Some(node) = graph.class(cls) {
@@ -288,6 +303,10 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
                     return Ok(());
                 }
             };
+            if !has_objc_graph_data(graph) {
+                result.insert(arch_name.to_string(), serde_json::Value::Null);
+                return Ok(());
+            }
 
             let value = if let Some(sel_name) = name {
                 serde_json::json!({
@@ -327,6 +346,13 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
                 return Ok(());
             }
         };
+        if !has_objc_graph_data(graph) {
+            println!("[{arch_name}] No ObjC metadata found.");
+            if show_header {
+                println!();
+            }
+            return Ok(());
+        }
 
         if let Some(sel_name) = name {
             let owners = graph.selector_owners(sel_name);
@@ -415,6 +441,10 @@ fn print_objc_summary(inspector: &ImageInspector<'_>, class_filter: Option<&str>
             return;
         }
     };
+    if !has_objc_graph_data(graph) {
+        println!("No ObjC classes, categories, or protocols found.");
+        return;
+    }
 
     let classes: Vec<_> = graph
         .classes
@@ -475,6 +505,10 @@ fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>, json: bool) -
                     return Ok(());
                 }
             };
+            if !has_objc_graph_data(graph) {
+                result.insert(arch_name.to_string(), serde_json::Value::Null);
+                return Ok(());
+            }
             result.insert(
                 arch_name.to_string(),
                 serde_json::to_value(collect_xrefs(graph, class))?,
@@ -502,6 +536,13 @@ fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>, json: bool) -
                 return Ok(());
             }
         };
+        if !has_objc_graph_data(graph) {
+            println!("[{arch_name}] No ObjC metadata found.");
+            if show_header {
+                println!();
+            }
+            return Ok(());
+        }
         let xrefs = collect_xrefs(graph, class);
         for xref in &xrefs {
             println!(

@@ -92,12 +92,16 @@ pub fn inspect_fileset_entry(
 ) -> Vec<FilesetEntryInspection> {
     match container {
         MachContainer::Thin(mach) => {
-            inspect_fileset_entry_in_mach(mach, &mach.header().cpu_type.name().to_string(), entry_id)
+            let arch = mach.header().cpu_type.name().to_string();
+            inspect_fileset_entry_in_mach(mach, &arch, entry_id)
         }
         MachContainer::Fat(fat) => fat
             .arches()
             .iter()
-            .flat_map(|arch| inspect_fileset_entry_in_mach(&arch.mach, &arch.spec.name(), entry_id))
+            .flat_map(|arch| {
+                let arch_name = arch.spec.name();
+                inspect_fileset_entry_in_mach(&arch.mach, &arch_name, entry_id)
+            })
             .collect(),
     }
 }

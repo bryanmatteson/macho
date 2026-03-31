@@ -980,6 +980,13 @@ fn diff_codesign(
             }
             // Compare entitlements XML when both builds have entitlements
             if o.has_entitlements && n.has_entitlements {
+                diff_entitlement_keys(
+                    &o.entitlement_keys,
+                    &n.entitlement_keys,
+                    arch,
+                    findings,
+                );
+
                 if let (Some(ox), Some(nx)) = (&o.entitlements_xml, &n.entitlements_xml) {
                     if ox != nx {
                         findings.push(DiffFinding {
@@ -995,6 +1002,18 @@ fn diff_codesign(
                         severity: ChangeSeverity::Warning,
                         arch: arch.clone(),
                         message: "entitlements representation changed".to_string(),
+                    });
+                }
+
+                if o.entitlements_der_fingerprint != n.entitlements_der_fingerprint
+                    && o.entitlements_der_fingerprint.is_some()
+                    && n.entitlements_der_fingerprint.is_some()
+                {
+                    findings.push(DiffFinding {
+                        domain: DiffDomain::Codesign,
+                        severity: ChangeSeverity::Warning,
+                        arch: arch.clone(),
+                        message: "DER entitlements content changed".to_string(),
                     });
                 }
             }
@@ -1017,6 +1036,36 @@ fn diff_codesign(
         }
         (None, None) => {}
     }
+}
+
+fn diff_entitlement_keys(
+    old: &[String],
+    new: &[String],
+    arch: &Option<String>,
+    findings: &mut Vec<DiffFinding>,
+) {
+    let old_keys: BTreeSet<&str> = old.iter().map(String::as_str).collect();
+    let new_keys: BTreeSet<&str> = new.iter().map(String::as_str).collect();
+    if old_keys == new_keys {
+        return;
+    }
+
+    let removed: Vec<&str> = old_keys.difference(&new_keys).copied().collect();
+    let added: Vec<&str> = new_keys.difference(&old_keys).copied().collect();
+    let mut parts = Vec::new();
+    if !removed.is_empty() {
+        parts.push(format!("removed: {}", removed.join(", ")));
+    }
+    if !added.is_empty() {
+        parts.push(format!("added: {}", added.join(", ")));
+    }
+
+    findings.push(DiffFinding {
+        domain: DiffDomain::Codesign,
+        severity: ChangeSeverity::Warning,
+        arch: arch.clone(),
+        message: format!("entitlement keys changed ({})", parts.join("; ")),
+    });
 }
 
 fn diff_analysis_issues(
