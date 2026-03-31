@@ -183,6 +183,7 @@ fn snapshot_serializes_to_json() {
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert!(parsed["slices"].is_array());
     assert!(parsed["format"].is_string());
+    assert!(parsed["slices"][0]["fixups"].is_array());
 }
 
 #[test]
