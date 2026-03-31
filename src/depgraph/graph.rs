@@ -3,7 +3,7 @@ use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
 use crate::dyld::types::ExportKind;
 use crate::error::Result;
-use crate::inspect::DylibLinkKind;
+pub use crate::inspect::DylibLinkKind;
 use crate::model::load_command::LoadCommand;
 use crate::model::mach::MachFile;
 

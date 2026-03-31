@@ -1,9 +1,8 @@
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
-    DiagnosticSnapshot, ExportSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot,
-    HeaderSnapshot, ImportSnapshot, LoadCommandSnapshot, ObjCCategorySnapshot,
-    ObjCClassSnapshot, ObjCMethodSnapshot, ObjCProtocolSnapshot, ObjCSnapshot,
-    PlatformSnapshot, SliceSnapshot,
+    DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
+    ImportSnapshot, LoadCommandSnapshot, ObjCCategorySnapshot, ObjCClassSnapshot,
+    ObjCMethodSnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use std::process::Command;
@@ -71,19 +70,6 @@ fn synthetic_load_command_snapshot(name: &str, summary: &str) -> ContainerSnapsh
         summary: summary.into(),
         fileset_entry: None,
     });
-    snap
-}
-
-fn synthetic_import_variants(imports: &[(&str, i32, bool)]) -> ContainerSnapshot {
-    let mut snap = synthetic_snapshot();
-    snap.slices[0].imports = imports
-        .iter()
-        .map(|(name, lib_ordinal, weak)| ImportSnapshot {
-            name: (*name).into(),
-            lib_ordinal: *lib_ordinal,
-            weak: *weak,
-        })
-        .collect();
     snap
 }
 

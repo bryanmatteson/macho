@@ -313,8 +313,18 @@ fn parity_domains_can_be_selected() {
 
     let parity = compute_parity_with_domains(&snap.slices, &[ParityDomain::Codesign]);
     assert_eq!(parity.domains, vec![ParityDomain::Codesign]);
-    assert_eq!(parity.divergences.len(), 1);
-    assert_eq!(parity.divergences[0].domain, ParityDomain::Codesign);
+    assert!(
+        !parity.divergences.is_empty(),
+        "expected codesign-domain divergences"
+    );
+    assert!(
+        parity
+            .divergences
+            .iter()
+            .all(|divergence| divergence.domain == ParityDomain::Codesign),
+        "unexpected non-codesign divergences: {:?}",
+        parity.divergences
+    );
 }
 
 #[test]

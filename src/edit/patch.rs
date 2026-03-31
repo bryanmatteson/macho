@@ -693,6 +693,49 @@ impl MachoPatcher {
         results
     }
 
+    /// Find null-terminated C strings within a specific file region.
+    ///
+    /// This scopes the search to a byte range (e.g., from a `StringRegion`),
+    /// avoiding matches in code or unrelated data sections.
+    ///
+    /// Returns `(offset, allocated_size)` tuples, same as `find_cstring`.
+    pub fn find_cstring_in_region(
+        &self,
+        needle: &str,
+        region_offset: usize,
+        region_size: usize,
+    ) -> Vec<(usize, usize)> {
+        let needle_bytes = needle.as_bytes();
+        if needle_bytes.is_empty() || region_size == 0 {
+            return Vec::new();
+        }
+
+        let data = &self.data;
+        let region_end = region_offset.saturating_add(region_size).min(data.len());
+        let mut results = Vec::new();
+        let mut pos = region_offset;
+
+        while pos + needle_bytes.len() < region_end {
+            if let Some(found) = find_subsequence(&data[pos..region_end], needle_bytes) {
+                let abs_offset = pos + found;
+                let after = abs_offset + needle_bytes.len();
+                if after < data.len() && data[after] == 0 {
+                    let mut end = after + 1;
+                    while end < data.len() && data[end] == 0 {
+                        end += 1;
+                    }
+                    let alloc_size = end - abs_offset;
+                    results.push((abs_offset, alloc_size));
+                }
+                pos = abs_offset + 1;
+            } else {
+                break;
+            }
+        }
+
+        results
+    }
+
     // -- NOP fill -----------------------------------------------------------
 
     /// Fill `count` bytes at `offset` with NOP instructions.

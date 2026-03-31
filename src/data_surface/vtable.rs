@@ -169,6 +169,21 @@ impl VtableIndex {
         None
     }
 
+    /// Find all vtable slots whose target points to the given function VA.
+    pub fn slots_targeting_va(&self, target_va: Va) -> Vec<(&VtableEntry, &VtableSlot)> {
+        let mut results = Vec::new();
+        for vtable in &self.vtables {
+            for slot in &vtable.slots {
+                if let SlotTarget::Function { va, .. } = &slot.target {
+                    if *va == target_va {
+                        results.push((vtable, slot));
+                    }
+                }
+            }
+        }
+        results
+    }
+
     pub fn vtables(&self) -> &[VtableEntry] {
         &self.vtables
     }
