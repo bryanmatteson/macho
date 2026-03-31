@@ -454,6 +454,78 @@ impl MachoPatcher {
         })
     }
 
+    /// Return a conservative upper bound for a relocated trampoline buffer.
+    ///
+    /// This is primarily useful for live-image hook installers that need to
+    /// reserve executable memory before the relocated trampoline bytes are
+    /// materialized.
+    pub fn estimate_relocated_trampoline_capacity(arch: PatchArch, original_len: usize) -> usize {
+        match arch {
+            PatchArch::X86_64 => original_len.saturating_mul(4).saturating_add(32),
+            PatchArch::Arm64 | PatchArch::Arm64e => {
+                (original_len / 4).saturating_mul(20).saturating_add(16)
+            }
+            PatchArch::I386 => 0,
+        }
+    }
+
+    /// Relocate stolen instructions so they can execute from `trampoline_va`.
+    ///
+    /// Unlike [`Self::validate_trampoline_instructions`], this performs
+    /// architecture-specific instruction rewriting for common PC-relative
+    /// encodings used in function prologues.
+    pub fn relocate_stolen_bytes(
+        arch: PatchArch,
+        source_va: u64,
+        trampoline_va: u64,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        ensure_hook_arch_supported(arch)?;
+
+        match arch {
+            PatchArch::X86_64 => relocate_x86_64_stolen_bytes(source_va, trampoline_va, bytes),
+            PatchArch::Arm64 | PatchArch::Arm64e => {
+                relocate_arm64_stolen_bytes(arch, source_va, trampoline_va, bytes)
+            }
+            PatchArch::I386 => {
+                Err("executable hook patching is not supported for i386".to_string())
+            }
+        }
+    }
+
+    /// Build a trampoline from original stolen bytes, relocating them from the
+    /// function entry at `source_va` into the trampoline at `trampoline_va`.
+    pub fn build_relocated_trampoline(
+        arch: PatchArch,
+        source_va: u64,
+        trampoline_va: u64,
+        original_bytes: &[u8],
+        resume_va: u64,
+    ) -> Result<TrampolinePlan, String> {
+        let relocated_bytes =
+            Self::relocate_stolen_bytes(arch, source_va, trampoline_va, original_bytes)?;
+        ensure_hook_arch_supported(arch)?;
+        validate_patch_alignment(arch, trampoline_va, original_bytes.len())?;
+
+        let jump_source_va = trampoline_va
+            .checked_add(relocated_bytes.len() as u64)
+            .ok_or_else(|| format!("trampoline at {trampoline_va:#x} overflows address space"))?;
+        let jump_back = Self::encode_hook_jump(arch, jump_source_va, resume_va)?;
+
+        let mut bytes = Vec::with_capacity(relocated_bytes.len() + jump_back.len());
+        bytes.extend_from_slice(&relocated_bytes);
+        bytes.extend_from_slice(&jump_back.bytes);
+
+        Ok(TrampolinePlan {
+            arch,
+            trampoline_va,
+            relocated_bytes,
+            resume_va,
+            jump_back,
+            bytes,
+        })
+    }
+
     /// Plan a function-entry patch that overwrites `overwrite_len` bytes at
     /// `entry_va` with a branch to `destination_va`, padding any remainder with
     /// architecture-appropriate NOPs.
@@ -540,8 +612,9 @@ impl MachoPatcher {
         overwrite_len: usize,
     ) -> Result<FunctionEntryHookPlan, String> {
         let entry = self.plan_function_entry_patch(arch, entry_va, hook_va, overwrite_len)?;
-        let trampoline = Self::build_trampoline(
+        let trampoline = Self::build_relocated_trampoline(
             arch,
+            entry.entry_va,
             trampoline_va,
             &entry.original_bytes,
             entry.resume_va(),
@@ -905,29 +978,557 @@ fn encode_arm64_hook_jump(
     })
 }
 
+fn relocate_x86_64_stolen_bytes(
+    source_va: u64,
+    trampoline_va: u64,
+    bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    let mut src_off = 0usize;
+    let mut relocated = Vec::with_capacity(bytes.len() + 16);
+    while src_off < bytes.len() {
+        let insn = &bytes[src_off..];
+        let src_insn_va = source_va + src_off as u64;
+        let dst_insn_va = trampoline_va + relocated.len() as u64;
+        let rewritten =
+            relocate_x86_64_instruction(insn, src_insn_va, dst_insn_va).map_err(|reason| {
+                format!(
+                    "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: {}",
+                    src_off, reason
+                )
+            })?;
+        let len = x86_64_instruction_len(insn, src_insn_va)
+            .map_err(|reason| {
+                format!(
+                    "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: {}",
+                    src_off, reason
+                )
+            })?
+            .0;
+        src_off += len;
+        relocated.extend_from_slice(&rewritten);
+    }
+    Ok(relocated)
+}
+
+fn relocate_x86_64_instruction(
+    bytes: &[u8],
+    src_va: u64,
+    dst_va: u64,
+) -> Result<Vec<u8>, &'static str> {
+    let mut idx = 0usize;
+    let mut rex_w = false;
+    let mut address_override = false;
+    while let Some(&byte) = bytes.get(idx) {
+        match byte {
+            0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 => {
+                idx += 1;
+            }
+            0x67 => {
+                address_override = true;
+                idx += 1;
+            }
+            0x40..=0x4F => {
+                rex_w |= byte & 0x08 != 0;
+                idx += 1;
+            }
+            _ => break,
+        }
+    }
+    if address_override {
+        return Err("address-size override is not supported");
+    }
+
+    let opcode_offset = idx;
+    let opcode = *bytes.get(idx).ok_or("truncated instruction")?;
+    idx += 1;
+
+    match opcode {
+        0xE8 => {
+            let end = checked_advance(idx, 4, bytes)?;
+            let disp = i32::from_le_bytes(
+                bytes[idx..end]
+                    .try_into()
+                    .map_err(|_| "truncated instruction")?,
+            );
+            let target = add_signed_u64(src_va + end as u64, disp as i64)?;
+            let new_disp = rel32(target, dst_va + end as u64)?;
+            let mut out = bytes[..opcode_offset].to_vec();
+            out.push(0xE8);
+            out.extend_from_slice(&new_disp.to_le_bytes());
+            return Ok(out);
+        }
+        0xE9 => {
+            let end = checked_advance(idx, 4, bytes)?;
+            let disp = i32::from_le_bytes(
+                bytes[idx..end]
+                    .try_into()
+                    .map_err(|_| "truncated instruction")?,
+            );
+            let target = add_signed_u64(src_va + end as u64, disp as i64)?;
+            return Ok(
+                MachoPatcher::encode_hook_jump(PatchArch::X86_64, dst_va, target)
+                    .map_err(|_| "relative jump encoding failed")?
+                    .bytes,
+            );
+        }
+        0xEB => {
+            let end = checked_advance(idx, 1, bytes)?;
+            let disp = bytes[idx] as i8;
+            let target = add_signed_u64(src_va + end as u64, disp as i64)?;
+            return Ok(
+                MachoPatcher::encode_hook_jump(PatchArch::X86_64, dst_va, target)
+                    .map_err(|_| "relative jump encoding failed")?
+                    .bytes,
+            );
+        }
+        0x70..=0x7F => {
+            let end = checked_advance(idx, 1, bytes)?;
+            let disp = bytes[idx] as i8;
+            let target = add_signed_u64(src_va + end as u64, disp as i64)?;
+            let cc = opcode & 0x0F;
+            let new_disp = rel32(target, dst_va + bytes[..opcode_offset].len() as u64 + 6)?;
+            let mut out = bytes[..opcode_offset].to_vec();
+            out.push(0x0F);
+            out.push(0x80 | cc);
+            out.extend_from_slice(&new_disp.to_le_bytes());
+            return Ok(out);
+        }
+        0x0F => {
+            let second = *bytes.get(idx).ok_or("truncated two-byte opcode")?;
+            idx += 1;
+            if (0x80..=0x8F).contains(&second) {
+                let end = checked_advance(idx, 4, bytes)?;
+                let disp = i32::from_le_bytes(
+                    bytes[idx..end]
+                        .try_into()
+                        .map_err(|_| "truncated instruction")?,
+                );
+                let target = add_signed_u64(src_va + end as u64, disp as i64)?;
+                let new_disp = rel32(target, dst_va + bytes[..opcode_offset].len() as u64 + 6)?;
+                let mut out = bytes[..opcode_offset].to_vec();
+                out.push(0x0F);
+                out.push(second);
+                out.extend_from_slice(&new_disp.to_le_bytes());
+                return Ok(out);
+            }
+        }
+        0xE0..=0xE3 => return Err("loop branch"),
+        _ => {}
+    }
+
+    let len = x86_64_instruction_len(bytes, src_va)?.0;
+    let mut out = bytes[..len].to_vec();
+    if let Some((disp_offset, disp_len)) = find_x86_64_rip_relative_disp(bytes)? {
+        if disp_len != 4 {
+            return Err("unexpected RIP-relative displacement size");
+        }
+        let end = disp_offset + disp_len;
+        let disp = i32::from_le_bytes(
+            out[disp_offset..end]
+                .try_into()
+                .map_err(|_| "truncated instruction")?,
+        );
+        let target = add_signed_u64(src_va + len as u64, disp as i64)?;
+        let new_disp = rel32(target, dst_va + len as u64)?;
+        out[disp_offset..end].copy_from_slice(&new_disp.to_le_bytes());
+    } else if opcode == 0xB8 && rex_w {
+    }
+    Ok(out)
+}
+
+fn find_x86_64_rip_relative_disp(bytes: &[u8]) -> Result<Option<(usize, usize)>, &'static str> {
+    let mut idx = 0usize;
+    while let Some(&byte) = bytes.get(idx) {
+        match byte {
+            0xF0
+            | 0xF2
+            | 0xF3
+            | 0x2E
+            | 0x36
+            | 0x3E
+            | 0x26
+            | 0x64
+            | 0x65
+            | 0x66
+            | 0x67
+            | 0x40..=0x4F => idx += 1,
+            _ => break,
+        }
+    }
+    let opcode = *bytes.get(idx).ok_or("truncated instruction")?;
+    idx += 1;
+    if opcode == 0x0F {
+        let second = *bytes.get(idx).ok_or("truncated two-byte opcode")?;
+        idx += 1;
+        match second {
+            0x1F | 0xAF | 0xB6 | 0xB7 | 0xBE | 0xBF => {}
+            _ => return Ok(None),
+        }
+    }
+    let modrm_offset = idx;
+    let modrm = *bytes.get(modrm_offset).ok_or("truncated ModRM")?;
+    let mode = modrm >> 6;
+    let rm = modrm & 0x07;
+    idx += 1;
+    if mode == 0b11 {
+        return Ok(None);
+    }
+    if rm == 0b100 {
+        let sib = *bytes.get(idx).ok_or("truncated SIB")?;
+        idx += 1;
+        let base = sib & 0x07;
+        if mode == 0b00 && base == 0b101 {
+            return Ok(Some((idx, 4)));
+        }
+    }
+    if mode == 0b00 && rm == 0b101 {
+        return Ok(Some((idx, 4)));
+    }
+    Ok(None)
+}
+
+fn relocate_arm64_stolen_bytes(
+    arch: PatchArch,
+    source_va: u64,
+    trampoline_va: u64,
+    bytes: &[u8],
+) -> Result<Vec<u8>, String> {
+    if bytes.len() % 4 != 0 {
+        return Err(format!(
+            "{arch} trampoline bytes must be a whole number of instructions, got {} bytes",
+            bytes.len()
+        ));
+    }
+    let mut relocated = Vec::with_capacity(bytes.len() + 32);
+    for (index, chunk) in bytes.chunks_exact(4).enumerate() {
+        let mut buf = [0u8; 4];
+        buf.copy_from_slice(chunk);
+        let insn = u32::from_le_bytes(buf);
+        let src_insn_va = source_va + (index * 4) as u64;
+        let dst_insn_va = trampoline_va + relocated.len() as u64;
+        let rewritten = relocate_arm64_instruction(insn, src_insn_va, dst_insn_va).map_err(
+            |reason| {
+                format!(
+                    "{arch} trampoline relocation rejected instruction at byte offset {:#x}: {} ({:#010x})",
+                    index * 4,
+                    reason,
+                    insn
+                )
+            },
+        )?;
+        relocated.extend_from_slice(&rewritten);
+    }
+    Ok(relocated)
+}
+
+fn relocate_arm64_instruction(
+    insn: u32,
+    src_va: u64,
+    dst_va: u64,
+) -> Result<Vec<u8>, &'static str> {
+    if insn & 0x7C00_0000 == 0x1400_0000 {
+        let target = add_signed_u64(src_va, sign_extend(((insn & 0x03FF_FFFF) as u64) << 2, 28))?;
+        let link = (insn & 0x8000_0000) != 0;
+        if let Some(encoded) = encode_arm64_branch_immediate(link, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_absolute_jump_sequence(target, link));
+    }
+    if insn & 0xFF00_0010 == 0x5400_0000 {
+        let cond = (insn & 0xF) as u8;
+        let imm = ((insn >> 5) & 0x7FFFF) as u64;
+        let target = add_signed_u64(src_va, sign_extend(imm << 2, 21))?;
+        if let Some(encoded) = encode_arm64_cond_branch(cond, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_conditional_absolute_jump_sequence(
+            cond, dst_va, target,
+        ));
+    }
+    if insn & 0x7E00_0000 == 0x3400_0000 {
+        let imm = ((insn >> 5) & 0x7FFFF) as u64;
+        let target = add_signed_u64(src_va, sign_extend(imm << 2, 21))?;
+        if let Some(encoded) = encode_arm64_cbz(insn, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_cbz_absolute_jump_sequence(insn, dst_va, target));
+    }
+    if insn & 0x7E00_0000 == 0x3600_0000 {
+        let imm = ((insn >> 5) & 0x3FFF) as u64;
+        let target = add_signed_u64(src_va, sign_extend(imm << 2, 16))?;
+        if let Some(encoded) = encode_arm64_tbz(insn, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_tbz_absolute_jump_sequence(insn, dst_va, target));
+    }
+    if insn & 0x9F00_0000 == 0x1000_0000 {
+        let target = decode_adr_target(insn, src_va);
+        if let Some(encoded) = encode_adr(insn, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_load_address_sequence(insn & 0x1F, target));
+    }
+    if insn & 0x9F00_0000 == 0x9000_0000 {
+        let target = decode_adrp_target(insn, src_va);
+        if let Some(encoded) = encode_adrp(insn, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_load_address_sequence(insn & 0x1F, target));
+    }
+    if let Some(target) = decode_arm64_integer_ldr_literal_target(insn, src_va) {
+        if let Some(encoded) = encode_arm64_integer_ldr_literal(insn, dst_va, target) {
+            return Ok(encoded.to_le_bytes().to_vec());
+        }
+        return Ok(arm64_integer_literal_load_sequence(insn, target));
+    }
+    if insn & 0xFE00_0000 == 0xD600_0000 || insn & 0xFE00_0000 == 0xD700_0000 {
+        return Err("register or authenticated branch");
+    }
+    Ok(insn.to_le_bytes().to_vec())
+}
+
+fn add_signed_u64(base: u64, delta: i64) -> Result<u64, &'static str> {
+    base.checked_add_signed(delta).ok_or("address overflow")
+}
+
+fn rel32(target: u64, next_ip: u64) -> Result<i32, &'static str> {
+    let delta = i128::from(target) - i128::from(next_ip);
+    if !(i32::MIN as i128..=i32::MAX as i128).contains(&delta) {
+        return Err("relative target out of range");
+    }
+    Ok(delta as i32)
+}
+
+fn sign_extend(value: u64, bits: u8) -> i64 {
+    let shift = 64 - bits;
+    ((value << shift) as i64) >> shift
+}
+
+fn encode_arm64_branch_immediate(link: bool, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if delta % 4 != 0 {
+        return None;
+    }
+    let scaled = delta / 4;
+    if !((-(1_i128 << 25))..=((1_i128 << 25) - 1)).contains(&scaled) {
+        return None;
+    }
+    let base = if link { 0x9400_0000 } else { 0x1400_0000 };
+    Some(base | ((scaled as i32 as u32) & 0x03FF_FFFF))
+}
+
+fn encode_arm64_cond_branch(cond: u8, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if delta % 4 != 0 {
+        return None;
+    }
+    let scaled = delta / 4;
+    if !((-(1_i128 << 18))..=((1_i128 << 18) - 1)).contains(&scaled) {
+        return None;
+    }
+    Some(0x5400_0000 | (((scaled as i32 as u32) & 0x7FFFF) << 5) | (cond as u32))
+}
+
+fn encode_arm64_cbz(insn: u32, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if delta % 4 != 0 {
+        return None;
+    }
+    let scaled = delta / 4;
+    if !((-(1_i128 << 18))..=((1_i128 << 18) - 1)).contains(&scaled) {
+        return None;
+    }
+    Some((insn & !0x00FF_FFE0) | (((scaled as i32 as u32) & 0x7FFFF) << 5))
+}
+
+fn encode_arm64_tbz(insn: u32, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if delta % 4 != 0 {
+        return None;
+    }
+    let scaled = delta / 4;
+    if !((-(1_i128 << 13))..=((1_i128 << 13) - 1)).contains(&scaled) {
+        return None;
+    }
+    Some((insn & !0x0007_FFE0) | (((scaled as i32 as u32) & 0x3FFF) << 5))
+}
+
+fn decode_adr_target(insn: u32, source_va: u64) -> u64 {
+    let immlo = ((insn >> 29) & 0x3) as u64;
+    let immhi = ((insn >> 5) & 0x7FFFF) as u64;
+    let imm = (immhi << 2) | immlo;
+    source_va.wrapping_add_signed(sign_extend(imm, 21))
+}
+
+fn decode_adrp_target(insn: u32, source_va: u64) -> u64 {
+    let immlo = ((insn >> 29) & 0x3) as u64;
+    let immhi = ((insn >> 5) & 0x7FFFF) as u64;
+    let imm = (immhi << 2) | immlo;
+    (source_va & !0xFFF).wrapping_add_signed(sign_extend(imm, 21) << 12)
+}
+
+fn encode_adr(insn: u32, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if !((-(1_i128 << 20))..=((1_i128 << 20) - 1)).contains(&delta) {
+        return None;
+    }
+    let imm = delta as i64 as u64;
+    let immlo = (imm & 0x3) as u32;
+    let immhi = ((imm >> 2) & 0x7FFFF) as u32;
+    Some((insn & !0x60FF_FFE0) | (immlo << 29) | (immhi << 5))
+}
+
+fn encode_adrp(insn: u32, source_va: u64, target_va: u64) -> Option<u32> {
+    let src_page = source_va & !0xFFF;
+    let target_page = target_va & !0xFFF;
+    let delta = (i128::from(target_page) - i128::from(src_page)) >> 12;
+    if !((-(1_i128 << 20))..=((1_i128 << 20) - 1)).contains(&delta) {
+        return None;
+    }
+    let imm = delta as i64 as u64;
+    let immlo = (imm & 0x3) as u32;
+    let immhi = ((imm >> 2) & 0x7FFFF) as u32;
+    Some((insn & !0x60FF_FFE0) | (immlo << 29) | (immhi << 5))
+}
+
+fn decode_arm64_integer_ldr_literal_target(insn: u32, source_va: u64) -> Option<u64> {
+    let top = insn & 0xFF00_0000;
+    if top != 0x1800_0000 && top != 0x5800_0000 {
+        return None;
+    }
+    let imm = ((insn >> 5) & 0x7FFFF) as u64;
+    Some(source_va.wrapping_add_signed(sign_extend(imm << 2, 21)))
+}
+
+fn encode_arm64_integer_ldr_literal(insn: u32, source_va: u64, target_va: u64) -> Option<u32> {
+    let delta = i128::from(target_va) - i128::from(source_va);
+    if delta % 4 != 0 {
+        return None;
+    }
+    let scaled = delta / 4;
+    if !((-(1_i128 << 18))..=((1_i128 << 18) - 1)).contains(&scaled) {
+        return None;
+    }
+    Some((insn & !0x00FF_FFE0) | (((scaled as i32 as u32) & 0x7FFFF) << 5))
+}
+
+fn arm64_absolute_jump_sequence(target_va: u64, link: bool) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&0x5800_0050u32.to_le_bytes());
+    bytes.extend_from_slice(&(if link { 0xD63F_0200u32 } else { 0xD61F_0200u32 }).to_le_bytes());
+    bytes.extend_from_slice(&target_va.to_le_bytes());
+    bytes
+}
+
+fn arm64_conditional_absolute_jump_sequence(cond: u8, dst_va: u64, target_va: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(20);
+    let skip = encode_arm64_cond_branch(cond ^ 1, dst_va, dst_va + 20).expect("local skip encodes");
+    bytes.extend_from_slice(&skip.to_le_bytes());
+    bytes.extend_from_slice(&arm64_absolute_jump_sequence(target_va, false));
+    bytes
+}
+
+fn arm64_cbz_absolute_jump_sequence(insn: u32, dst_va: u64, target_va: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(20);
+    let skip =
+        encode_arm64_cbz(insn ^ 0x0100_0000, dst_va, dst_va + 20).expect("local skip encodes");
+    bytes.extend_from_slice(&skip.to_le_bytes());
+    bytes.extend_from_slice(&arm64_absolute_jump_sequence(target_va, false));
+    bytes
+}
+
+fn arm64_tbz_absolute_jump_sequence(insn: u32, dst_va: u64, target_va: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(20);
+    let skip =
+        encode_arm64_tbz(insn ^ 0x0100_0000, dst_va, dst_va + 20).expect("local skip encodes");
+    bytes.extend_from_slice(&skip.to_le_bytes());
+    bytes.extend_from_slice(&arm64_absolute_jump_sequence(target_va, false));
+    bytes
+}
+
+fn arm64_load_address_sequence(register: u32, target_va: u64) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16);
+    bytes.extend_from_slice(&(0x5800_0040u32 | register).to_le_bytes());
+    bytes.extend_from_slice(&0x1400_0003u32.to_le_bytes());
+    bytes.extend_from_slice(&target_va.to_le_bytes());
+    bytes
+}
+
+fn arm64_integer_literal_load_sequence(insn: u32, target_va: u64) -> Vec<u8> {
+    let register = insn & 0x1F;
+    let is_64 = (insn & 0x4000_0000) != 0;
+    let mut bytes = Vec::with_capacity(20);
+    bytes.extend_from_slice(&0x5800_0070u32.to_le_bytes());
+    let load_reg = if is_64 {
+        0xF940_0000u32 | (16 << 5) | register
+    } else {
+        0xB940_0000u32 | (16 << 5) | register
+    };
+    bytes.extend_from_slice(&load_reg.to_le_bytes());
+    bytes.extend_from_slice(&0x1400_0002u32.to_le_bytes());
+    bytes.extend_from_slice(&target_va.to_le_bytes());
+    bytes
+}
+
 fn validate_x86_64_trampoline_bytes(bytes: &[u8]) -> Result<(), String> {
     let mut offset = 0;
     while offset < bytes.len() {
-        let len = decode_x86_64_instruction_len(&bytes[offset..]).map_err(|reason| {
-            format!(
+        let (len, is_branch, uses_rip_relative) = x86_64_instruction_len(&bytes[offset..], 0)
+            .map_err(|reason| {
+                format!(
+                    "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: {}",
+                    offset, reason
+                )
+            })?;
+        if uses_rip_relative {
+            return Err(format!(
+                "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: RIP-relative addressing",
+                offset
+            ));
+        }
+        if is_branch {
+            let reason = if bytes
+                .get(offset)
+                .is_some_and(|opcode| matches!(opcode, 0xE8))
+            {
+                "relative call"
+            } else if bytes
+                .get(offset)
+                .is_some_and(|opcode| matches!(opcode, 0xE9 | 0xEB))
+            {
+                "relative jump"
+            } else if bytes
+                .get(offset)
+                .is_some_and(|opcode| matches!(opcode, 0x70..=0x7F | 0xE0..=0xE3))
+            {
+                "conditional branch"
+            } else {
+                "control-flow instruction"
+            };
+            return Err(format!(
                 "x86_64 trampoline relocation rejected instruction at byte offset {:#x}: {}",
-                offset, reason,
-            )
-        })?;
+                offset, reason
+            ));
+        }
         offset += len;
     }
 
     Ok(())
 }
 
-fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
+fn x86_64_instruction_len(
+    bytes: &[u8],
+    _insn_va: u64,
+) -> Result<(usize, bool, bool), &'static str> {
     let mut idx = 0;
     let mut rex_w = false;
+    let mut operand_override = false;
     let mut address_size_override = false;
 
     while let Some(&byte) = bytes.get(idx) {
         match byte {
             0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65 | 0x66 => {
+                operand_override |= byte == 0x66;
                 idx += 1;
             }
             0x67 => {
@@ -949,29 +1550,125 @@ fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
     let opcode = *bytes.get(idx).ok_or("truncated instruction")?;
     idx += 1;
 
+    let mut is_branch = false;
+    let mut uses_rip_relative = false;
+
     match opcode {
-        0x70..=0x7F => return Err("conditional branch"),
-        0xE8 => return Err("relative call"),
-        0xE9 | 0xEB => return Err("relative jump"),
-        0xE0..=0xE3 => return Err("loop branch"),
-        0xC2 | 0xC3 | 0xCA | 0xCB => return Err("return"),
-        0x50..=0x5F | 0x90..=0x97 | 0x98..=0x99 | 0x9C..=0x9F => return Ok(idx),
-        0x68 => return checked_advance(idx, 4, bytes),
-        0x6A => return checked_advance(idx, 1, bytes),
-        0xB0..=0xB7 => return checked_advance(idx, 1, bytes),
+        0x70..=0x7F => {
+            is_branch = true;
+            return Ok((
+                checked_advance(idx, 1, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xE8 => {
+            is_branch = true;
+            return Ok((
+                checked_advance(idx, 4, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xE9 | 0xEB => {
+            is_branch = true;
+            let len = if opcode == 0xEB { 1 } else { 4 };
+            return Ok((
+                checked_advance(idx, len, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xE0..=0xE3 => {
+            is_branch = true;
+            return Ok((
+                checked_advance(idx, 1, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xC2 => {
+            return Ok((
+                checked_advance(idx, 2, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xC3 | 0xCA | 0xCB | 0x50..=0x5F | 0x90..=0x97 | 0x98..=0x99 | 0x9C..=0x9F => {
+            return Ok((idx, is_branch, uses_rip_relative));
+        }
+        0x68 => {
+            return Ok((
+                checked_advance(idx, 4, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0x6A => {
+            return Ok((
+                checked_advance(idx, 1, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xA0..=0xA3 => {
+            let len = if address_size_override { 4 } else { 8 };
+            return Ok((
+                checked_advance(idx, len, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xA8 => {
+            return Ok((
+                checked_advance(idx, 1, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xA9 => {
+            let len = if operand_override { 2 } else { 4 };
+            return Ok((
+                checked_advance(idx, len, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
+        0xB0..=0xB7 => {
+            return Ok((
+                checked_advance(idx, 1, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
+        }
         0xB8..=0xBF => {
-            let imm_len = if rex_w { 8 } else { 4 };
-            return checked_advance(idx, imm_len, bytes);
+            let imm_len = if rex_w {
+                8
+            } else if operand_override {
+                2
+            } else {
+                4
+            };
+            return Ok((
+                checked_advance(idx, imm_len, bytes)?,
+                is_branch,
+                uses_rip_relative,
+            ));
         }
         0x0F => {
             let second = *bytes.get(idx).ok_or("truncated two-byte opcode")?;
             idx += 1;
 
             if (0x80..=0x8F).contains(&second) {
-                return Err("conditional branch");
+                is_branch = true;
+                return Ok((
+                    checked_advance(idx, 4, bytes)?,
+                    is_branch,
+                    uses_rip_relative,
+                ));
             }
             if second == 0x1E && bytes.get(idx) == Some(&0xFA) {
-                return Ok(idx + 1);
+                return Ok((idx + 1, is_branch, uses_rip_relative));
             }
 
             let modrm = match second {
@@ -979,11 +1676,8 @@ fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
                 _ => return Err("unsupported two-byte opcode"),
             };
 
-            if modrm.rip_relative {
-                return Err("RIP-relative addressing");
-            }
-
-            return Ok(idx + modrm.len);
+            uses_rip_relative = modrm.rip_relative;
+            return Ok((idx + modrm.len, is_branch, uses_rip_relative));
         }
         _ => {}
     }
@@ -1003,15 +1697,13 @@ fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
     };
 
     if !modrm_needed {
-        return Ok(idx);
+        return Ok((idx, is_branch, uses_rip_relative));
     }
 
     let modrm = parse_x86_64_modrm(bytes, idx)?;
-    if modrm.rip_relative {
-        return Err("RIP-relative addressing");
-    }
+    uses_rip_relative = modrm.rip_relative;
     if group5_control_flow && matches!(modrm.reg, 2..=5) {
-        return Err("register or memory control-flow instruction");
+        is_branch = true;
     }
 
     let mut end = idx + modrm.len;
@@ -1025,7 +1717,7 @@ fn decode_x86_64_instruction_len(bytes: &[u8]) -> Result<usize, &'static str> {
         }
     }
 
-    Ok(end)
+    Ok((end, is_branch, uses_rip_relative))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1489,27 +2181,47 @@ mod tests {
     }
 
     #[test]
-    fn plan_function_entry_hook_x86_64_rejects_relative_control_flow_stolen_bytes() {
+    fn plan_function_entry_hook_x86_64_relocates_relative_control_flow_stolen_bytes() {
         let mut p = make_test_patcher();
         p.data[0x100..0x105].copy_from_slice(&[0xE8, 0x01, 0x00, 0x00, 0x00]); // call +1
 
-        let err = p
+        let plan = p
             .plan_function_entry_hook(PatchArch::X86_64, 0x100100, 0x100200, 0x100300, 5)
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.contains("relative call"));
+        let disp = i32::from_le_bytes(plan.trampoline.relocated_bytes[1..5].try_into().unwrap());
+        let target = (plan.trampoline.trampoline_va + 5).wrapping_add_signed(disp as i64);
+        assert_eq!(target, 0x100106);
     }
 
     #[test]
-    fn plan_function_entry_hook_x86_64_rejects_rip_relative_stolen_bytes() {
+    fn plan_function_entry_hook_x86_64_relocates_rip_relative_stolen_bytes() {
         let mut p = make_test_patcher();
         p.data[0x100..0x107].copy_from_slice(&[0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00]);
 
-        let err = p
+        let plan = p
             .plan_function_entry_hook(PatchArch::X86_64, 0x100100, 0x100200, 0x100300, 7)
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.contains("RIP-relative"));
+        let disp = i32::from_le_bytes(plan.trampoline.relocated_bytes[3..7].try_into().unwrap());
+        let target = (plan.trampoline.trampoline_va + 7).wrapping_add_signed(disp as i64);
+        assert_eq!(target, 0x100107);
+    }
+
+    #[test]
+    fn build_relocated_trampoline_arm64_rewrites_branch_immediate() {
+        let source = 0x1400_0002u32.to_le_bytes();
+        let trampoline = MachoPatcher::build_relocated_trampoline(
+            PatchArch::Arm64,
+            0x1000,
+            0x2000,
+            &source,
+            0x1004,
+        )
+        .unwrap();
+
+        let first = u32::from_le_bytes(trampoline.relocated_bytes[..4].try_into().unwrap());
+        assert_ne!(first, 0x1400_0002);
     }
 
     #[test]
@@ -1551,15 +2263,16 @@ mod tests {
     }
 
     #[test]
-    fn plan_function_entry_hook_arm64_rejects_pc_relative_stolen_bytes() {
+    fn plan_function_entry_hook_arm64_relocates_pc_relative_stolen_bytes() {
         let mut p = make_test_patcher();
         p.data[0x100..0x104].copy_from_slice(&[0x10, 0x00, 0x00, 0x14]); // b +0x40
 
-        let err = p
+        let plan = p
             .plan_function_entry_hook(PatchArch::Arm64, 0x100100, 0x100200, 0x100300, 4)
-            .unwrap_err();
+            .unwrap();
 
-        assert!(err.contains("branch immediate"));
+        let first = u32::from_le_bytes(plan.trampoline.relocated_bytes[..4].try_into().unwrap());
+        assert_ne!(first, 0x1400_0010);
     }
 
     #[test]
