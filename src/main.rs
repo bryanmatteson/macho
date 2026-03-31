@@ -52,6 +52,8 @@ enum Commands {
     Ranges(commands::data_surface::RangesArgs),
     /// List cross-references (stubs, fixups, branches)
     Xrefs(commands::data_surface::XrefsArgs),
+    /// Inspect a dyld shared cache (list images, extract, info)
+    DyldCache(commands::dyld_cache::DyldCacheArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -77,5 +79,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Vtables(args) => commands::data_surface::run_vtables(args),
         Commands::Ranges(args) => commands::data_surface::run_ranges(args),
         Commands::Xrefs(args) => commands::data_surface::run_xrefs(args),
+        Commands::DyldCache(args) => commands::dyld_cache::run(args),
     }
 }

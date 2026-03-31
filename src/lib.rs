@@ -9,6 +9,7 @@ pub mod demangle;
 pub mod depgraph;
 pub mod diff;
 pub mod dyld;
+pub mod dyld_cache;
 pub mod edit;
 pub mod error;
 pub mod ext;

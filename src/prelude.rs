@@ -98,6 +98,11 @@ pub use crate::data_surface::strings::{
 };
 pub use crate::data_surface::vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};
 
+// Dyld shared cache
+pub use crate::dyld_cache::{
+    CacheImage, CacheMapping, DyldCache, DyldCacheHeader, parse_dyld_cache,
+};
+
 // Dependency graph and compatibility
 pub use crate::depgraph::{
     CompatCategory, CompatFinding, CompatReport, CompatSeverity, DepGraph, GraphIssue,

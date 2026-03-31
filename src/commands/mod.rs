@@ -5,6 +5,7 @@ pub mod container;
 pub mod data_surface;
 pub mod deps;
 pub mod diff;
+pub mod dyld_cache;
 pub mod exports;
 pub mod fileset;
 pub mod fixups;
