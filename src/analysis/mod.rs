@@ -28,6 +28,7 @@ impl SliceSnapshot {
             symbols: extract_symbols(mach, &mut analysis_issues),
             exports: extract_exports(mach, &mut analysis_issues),
             imports: extract_imports(mach, &mut analysis_issues),
+            fixups: extract_fixups(mach, &mut analysis_issues),
             objc: extract_objc(mach, &mut analysis_issues),
             codesign: extract_codesign(mach, &mut analysis_issues),
             analysis_issues,
@@ -254,12 +255,8 @@ fn extract_imports(
 
     match extract_imports_from_dynamic_linker(mach) {
         Err(err) => {
-            push_analysis_issue(
-                analysis_issues,
-                "imports",
-                err,
-            );
-            return Vec::new();
+            push_analysis_issue(analysis_issues, "imports", err);
+            Vec::new()
         }
         Ok(imports) => imports,
     }
@@ -302,6 +299,36 @@ fn extract_imports_from_dynamic_linker(
     }
 
     Ok(Vec::new())
+}
+
+fn extract_fixups(
+    mach: &MachFile<'_>,
+    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+) -> Vec<FixupSnapshot> {
+    if !has_chained_fixups(mach) {
+        return Vec::new();
+    }
+
+    let fixups = match parse_chained_fixups(mach) {
+        Ok(fixups) => fixups,
+        Err(err) => {
+            push_analysis_issue(
+                analysis_issues,
+                "fixups",
+                format!("failed to parse chained fixups: {err}"),
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut snapshots: Vec<FixupSnapshot> = fixups.fixups.into_iter().map(snap_fixup).collect();
+    snapshots.sort_by(|a, b| {
+        a.segment_index
+            .cmp(&b.segment_index)
+            .then(a.segment_offset.cmp(&b.segment_offset))
+            .then(a.kind.cmp(&b.kind))
+    });
+    snapshots
 }
 
 fn extract_objc(
@@ -450,6 +477,45 @@ fn snap_method(m: &crate::objc::ObjCMethod) -> ObjCMethodSnapshot {
     ObjCMethodSnapshot {
         name: m.name.clone(),
         type_encoding: m.type_encoding.clone(),
+    }
+}
+
+fn snap_fixup(fixup: crate::dyld::types::Fixup) -> FixupSnapshot {
+    use crate::dyld::types::FixupKind;
+
+    let kind = match fixup.kind {
+        FixupKind::Rebase { target } => FixupKindSnapshot::Rebase { target },
+        FixupKind::Bind { import_index, addend } => {
+            FixupKindSnapshot::Bind { import_index, addend }
+        }
+        FixupKind::AuthRebase {
+            target,
+            diversity,
+            key,
+            addr_div,
+        } => FixupKindSnapshot::AuthRebase {
+            target,
+            diversity,
+            key,
+            addr_div,
+        },
+        FixupKind::AuthBind {
+            import_index,
+            diversity,
+            key,
+            addr_div,
+        } => FixupKindSnapshot::AuthBind {
+            import_index,
+            diversity,
+            key,
+            addr_div,
+        },
+    };
+
+    FixupSnapshot {
+        segment_index: fixup.segment_index,
+        segment_offset: fixup.segment_offset,
+        kind,
     }
 }
 

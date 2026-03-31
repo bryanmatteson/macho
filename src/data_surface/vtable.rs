@@ -116,16 +116,14 @@ impl VtableIndex {
             };
 
             // Read vtable slots
-            let slots = match read_vtable_slots(
-                mach,
-                Va(vtable_va),
-                ptr_size,
-                max_size,
+            let ctx = VtableScanContext {
                 image_base,
-                &va_to_name,
-                &typeinfo_vas,
-                &fixup_map,
-            ) {
+                va_to_name: &va_to_name,
+                typeinfo_vas: &typeinfo_vas,
+                fixup_map: &fixup_map,
+            };
+
+            let slots = match read_vtable_slots(mach, Va(vtable_va), ptr_size, max_size, &ctx) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -285,19 +283,23 @@ fn resolve_slot_value(
     }
 }
 
+struct VtableScanContext<'a> {
+    image_base: u64,
+    va_to_name: &'a std::collections::HashMap<u64, &'a str>,
+    typeinfo_vas: &'a std::collections::HashSet<u64>,
+    fixup_map: &'a std::collections::HashMap<u64, VtableFixup>,
+}
+
 fn read_vtable_slots(
     mach: &MachFile<'_>,
     vtable_va: Va,
     ptr_size: u64,
     max_size: u64,
-    image_base: u64,
-    va_to_name: &std::collections::HashMap<u64, &str>,
-    typeinfo_vas: &std::collections::HashSet<u64>,
-    fixup_map: &std::collections::HashMap<u64, VtableFixup>,
+    ctx: &VtableScanContext<'_>,
 ) -> Result<Vec<VtableSlot>> {
     let endian = mach.endian();
     let max_slots = max_size / ptr_size;
-    let has_fixups = !fixup_map.is_empty();
+    let has_fixups = !ctx.fixup_map.is_empty();
     let mut slots = Vec::new();
 
     for i in 0..max_slots {
@@ -329,15 +331,20 @@ fn read_vtable_slots(
             .unwrap_or(0);
 
         let resolved = resolve_slot_value(
-            raw_value, file_offset, image_base, fixup_map, mach, endian,
+            raw_value,
+            file_offset,
+            ctx.image_base,
+            ctx.fixup_map,
+            mach,
+            endian,
         );
 
         let target = classify_slot(
             &resolved,
             raw_value,
             i,
-            va_to_name,
-            typeinfo_vas,
+            ctx.va_to_name,
+            ctx.typeinfo_vas,
             has_fixups,
         );
 
@@ -382,7 +389,7 @@ fn classify_slot(
             ResolvedSlotValue::Address(v) => *v as i64,
             ResolvedSlotValue::Import { .. } => 0,
         };
-        return SlotTarget::OffsetToTop { value: value as i64 };
+        return SlotTarget::OffsetToTop { value };
     }
 
     // Second slot is the typeinfo pointer.

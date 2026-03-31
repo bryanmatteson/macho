@@ -1,7 +1,7 @@
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
-    DiagnosticSnapshot, FilesetEntrySnapshot, HeaderSnapshot, LoadCommandSnapshot, ObjCSnapshot,
-    PlatformSnapshot, SliceSnapshot,
+    DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
+    LoadCommandSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use std::process::Command;
@@ -35,6 +35,7 @@ fn synthetic_snapshot() -> ContainerSnapshot {
             symbols: Vec::new(),
             exports: Vec::new(),
             imports: Vec::new(),
+            fixups: Vec::new(),
             objc: ObjCSnapshot {
                 classes: Vec::new(),
                 categories: Vec::new(),
@@ -418,6 +419,42 @@ fn diff_skips_code_signature_load_command_when_codesign_state_changes() {
             .map(|finding| (&finding.domain, &finding.message))
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn diff_reports_fixup_changes() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].fixups.push(FixupSnapshot {
+        segment_index: 0,
+        segment_offset: 0x10,
+        kind: FixupKindSnapshot::Bind {
+            import_index: 1,
+            addend: 0,
+        },
+    });
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].fixups.push(FixupSnapshot {
+        segment_index: 0,
+        segment_offset: 0x10,
+        kind: FixupKindSnapshot::AuthBind {
+            import_index: 2,
+            diversity: 7,
+            key: 1,
+            addr_div: false,
+        },
+    });
+
+    let report = diff_containers(&old, &new);
+    let fixup_findings: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::Fixups)
+        .collect();
+
+    assert_eq!(fixup_findings.len(), 1, "{fixup_findings:?}");
+    assert_eq!(fixup_findings[0].severity, ChangeSeverity::Warning);
+    assert!(fixup_findings[0].message.contains("changed"));
 }
 
 #[test]

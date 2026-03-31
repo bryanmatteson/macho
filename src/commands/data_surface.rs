@@ -248,7 +248,7 @@ fn print_vtables_text(mach: &MachFile<'_>, args: &VtablesArgs) -> Result<()> {
                     if *value == 0 {
                         "-> [offset-to-top: 0]".to_string()
                     } else {
-                        format!("-> [offset-to-top: {}]", value)
+                        format!("-> [offset-to-top: {value}]")
                     }
                 }
                 macho::data_surface::vtable::SlotTarget::Unknown { value } => {

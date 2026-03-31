@@ -120,7 +120,7 @@ fn graph_serializes_to_json() {
 #[test]
 fn graph_protocol_conforming_classes() {
     let graph = graph_for("/usr/bin/plutil").expect("should have ObjC metadata");
-    for (_, proto) in &graph.protocols {
+    for proto in graph.protocols.values() {
         for cls_name in &proto.conforming_classes {
             assert!(
                 graph.classes.contains_key(cls_name),

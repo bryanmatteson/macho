@@ -74,6 +74,7 @@ fn diff_slice_details(
     diff_symbols(&old.symbols, &new.symbols, arch, findings);
     diff_exports(&old.exports, &new.exports, arch, findings);
     diff_imports(&old.imports, &new.imports, arch, findings);
+    diff_fixups(&old.fixups, &new.fixups, arch, findings);
     diff_objc(&old.objc, &new.objc, arch, findings);
     diff_codesign(old.codesign.as_ref(), new.codesign.as_ref(), arch, findings);
     diff_analysis_issues(&old.analysis_issues, &new.analysis_issues, arch, findings);
@@ -556,6 +557,62 @@ fn diff_imports(
                 message: format!(
                     "import {name} weakness changed: {} -> {}",
                     old_import.weak, new_import.weak
+                ),
+            });
+        }
+    }
+}
+
+fn diff_fixups(
+    old: &[FixupSnapshot],
+    new: &[FixupSnapshot],
+    arch: &Option<String>,
+    findings: &mut Vec<DiffFinding>,
+) {
+    let old_map: BTreeMap<(usize, u64), &FixupSnapshot> = old
+        .iter()
+        .map(|fixup| ((fixup.segment_index, fixup.segment_offset), fixup))
+        .collect();
+    let new_map: BTreeMap<(usize, u64), &FixupSnapshot> = new
+        .iter()
+        .map(|fixup| ((fixup.segment_index, fixup.segment_offset), fixup))
+        .collect();
+
+    for key in old_map.keys() {
+        if !new_map.contains_key(key) {
+            findings.push(DiffFinding {
+                domain: DiffDomain::Fixups,
+                severity: ChangeSeverity::Breaking,
+                arch: arch.clone(),
+                message: format!(
+                    "fixup removed at segment {} offset {:#x}",
+                    key.0, key.1
+                ),
+            });
+        }
+    }
+    for key in new_map.keys() {
+        if !old_map.contains_key(key) {
+            findings.push(DiffFinding {
+                domain: DiffDomain::Fixups,
+                severity: ChangeSeverity::Info,
+                arch: arch.clone(),
+                message: format!("fixup added at segment {} offset {:#x}", key.0, key.1),
+            });
+        }
+    }
+
+    for key in old_map.keys().filter(|key| new_map.contains_key(key)) {
+        let old_fixup = old_map.get(key).copied().unwrap();
+        let new_fixup = new_map.get(key).copied().unwrap();
+        if old_fixup.kind != new_fixup.kind {
+            findings.push(DiffFinding {
+                domain: DiffDomain::Fixups,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!(
+                    "fixup at segment {} offset {:#x} changed: {:?} -> {:?}",
+                    key.0, key.1, old_fixup.kind, new_fixup.kind
                 ),
             });
         }

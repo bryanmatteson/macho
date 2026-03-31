@@ -38,6 +38,7 @@ pub struct SliceSnapshot {
     pub symbols: Vec<SymbolSnapshot>,
     pub exports: Vec<ExportSnapshot>,
     pub imports: Vec<ImportSnapshot>,
+    pub fixups: Vec<FixupSnapshot>,
     pub objc: ObjCSnapshot,
     pub codesign: Option<CodesignSnapshot>,
     pub analysis_issues: Vec<AnalysisIssueSnapshot>,
@@ -163,6 +164,39 @@ pub struct ImportSnapshot {
     pub name: String,
     pub lib_ordinal: i32,
     pub weak: bool,
+}
+
+// -- Chained fixups --
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FixupSnapshot {
+    pub segment_index: usize,
+    pub segment_offset: u64,
+    pub kind: FixupKindSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FixupKindSnapshot {
+    Rebase {
+        target: u64,
+    },
+    Bind {
+        import_index: u32,
+        addend: i64,
+    },
+    AuthRebase {
+        target: u64,
+        diversity: u16,
+        key: u8,
+        addr_div: bool,
+    },
+    AuthBind {
+        import_index: u32,
+        diversity: u16,
+        key: u8,
+        addr_div: bool,
+    },
 }
 
 // -- ObjC --

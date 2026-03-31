@@ -149,6 +149,15 @@ fn snapshot_contains_codesign() {
 }
 
 #[test]
+fn snapshot_contains_chained_fixups() {
+    let snap = snapshot_for("/usr/bin/plutil");
+    assert!(
+        snap.slices.iter().any(|slice| !slice.fixups.is_empty()),
+        "expected at least one chained fixup in plutil snapshot"
+    );
+}
+
+#[test]
 fn snapshot_uuid_is_present() {
     let snap = snapshot_for("/usr/bin/true");
     for slice in &snap.slices {

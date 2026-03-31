@@ -1,6 +1,6 @@
 use macho::analysis::snapshot::{
-    CodesignSnapshot, ContainerFormat, ContainerSnapshot, HeaderSnapshot, ObjCSnapshot,
-    SegmentSnapshot, SliceSnapshot,
+    CodesignSnapshot, ContainerFormat, ContainerSnapshot, FixupSnapshot, HeaderSnapshot,
+    ObjCSnapshot, SegmentSnapshot, SliceSnapshot,
 };
 use macho::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use std::path::PathBuf;
@@ -52,6 +52,7 @@ fn synthetic_audit_snapshot() -> ContainerSnapshot {
             symbols: Vec::new(),
             exports: Vec::new(),
             imports: Vec::new(),
+            fixups: Vec::<FixupSnapshot>::new(),
             objc: ObjCSnapshot {
                 classes: Vec::new(),
                 categories: Vec::new(),

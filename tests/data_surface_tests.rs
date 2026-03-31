@@ -329,8 +329,7 @@ fn vtable_entries_have_valid_metadata() {
         if let Some(ref mangled) = vtable.mangled_name {
             assert!(
                 mangled.contains("ZTV"),
-                "mangled vtable name should contain ZTV: {}",
-                mangled,
+                "mangled vtable name should contain ZTV: {mangled}",
             );
         }
     }
@@ -504,4 +503,285 @@ fn vtable_first_slot_is_offset_to_top() {
             vtable.slots.first().map(|s| &s.target),
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: vtable chained fixup resolution
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regression_vtable_slots_resolve_function_names_on_chained_fixup_binaries() {
+    // Before the fix, vtable slot values on binaries with LC_DYLD_CHAINED_FIXUPS
+    // were raw chained fixup entries (not resolved VAs), so all function pointer
+    // slots were classified as Unknown. After the fix, they should resolve to
+    // named functions.
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let index = VtableIndex::build(mach).expect("build vtable index");
+    assert!(!index.vtables.is_empty());
+
+    // Count function-resolved slots across all vtables
+    let function_slot_count: usize = index
+        .vtables
+        .iter()
+        .flat_map(|v| v.slots.iter())
+        .filter(|s| matches!(&s.target, macho::data_surface::vtable::SlotTarget::Function { .. }))
+        .count();
+
+    let unknown_slot_count: usize = index
+        .vtables
+        .iter()
+        .flat_map(|v| v.slots.iter())
+        .filter(|s| matches!(&s.target, macho::data_surface::vtable::SlotTarget::Unknown { .. }))
+        .count();
+
+    // We should have more function slots than unknown slots (the old code
+    // had ALL slots as Unknown on chained fixup binaries)
+    assert!(
+        function_slot_count > unknown_slot_count,
+        "function slots ({function_slot_count}) should exceed unknown slots ({unknown_slot_count}) \
+         after chained fixup resolution"
+    );
+}
+
+#[test]
+fn regression_vtable_slot1_not_classified_as_pure_virtual() {
+    // Before the fix, slot 1 (typeinfo pointer) was misclassified as PureVirtual
+    // because ___cxa_pure_virtual is an undefined symbol with value 0, and the
+    // raw chained fixup value at the typeinfo slot also happened to be 0.
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let index = VtableIndex::build(mach).expect("build vtable index");
+
+    for vtable in &index.vtables {
+        if vtable.slots.len() >= 2 {
+            assert!(
+                matches!(
+                    &vtable.slots[1].target,
+                    macho::data_surface::vtable::SlotTarget::TypeInfo { .. }
+                ),
+                "slot 1 of vtable {:?} should be TypeInfo, got {:?}",
+                vtable.name,
+                vtable.slots[1].target,
+            );
+        }
+    }
+}
+
+#[test]
+fn regression_vtable_itanium_structure() {
+    // Verify the standard Itanium ABI vtable structure:
+    // slot 0 = offset-to-top, slot 1 = typeinfo, slot 2+ = virtual functions
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let index = VtableIndex::build(mach).expect("build vtable index");
+
+    for vtable in &index.vtables {
+        if vtable.slots.len() < 3 {
+            continue;
+        }
+
+        // Slot 0: OffsetToTop
+        assert!(
+            matches!(
+                &vtable.slots[0].target,
+                macho::data_surface::vtable::SlotTarget::OffsetToTop { .. }
+            ),
+            "vtable {:?} slot 0 should be OffsetToTop",
+            vtable.name,
+        );
+
+        // Slot 1: TypeInfo
+        assert!(
+            matches!(
+                &vtable.slots[1].target,
+                macho::data_surface::vtable::SlotTarget::TypeInfo { .. }
+            ),
+            "vtable {:?} slot 1 should be TypeInfo",
+            vtable.name,
+        );
+
+        // Slot 2+: should be Function, PureVirtual, or Unknown (not OffsetToTop/TypeInfo)
+        for (i, slot) in vtable.slots.iter().enumerate().skip(2) {
+            assert!(
+                !matches!(
+                    &slot.target,
+                    macho::data_surface::vtable::SlotTarget::OffsetToTop { .. }
+                        | macho::data_surface::vtable::SlotTarget::TypeInfo { .. }
+                ),
+                "vtable {:?} slot {} should not be OffsetToTop or TypeInfo (got {:?})",
+                vtable.name,
+                i,
+                slot.target,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: CFString regions should not produce garbage C strings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regression_cfstring_region_does_not_produce_garbage_strings() {
+    // __cfstring contains CFString structs (pointers + metadata), not raw
+    // null-terminated C strings. Before the fix, extract_cstrings was called
+    // on these struct bytes, producing garbage output.
+    let path = "/usr/bin/plutil";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let regions = StringRegions::discover(mach);
+
+    // If the binary has a CFString region, strings_in_region should return
+    // an empty Vec (we skip struct-format sections)
+    for region in &regions.regions {
+        if region.kind == StringRegionKind::CFString {
+            let strings = regions.strings_in_region(mach, region);
+            assert!(
+                strings.is_empty(),
+                "CFString region should not produce C strings (got {} strings)",
+                strings.len(),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression: pure virtual detection uses symbol name, not VA
+// ---------------------------------------------------------------------------
+
+#[test]
+fn regression_pure_virtual_detection_by_import_name() {
+    // Pure virtual slots should be detected by import name matching
+    // (___cxa_pure_virtual), not by VA comparison (which fails because
+    // undefined symbols have VA = 0).
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let index = VtableIndex::build(mach).expect("build vtable index");
+
+    // No slot at index 0 or 1 should be PureVirtual
+    for vtable in &index.vtables {
+        for slot in vtable.slots.iter().take(2) {
+            assert!(
+                !matches!(
+                    &slot.target,
+                    macho::data_surface::vtable::SlotTarget::PureVirtual
+                ),
+                "structural slots (offset-to-top, typeinfo) should never be PureVirtual \
+                 in vtable {:?}",
+                vtable.name,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Name-based section classification priority
+// ---------------------------------------------------------------------------
+
+#[test]
+fn objc_sections_classified_before_type_fallback() {
+    // ObjC sections like __objc_methname have S_CSTRING_LITERALS type but
+    // should be classified as ObjCString, not CString. Name-based matching
+    // must take priority.
+    let path = "/usr/bin/plutil";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let regions = StringRegions::discover(mach);
+
+    for region in &regions.regions {
+        if region.section_name.starts_with("__objc_") {
+            assert_eq!(
+                region.kind,
+                StringRegionKind::ObjCString,
+                "ObjC section {} should be classified as ObjCString, not {:?}",
+                region.section_name,
+                region.kind,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Determinism
+// ---------------------------------------------------------------------------
+
+#[test]
+fn vtable_output_is_deterministic() {
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let index1 = VtableIndex::build(mach).expect("build vtable index");
+    let index2 = VtableIndex::build(mach).expect("build vtable index");
+
+    let json1 = serde_json::to_string(&index1).expect("json");
+    let json2 = serde_json::to_string(&index2).expect("json");
+
+    assert_eq!(json1, json2, "vtable output should be deterministic across runs");
+}
+
+#[test]
+fn string_region_output_is_deterministic() {
+    let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
+    if !std::path::Path::new(path).exists() {
+        eprintln!("skipping: {path} not found");
+        return;
+    }
+    let data = std::fs::read(path).expect("read");
+    let container = first_mach(&data);
+    let mach = get_mach(&container);
+
+    let regions1 = StringRegions::discover(mach);
+    let regions2 = StringRegions::discover(mach);
+
+    let json1 = serde_json::to_string(&regions1).expect("json");
+    let json2 = serde_json::to_string(&regions2).expect("json");
+
+    assert_eq!(json1, json2, "string region output should be deterministic across runs");
 }

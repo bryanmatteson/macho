@@ -1,7 +1,7 @@
 use macho::analysis::snapshot::ContainerSnapshot;
 use macho::analysis::snapshot::{
-    CodesignSnapshot, ContainerFormat, ExportSnapshot, HeaderSnapshot, ImportSnapshot,
-    ObjCSnapshot, SliceSnapshot,
+    CodesignSnapshot, ContainerFormat, ExportSnapshot, FixupSnapshot, HeaderSnapshot,
+    ImportSnapshot, ObjCSnapshot, SliceSnapshot,
 };
 use macho::container_analysis::ContainerReport;
 use macho::container_analysis::parity::compute_parity;
@@ -83,6 +83,7 @@ fn synthetic_cross_slice_snapshot() -> ContainerSnapshot {
                     weak: false,
                 })
                 .collect(),
+            fixups: Vec::<FixupSnapshot>::new(),
             objc: ObjCSnapshot {
                 classes: Vec::new(),
                 categories: Vec::new(),
