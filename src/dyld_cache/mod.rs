@@ -96,7 +96,11 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
         let images_text_offset = read_u64_le(data, IMAGES_TEXT_OFFSET_OFF);
         let images_text_count = read_u64_le(data, IMAGES_TEXT_COUNT_OFF);
         if images_text_count > 0 && images_text_offset > 0 {
-            parse_images_text(data, images_text_offset as usize, images_text_count as usize)?
+            parse_images_text(
+                data,
+                images_text_offset as usize,
+                images_text_count as usize,
+            )?
         } else {
             Vec::new()
         }
@@ -227,10 +231,7 @@ impl DyldCache {
             .ok_or_else(|| Error::Format(format!("image index {index} out of range")))?;
 
         let file_offset = self.va_to_file_offset(image.address).ok_or_else(|| {
-            Error::Address(format!(
-                "image VA {:#x} not in any mapping",
-                image.address
-            ))
+            Error::Address(format!("image VA {:#x} not in any mapping", image.address))
         })?;
 
         let start = file_offset as usize;
