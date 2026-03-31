@@ -244,8 +244,12 @@ fn print_vtables_text(mach: &MachFile<'_>, args: &VtablesArgs) -> Result<()> {
                 macho::data_surface::vtable::SlotTarget::TypeInfo { va } => {
                     format!("-> [typeinfo] ({:#x})", va.0)
                 }
-                macho::data_surface::vtable::SlotTarget::AddressPoint => {
-                    "-> [address point]".to_string()
+                macho::data_surface::vtable::SlotTarget::OffsetToTop { value } => {
+                    if *value == 0 {
+                        "-> [offset-to-top: 0]".to_string()
+                    } else {
+                        format!("-> [offset-to-top: {}]", value)
+                    }
                 }
                 macho::data_surface::vtable::SlotTarget::Unknown { value } => {
                     format!("-> {value:#018x}")

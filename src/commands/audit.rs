@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use macho::analysis::snapshot::ContainerSnapshot;
-use macho::audit::{AuditFinding, AuditReport, AuditSeverity, audit_slice};
+use macho::audit::{AuditFinding, AuditReport, AuditSeverity, audit_snapshot};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ pub fn run(args: AuditArgs) -> Result<()> {
     let min_sev = parse_severity(&args.min_severity)?;
     let fail_sev = args.fail_on.as_deref().map(parse_severity).transpose()?;
 
-    let raw_reports: Vec<AuditReport> = snapshot.slices.iter().map(audit_slice).collect();
+    let raw_reports: Vec<AuditReport> = audit_snapshot(&snapshot);
     let mut reports = raw_reports.clone();
     for report in &mut reports {
         report.findings.retain(|f| f.severity >= min_sev);

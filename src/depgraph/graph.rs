@@ -58,7 +58,7 @@ pub enum ImportProvider {
     SelfImage,
     MainExecutable,
     DynamicLookup,
-    FlatNamespace,
+    WeakLookup,
     Unknown { ordinal: i32 },
 }
 
@@ -69,7 +69,7 @@ impl std::fmt::Display for ImportProvider {
             Self::SelfImage => write!(f, "self"),
             Self::MainExecutable => write!(f, "main-executable"),
             Self::DynamicLookup => write!(f, "dynamic-lookup"),
-            Self::FlatNamespace => write!(f, "flat-namespace"),
+            Self::WeakLookup => write!(f, "weak-lookup"),
             Self::Unknown { ordinal } => write!(f, "unknown({ordinal})"),
         }
     }
@@ -287,7 +287,7 @@ fn resolve_ordinal(ordinal: i32, dylibs: &[NormalizedDylib]) -> ImportProvider {
         0 => ImportProvider::SelfImage,
         -1 => ImportProvider::MainExecutable,
         -2 => ImportProvider::DynamicLookup,
-        -3 => ImportProvider::FlatNamespace,
+        -3 => ImportProvider::WeakLookup,
         n if n > 0 => {
             let idx = n as usize;
             if let Some(dylib) = dylibs.iter().find(|d| d.ordinal == idx) {

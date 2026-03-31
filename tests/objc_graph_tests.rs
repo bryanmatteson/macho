@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use macho::addr::ThinFileOffset;
 use macho::model::container::MachContainer;
 use macho::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
@@ -236,6 +237,44 @@ fn graph_all_methods_matches_effective_lists() {
         node.effective_instance_methods.len()
     );
     assert_eq!(all_methods.class.len(), node.effective_class_methods.len());
+}
+
+#[test]
+fn graph_method_impl_helpers_report_va_and_offset() {
+    let data = std::fs::read("/usr/bin/plutil").expect("read");
+    let container = macho::parse(&data).expect("parse");
+    let mach = match &container {
+        MachContainer::Fat(fat) => &fat.arches()[0].mach,
+        MachContainer::Thin(mach) => mach,
+    };
+    let meta = parse_objc_metadata(mach).expect("should have ObjC metadata");
+    let graph = ObjCGraph::build_from_mach(&meta, mach);
+    let (class_name, method) = graph
+        .classes
+        .values()
+        .find_map(|class| {
+            class
+                .effective_instance_methods
+                .iter()
+                .find(|method| method.imp != 0)
+                .map(|method| (class.name.as_str(), method))
+        })
+        .expect("expected a class method with an implementation");
+
+    let method_va = graph
+        .method_impl_va(class_name, &method.selector, MethodKind::Instance)
+        .expect("expected method VA");
+    assert_eq!(method_va, method.imp);
+
+    let method_offset = graph
+        .method_impl_offset(mach, class_name, &method.selector, MethodKind::Instance)
+        .expect("expected method file offset");
+    let expected_offset = mach
+        .address_map()
+        .va_to_thin_offset(macho::addr::Va(method.imp))
+        .expect("expected address-map translation");
+    assert_eq!(method_offset, expected_offset);
+    assert!(matches!(method_offset, ThinFileOffset(_)));
 }
 
 #[test]

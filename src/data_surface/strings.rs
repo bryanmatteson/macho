@@ -107,7 +107,7 @@ impl StringRegions {
                 continue;
             }
 
-            if section.size == 0 || section.section_type.is_zerofill() {
+            if section.size == 0 {
                 continue;
             }
 
@@ -135,6 +135,12 @@ impl StringRegions {
         let mut matches = Vec::new();
 
         for (region_index, region) in self.regions.iter().enumerate() {
+            // CFString sections contain struct data (pointers + length),
+            // not raw null-terminated C strings. Skip them for C-string search.
+            if region.kind == StringRegionKind::CFString {
+                continue;
+            }
+
             let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -142,7 +148,8 @@ impl StringRegions {
 
             for (value, offset_in_region) in extract_cstrings(bytes) {
                 if value.contains(query) {
-                    let file_offset = ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
+                    let file_offset =
+                        ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
                     let va = Va(region.start.0 + offset_in_region as u64);
                     matches.push(StringMatch {
                         value,
@@ -161,6 +168,10 @@ impl StringRegions {
         let mut matches = Vec::new();
 
         for (region_index, region) in self.regions.iter().enumerate() {
+            if region.kind == StringRegionKind::CFString {
+                continue;
+            }
+
             let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -168,7 +179,8 @@ impl StringRegions {
 
             for (value, offset_in_region) in extract_cstrings(bytes) {
                 if value == query {
-                    let file_offset = ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
+                    let file_offset =
+                        ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
                     let va = Va(region.start.0 + offset_in_region as u64);
                     matches.push(StringMatch {
                         value,
@@ -183,7 +195,16 @@ impl StringRegions {
         matches
     }
 
-    pub fn strings_in_region(&self, mach: &MachFile<'_>, region: &StringRegion) -> Vec<FoundString> {
+    pub fn strings_in_region(
+        &self,
+        mach: &MachFile<'_>,
+        region: &StringRegion,
+    ) -> Vec<FoundString> {
+        // CFString sections contain struct data, not raw C strings.
+        if region.kind == StringRegionKind::CFString {
+            return Vec::new();
+        }
+
         let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
             Ok(b) => b,
             Err(_) => return Vec::new(),
@@ -192,7 +213,8 @@ impl StringRegions {
         extract_cstrings(bytes)
             .into_iter()
             .map(|(value, offset_in_region)| {
-                let file_offset = ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
+                let file_offset =
+                    ThinFileOffset(region.file_offset.0 + offset_in_region as u64);
                 let va = Va(region.start.0 + offset_in_region as u64);
                 FoundString {
                     value,

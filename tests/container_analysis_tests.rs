@@ -94,6 +94,7 @@ fn synthetic_cross_slice_snapshot() -> ContainerSnapshot {
                 hash_type: "sha256".into(),
                 has_entitlements: false,
                 entitlements_xml: None,
+                has_der_entitlements: false,
                 has_cms_signature: true,
                 n_code_slots: 0,
                 code_limit: 0,

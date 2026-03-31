@@ -192,15 +192,17 @@ fn insert_swift_type(
             entry.insert(candidate);
         }
         Entry::Occupied(mut entry) => {
-            if should_replace(entry.get(), &candidate) {
-                entry.insert(merge_swift_types(candidate, entry.get()));
+            let merged = merge_swift_types(entry.get(), candidate);
+            if merged.confidence != entry.get().confidence
+                || merged.kind != entry.get().kind
+                || merged.mangled_name != entry.get().mangled_name
+                || merged.address != entry.get().address
+                || merged.source != entry.get().source
+            {
+                entry.insert(merged);
             }
         }
     }
-}
-
-fn should_replace(existing: &types::SwiftType, candidate: &types::SwiftType) -> bool {
-    confidence_rank(candidate.confidence) > confidence_rank(existing.confidence)
 }
 
 fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
@@ -211,14 +213,29 @@ fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
 }
 
 fn merge_swift_types(
-    mut preferred: types::SwiftType,
-    other: &types::SwiftType,
+    existing: &types::SwiftType,
+    candidate: types::SwiftType,
 ) -> types::SwiftType {
+    let existing_rank = confidence_rank(existing.confidence);
+    let candidate_rank = confidence_rank(candidate.confidence);
+    let mut preferred = if candidate_rank > existing_rank
+        || (candidate_rank == existing_rank
+            && existing.kind == types::SwiftTypeKind::Unknown
+            && candidate.kind != types::SwiftTypeKind::Unknown)
+        || (candidate_rank == existing_rank
+            && (existing.mangled_name.is_none() && candidate.mangled_name.is_some()
+                || existing.address.is_none() && candidate.address.is_some()))
+    {
+        candidate
+    } else {
+        existing.clone()
+    };
+
     if preferred.mangled_name.is_none() {
-        preferred.mangled_name = other.mangled_name.clone();
+        preferred.mangled_name = existing.mangled_name.clone();
     }
     if preferred.address.is_none() {
-        preferred.address = other.address;
+        preferred.address = existing.address;
     }
     preferred
 }
@@ -293,5 +310,37 @@ mod tests {
         assert_eq!(ty.confidence, types::SwiftTypeConfidence::High);
         assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
         assert_eq!(ty.address, Some(0x2000));
+    }
+
+    #[test]
+    fn equal_confidence_merge_keeps_richer_symbol_details() {
+        let mut types = std::collections::BTreeMap::new();
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: None,
+                address: None,
+                source: types::SwiftTypeSource::ObjCMetadata,
+                confidence: types::SwiftTypeConfidence::High,
+            },
+        );
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: Some("$s4Demo6WidgetC".into()),
+                address: Some(0x3000),
+                source: types::SwiftTypeSource::DemangledSymbol,
+                confidence: types::SwiftTypeConfidence::High,
+            },
+        );
+
+        let ty = types.get("Demo.Widget").expect("type should be present");
+        assert_eq!(ty.source, types::SwiftTypeSource::DemangledSymbol);
+        assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
+        assert_eq!(ty.address, Some(0x3000));
     }
 }

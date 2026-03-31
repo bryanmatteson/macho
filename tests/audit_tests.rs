@@ -1,5 +1,8 @@
-use macho::analysis::snapshot::ContainerSnapshot;
-use macho::audit::{AuditSeverity, audit_slice};
+use macho::analysis::snapshot::{
+    CodesignSnapshot, ContainerFormat, ContainerSnapshot, HeaderSnapshot, ObjCSnapshot,
+    SegmentSnapshot, SliceSnapshot,
+};
+use macho::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +23,60 @@ fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
     let container = macho::parse(&data).expect("parse");
     ContainerSnapshot::from_container(&container)
+}
+
+fn synthetic_audit_snapshot() -> ContainerSnapshot {
+    fn slice(arch: &str, signed: bool, pie: bool) -> SliceSnapshot {
+        SliceSnapshot {
+            arch: arch.into(),
+            header: HeaderSnapshot {
+                cpu_type: arch.into(),
+                cpu_subtype: "all".into(),
+                file_type: "MH_EXECUTE".into(),
+                flags: if pie { vec!["PIE".into()] } else { Vec::new() },
+                ncmds: 0,
+                uuid: None,
+                platform: None,
+            },
+            load_commands: Vec::new(),
+            segments: vec![SegmentSnapshot {
+                name: "__TEXT".into(),
+                vm_addr: 0x1000_0000,
+                vm_size: 0x1000,
+                file_offset: 0,
+                file_size: 0x1000,
+                max_prot: "r-x".into(),
+                init_prot: "r-x".into(),
+                sections: Vec::new(),
+            }],
+            symbols: Vec::new(),
+            exports: Vec::new(),
+            imports: Vec::new(),
+            objc: ObjCSnapshot {
+                classes: Vec::new(),
+                categories: Vec::new(),
+                protocols: Vec::new(),
+            },
+            codesign: signed.then_some(CodesignSnapshot {
+                identifier: Some(format!("com.example.{arch}")),
+                team_id: Some("TEAMID".into()),
+                hash_type: "sha256".into(),
+                has_entitlements: true,
+                entitlements_xml: None,
+                has_der_entitlements: true,
+                has_cms_signature: true,
+                n_code_slots: 0,
+                code_limit: 0,
+            }),
+            analysis_issues: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    ContainerSnapshot {
+        format: ContainerFormat::Fat,
+        slices: vec![slice("arm64", true, true), slice("x86_64", false, false)],
+    }
 }
 
 fn malformed_codesign_binary() -> Vec<u8> {
@@ -474,5 +531,31 @@ fn audit_sarif_cli_canonicalizes_relative_input_paths() {
     assert!(
         uri.contains("audit-fixtures"),
         "expected canonicalized file URI to include the relative fixture path, got {uri}"
+    );
+}
+
+#[test]
+fn audit_snapshot_reports_cross_arch_security_drift() {
+    let reports = audit_snapshot(&synthetic_audit_snapshot());
+    let container_report = reports
+        .iter()
+        .find(|report| report.arch == "container")
+        .expect("expected container-level audit report");
+
+    assert!(
+        container_report
+            .findings
+            .iter()
+            .any(|finding| finding.rule_id == "CTR002"),
+        "expected cross-arch drift finding: {:?}",
+        container_report.findings
+    );
+    assert!(
+        container_report.findings[0]
+            .evidence
+            .iter()
+            .any(|evidence| evidence.contains("code signature differs")),
+        "expected code-signature drift evidence: {:?}",
+        container_report.findings[0].evidence
     );
 }

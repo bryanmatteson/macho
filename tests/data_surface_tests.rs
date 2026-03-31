@@ -480,7 +480,7 @@ fn vtable_index_serializes_to_json() {
 }
 
 #[test]
-fn vtable_first_slot_is_address_point_or_zero() {
+fn vtable_first_slot_is_offset_to_top() {
     let path = "/Library/Developer/CommandLineTools/usr/bin/swift-demangle";
     if !std::path::Path::new(path).exists() {
         eprintln!("skipping: {path} not found");
@@ -492,23 +492,16 @@ fn vtable_first_slot_is_address_point_or_zero() {
 
     let index = VtableIndex::build(mach).expect("build vtable index");
 
-    // Most vtables should have their first slot as AddressPoint (offset-to-top = 0)
-    let address_point_count = index
-        .vtables
-        .iter()
-        .filter(|v| {
-            matches!(
-                v.slots.first().map(|s| &s.target),
-                Some(macho::data_surface::vtable::SlotTarget::AddressPoint)
-            )
-        })
-        .count();
-
-    // At least some vtables should follow the standard layout
-    if !index.vtables.is_empty() {
+    // All vtables should have their first slot as OffsetToTop
+    for vtable in &index.vtables {
         assert!(
-            address_point_count > 0,
-            "at least some vtables should have AddressPoint as first slot"
+            matches!(
+                vtable.slots.first().map(|s| &s.target),
+                Some(macho::data_surface::vtable::SlotTarget::OffsetToTop { .. })
+            ),
+            "first slot of vtable {:?} should be OffsetToTop, got {:?}",
+            vtable.name,
+            vtable.slots.first().map(|s| &s.target),
         );
     }
 }

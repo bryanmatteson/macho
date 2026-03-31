@@ -141,6 +141,10 @@ fn snapshot_contains_codesign() {
         let cs = slice.codesign.as_ref().expect("should be signed");
         assert!(cs.identifier.is_some());
         assert!(!cs.hash_type.is_empty());
+        assert_eq!(
+            cs.has_entitlements,
+            cs.entitlements_xml.is_some() || cs.has_der_entitlements
+        );
     }
 }
 

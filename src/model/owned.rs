@@ -191,6 +191,9 @@ pub struct OwnedFatArch {
     pub mach: OwnedMachFile,
 }
 
+type FatArchLayout<'a> = (&'a OwnedFatArch, usize, usize);
+type RebuiltContainer = (Vec<u8>, Vec<(usize, usize)>);
+
 impl OwnedFatBinary {
     /// Create from a parsed fat binary and the full container bytes.
     pub fn from_fat(fat: &crate::model::container::FatBinary<'_>, full_data: &[u8]) -> Self {
@@ -274,7 +277,7 @@ impl OwnedFatBinary {
         Ok(())
     }
 
-    fn build_rebuilt_container(&self) -> Result<(Vec<u8>, Vec<(usize, usize)>)> {
+    fn build_rebuilt_container(&self) -> Result<RebuiltContainer> {
         let arch_entry_size = match self.magic {
             FatMagic::Fat32 => 20usize,
             FatMagic::Fat64 => 32usize,
@@ -300,7 +303,7 @@ impl OwnedFatBinary {
                 Ok::<_, Error>((layouts, end))
             },
         )?;
-        let (layouts, total_size) = layouts;
+        let (layouts, total_size): (Vec<FatArchLayout<'_>>, usize) = layouts;
 
         let mut out = vec![0; total_size];
         write_fat_header(&mut out, self.magic, self.arches.len() as u32);

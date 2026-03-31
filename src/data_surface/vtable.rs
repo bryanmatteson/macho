@@ -32,8 +32,19 @@ pub enum SlotTarget {
     Function { name: String, va: Va },
     PureVirtual,
     TypeInfo { va: Va },
-    AddressPoint,
+    OffsetToTop { value: i64 },
     Unknown { value: u64 },
+}
+
+/// Resolved value at a vtable slot after decoding chained fixups.
+#[derive(Debug)]
+enum ResolvedSlotValue {
+    /// A rebase target: this is the resolved VA the pointer refers to.
+    Address(u64),
+    /// A bind (import): the pointer refers to an imported symbol.
+    Import { name: String },
+    /// No fixup data available; use the raw value directly.
+    Raw(u64),
 }
 
 impl VtableIndex {
@@ -42,31 +53,27 @@ impl VtableIndex {
         let symbols = symtab.symbols();
 
         let ptr_size: u64 = if mach.is_64bit() { 8 } else { 4 };
+        let image_base = mach.image_base().0;
 
         // Build a map of VA -> symbol name for resolving slot targets
-        let mut va_to_name: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
+        let mut va_to_name: std::collections::HashMap<u64, &str> =
+            std::collections::HashMap::new();
         for sym in symbols {
             if sym.is_defined() && sym.value != 0 {
                 va_to_name.insert(sym.value, sym.name);
             }
         }
 
-        // Find pure virtual symbol VA
-        let pure_virtual_va = symbols
-            .iter()
-            .find(|s| {
-                s.name == "___cxa_pure_virtual"
-                    || s.name == "__cxa_pure_virtual"
-                    || s.name == "___cxa_deleted_virtual"
-            })
-            .map(|s| s.value);
+        // Build a fixup map for resolving chained fixup pointers.
+        // On modern arm64/x86_64 binaries, pointer values in __DATA_CONST
+        // are encoded chained fixup entries, not actual VAs.
+        let fixup_map = build_vtable_fixup_map(mach);
 
         // Find typeinfo symbol VAs (symbols starting with __ZTI)
         let typeinfo_vas: std::collections::HashSet<u64> = symbols
             .iter()
-            .filter(|s| {
-                s.name.starts_with("__ZTI") || s.name.starts_with("_ZTI")
-            })
+            .filter(|s| s.name.starts_with("__ZTI") || s.name.starts_with("_ZTI"))
+            .filter(|s| s.is_defined() && s.value != 0)
             .map(|s| s.value)
             .collect();
 
@@ -114,9 +121,10 @@ impl VtableIndex {
                 Va(vtable_va),
                 ptr_size,
                 max_size,
+                image_base,
                 &va_to_name,
-                pure_virtual_va,
                 &typeinfo_vas,
+                &fixup_map,
             ) {
                 Ok(s) => s,
                 Err(_) => continue,
@@ -126,10 +134,7 @@ impl VtableIndex {
                 continue;
             }
 
-            let size = slots
-                .last()
-                .map(|s| s.offset + ptr_size)
-                .unwrap_or(0);
+            let size = slots.last().map(|s| s.offset + ptr_size).unwrap_or(0);
 
             // Demangle the vtable name
             let demangled = demangle_symbol(vtable_sym.name);
@@ -147,11 +152,9 @@ impl VtableIndex {
     }
 
     pub fn find_by_class(&self, class_name: &str) -> Option<&VtableEntry> {
-        self.vtables.iter().find(|v| {
-            v.name
-                .as_ref()
-                .is_some_and(|n| n.contains(class_name))
-        })
+        self.vtables
+            .iter()
+            .find(|v| v.name.as_ref().is_some_and(|n| n.contains(class_name)))
     }
 
     pub fn find_by_va(&self, va: Va) -> Option<&VtableEntry> {
@@ -174,17 +177,127 @@ impl VtableIndex {
     }
 }
 
+/// Resolved fixup at a file offset.
+#[derive(Debug, Clone)]
+enum VtableFixup {
+    /// Rebase: the pointer targets image_base + target.
+    Rebase(u64),
+    /// Bind: the pointer targets an imported symbol.
+    Bind { import_name: String },
+}
+
+/// Build a map from file_offset -> resolved fixup, using chained fixups
+/// if available, otherwise legacy bind/rebase opcodes.
+fn build_vtable_fixup_map(
+    mach: &MachFile<'_>,
+) -> std::collections::HashMap<u64, VtableFixup> {
+    use crate::dyld::chained::parse_chained_fixups;
+    use crate::dyld::types::FixupKind;
+
+    let mut map = std::collections::HashMap::new();
+
+    match parse_chained_fixups(mach) {
+        Ok(fixups) => {
+            for fixup in &fixups.fixups {
+                let seg = match mach.segments().get(fixup.segment_index) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                let file_offset = seg.file_offset.0 + fixup.segment_offset;
+
+                match &fixup.kind {
+                    FixupKind::Rebase { target } | FixupKind::AuthRebase { target, .. } => {
+                        map.insert(file_offset, VtableFixup::Rebase(*target));
+                    }
+                    FixupKind::Bind { import_index, .. }
+                    | FixupKind::AuthBind { import_index, .. } => {
+                        let name = fixups
+                            .imports
+                            .get(*import_index as usize)
+                            .map(|i| i.name.to_string())
+                            .unwrap_or_default();
+                        map.insert(file_offset, VtableFixup::Bind { import_name: name });
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Try legacy bind/rebase opcodes
+            if let Ok((regular, weak, lazy)) = crate::dyld::bind::parse_bind_entries(mach) {
+                for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
+                    if let Some(seg) = mach.segments().get(entry.segment_index) {
+                        let file_offset = seg.file_offset.0 + entry.segment_offset;
+                        map.insert(
+                            file_offset,
+                            VtableFixup::Bind {
+                                import_name: entry.symbol_name.to_string(),
+                            },
+                        );
+                    }
+                }
+            }
+
+            if let Ok(rebases) = crate::dyld::rebase::parse_rebase_entries(mach) {
+                for entry in &rebases {
+                    if let Some(seg) = mach.segments().get(entry.segment_index) {
+                        let file_offset = seg.file_offset.0 + entry.segment_offset;
+                        map.entry(file_offset)
+                            .or_insert(VtableFixup::Rebase(0));
+                    }
+                }
+            }
+        }
+    }
+
+    map
+}
+
+/// Resolve the pointer value at a given file offset using the fixup map.
+fn resolve_slot_value(
+    raw_value: u64,
+    file_offset: u64,
+    image_base: u64,
+    fixup_map: &std::collections::HashMap<u64, VtableFixup>,
+    mach: &MachFile<'_>,
+    endian: crate::io::endian::Endian,
+) -> ResolvedSlotValue {
+    if let Some(fixup) = fixup_map.get(&file_offset) {
+        match fixup {
+            VtableFixup::Rebase(target) if *target != 0 => {
+                ResolvedSlotValue::Address(image_base + target)
+            }
+            VtableFixup::Rebase(_) => {
+                // Legacy rebase sentinel -- read the raw pointer directly
+                // (the linker wrote the correct un-slid VA)
+                let raw = crate::io::pod::read_pod::<u64>(mach.bytes(), file_offset as usize)
+                    .map(|v| endian.interpret_u64(v))
+                    .unwrap_or(raw_value);
+                ResolvedSlotValue::Address(raw)
+            }
+            VtableFixup::Bind { import_name } => ResolvedSlotValue::Import {
+                name: import_name.clone(),
+            },
+        }
+    } else {
+        // No fixup -- use raw value as-is (non-fixup binaries or
+        // the slot was not covered by any fixup chain)
+        ResolvedSlotValue::Raw(raw_value)
+    }
+}
+
 fn read_vtable_slots(
     mach: &MachFile<'_>,
     vtable_va: Va,
     ptr_size: u64,
     max_size: u64,
+    image_base: u64,
     va_to_name: &std::collections::HashMap<u64, &str>,
-    pure_virtual_va: Option<u64>,
     typeinfo_vas: &std::collections::HashSet<u64>,
+    fixup_map: &std::collections::HashMap<u64, VtableFixup>,
 ) -> Result<Vec<VtableSlot>> {
     let endian = mach.endian();
     let max_slots = max_size / ptr_size;
+    let has_fixups = !fixup_map.is_empty();
     let mut slots = Vec::new();
 
     for i in 0..max_slots {
@@ -196,7 +309,7 @@ fn read_vtable_slots(
             Err(_) => break,
         };
 
-        let value = if ptr_size == 8 {
+        let raw_value = if ptr_size == 8 {
             let arr: [u8; 8] = bytes.try_into().map_err(|_| {
                 Error::Format("failed to read 8 bytes for vtable slot".into())
             })?;
@@ -208,20 +321,34 @@ fn read_vtable_slots(
             endian.read_u32(arr) as u64
         };
 
-        let target = classify_slot(
-            value,
-            i,
-            va_to_name,
-            pure_virtual_va,
-            typeinfo_vas,
+        // Resolve the pointer value through the fixup map
+        let file_offset = mach
+            .address_map()
+            .va_to_thin_offset(slot_va)
+            .map(|o| o.0)
+            .unwrap_or(0);
+
+        let resolved = resolve_slot_value(
+            raw_value, file_offset, image_base, fixup_map, mach, endian,
         );
 
-        // Stop if we've read past the address point and hit a clearly
-        // invalid entry (zero after the function pointer region).
-        // The vtable structure is: offset-to-top, typeinfo, then function pointers.
-        // After the function pointers we should stop.
-        if i > 2 && value == 0 {
-            break;
+        let target = classify_slot(
+            &resolved,
+            raw_value,
+            i,
+            va_to_name,
+            typeinfo_vas,
+            has_fixups,
+        );
+
+        // Stop if we've read past the structural header (offset-to-top +
+        // typeinfo) and hit a clearly invalid entry (zero after the
+        // function pointer region).
+        if i > 2 {
+            match &resolved {
+                ResolvedSlotValue::Address(0) | ResolvedSlotValue::Raw(0) => break,
+                _ => {}
+            }
         }
 
         slots.push(VtableSlot {
@@ -235,39 +362,98 @@ fn read_vtable_slots(
 }
 
 fn classify_slot(
-    value: u64,
+    resolved: &ResolvedSlotValue,
+    _raw_value: u64,
     slot_index: u64,
     va_to_name: &std::collections::HashMap<u64, &str>,
-    pure_virtual_va: Option<u64>,
     typeinfo_vas: &std::collections::HashSet<u64>,
+    has_fixups: bool,
 ) -> SlotTarget {
-    // First slot is typically offset-to-top (usually 0)
-    if slot_index == 0 && value == 0 {
-        return SlotTarget::AddressPoint;
+    // First slot is the offset-to-top value (typically 0 for primary vtables,
+    // or a negative offset for secondary base vtables).
+    if slot_index == 0 {
+        // The offset-to-top is a signed integer, not a pointer.
+        // In non-fixup binaries the raw value is the actual offset-to-top.
+        // In fixup binaries, if this slot has no fixup entry, the raw value
+        // is the offset-to-top. If it does have a fixup, the resolved address
+        // minus image_base is the offset-to-top.
+        let value = match resolved {
+            ResolvedSlotValue::Raw(v) => *v as i64,
+            ResolvedSlotValue::Address(v) => *v as i64,
+            ResolvedSlotValue::Import { .. } => 0,
+        };
+        return SlotTarget::OffsetToTop { value: value as i64 };
     }
 
-    // Second slot is typically typeinfo pointer
-    if slot_index == 1 && typeinfo_vas.contains(&value) {
-        return SlotTarget::TypeInfo { va: Va(value) };
-    }
-
-    // Check for pure virtual
-    if let Some(pv_va) = pure_virtual_va {
-        if value == pv_va {
-            return SlotTarget::PureVirtual;
+    // Second slot is the typeinfo pointer.
+    if slot_index == 1 {
+        match resolved {
+            ResolvedSlotValue::Address(va) if typeinfo_vas.contains(va) => {
+                return SlotTarget::TypeInfo { va: Va(*va) };
+            }
+            ResolvedSlotValue::Address(va) if *va != 0 => {
+                // Even if we don't recognize this as a typeinfo symbol,
+                // slot 1 is structurally the typeinfo pointer.
+                return SlotTarget::TypeInfo { va: Va(*va) };
+            }
+            ResolvedSlotValue::Import { .. } => {
+                // Typeinfo bound to an external symbol -- still typeinfo
+                return SlotTarget::TypeInfo { va: Va(0) };
+            }
+            ResolvedSlotValue::Raw(v) if !has_fixups => {
+                if typeinfo_vas.contains(v) || *v != 0 {
+                    return SlotTarget::TypeInfo { va: Va(*v) };
+                }
+                return SlotTarget::TypeInfo { va: Va(0) };
+            }
+            _ => {
+                return SlotTarget::TypeInfo { va: Va(0) };
+            }
         }
     }
 
+    // For slots beyond the header, resolve the target and classify.
+    let effective_va = match resolved {
+        ResolvedSlotValue::Address(va) => *va,
+        ResolvedSlotValue::Import { name } => {
+            // Check if this is a pure virtual or deleted virtual import
+            if is_pure_virtual_name(name) {
+                return SlotTarget::PureVirtual;
+            }
+            // Other imports -- report as function with the import name
+            let demangled = demangle_symbol(name).unwrap_or_else(|| name.clone());
+            return SlotTarget::Function {
+                name: demangled,
+                va: Va(0),
+            };
+        }
+        ResolvedSlotValue::Raw(v) => *v,
+    };
+
     // Check for known function symbol
-    if let Some(name) = va_to_name.get(&value) {
+    if let Some(name) = va_to_name.get(&effective_va) {
+        // Check if this symbol is actually pure virtual
+        if is_pure_virtual_name(name) {
+            return SlotTarget::PureVirtual;
+        }
         let demangled = demangle_symbol(name).unwrap_or_else(|| (*name).to_owned());
         return SlotTarget::Function {
             name: demangled,
-            va: Va(value),
+            va: Va(effective_va),
         };
     }
 
-    // If the value looks like a reasonable VA (non-zero in code regions),
-    // treat it as an unknown pointer
-    SlotTarget::Unknown { value }
+    // If the value looks like a reasonable VA (non-zero), treat as unknown pointer
+    SlotTarget::Unknown {
+        value: effective_va,
+    }
+}
+
+/// Check if a symbol name refers to __cxa_pure_virtual or __cxa_deleted_virtual.
+fn is_pure_virtual_name(name: &str) -> bool {
+    let stripped = name.strip_prefix('_').unwrap_or(name);
+    stripped == "__cxa_pure_virtual"
+        || stripped == "_cxa_pure_virtual"
+        || stripped == "__cxa_deleted_virtual"
+        || stripped == "_cxa_deleted_virtual"
 }

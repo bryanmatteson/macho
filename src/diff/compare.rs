@@ -530,6 +530,36 @@ fn diff_imports(
             message: format!("import added: {added}"),
         });
     }
+
+    let old_map: BTreeMap<&str, &ImportSnapshot> = old.iter().map(|import| (import.name.as_str(), import)).collect();
+    let new_map: BTreeMap<&str, &ImportSnapshot> = new.iter().map(|import| (import.name.as_str(), import)).collect();
+    for name in old_names.intersection(&new_names) {
+        let old_import = old_map.get(name).copied().unwrap();
+        let new_import = new_map.get(name).copied().unwrap();
+
+        if old_import.lib_ordinal != new_import.lib_ordinal {
+            findings.push(DiffFinding {
+                domain: DiffDomain::Imports,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!(
+                    "import {name} library ordinal changed: {} -> {}",
+                    old_import.lib_ordinal, new_import.lib_ordinal
+                ),
+            });
+        }
+        if old_import.weak != new_import.weak {
+            findings.push(DiffFinding {
+                domain: DiffDomain::Imports,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!(
+                    "import {name} weakness changed: {} -> {}",
+                    old_import.weak, new_import.weak
+                ),
+            });
+        }
+    }
 }
 
 fn diff_objc(
@@ -752,6 +782,17 @@ fn diff_codesign(
                     ),
                 });
             }
+            if o.has_der_entitlements != n.has_der_entitlements {
+                findings.push(DiffFinding {
+                    domain: DiffDomain::Codesign,
+                    severity: ChangeSeverity::Warning,
+                    arch: arch.clone(),
+                    message: format!(
+                        "DER entitlements presence changed: {} -> {}",
+                        o.has_der_entitlements, n.has_der_entitlements
+                    ),
+                });
+            }
             if o.has_cms_signature != n.has_cms_signature {
                 findings.push(DiffFinding {
                     domain: DiffDomain::Codesign,
@@ -774,6 +815,13 @@ fn diff_codesign(
                             message: "entitlements content changed".to_string(),
                         });
                     }
+                } else if o.entitlements_xml != n.entitlements_xml {
+                    findings.push(DiffFinding {
+                        domain: DiffDomain::Codesign,
+                        severity: ChangeSeverity::Warning,
+                        arch: arch.clone(),
+                        message: "entitlements representation changed".to_string(),
+                    });
                 }
             }
         }

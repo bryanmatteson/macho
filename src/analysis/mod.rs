@@ -1,6 +1,7 @@
 pub mod snapshot;
 
 use crate::codesign::parse_code_signature;
+use crate::dyld::bind::parse_bind_entries;
 use crate::constants::VmProtection;
 use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
@@ -221,34 +222,86 @@ fn extract_exports(
         .collect()
 }
 
+fn collect_imports(mut imports: Vec<ImportSnapshot>) -> Vec<ImportSnapshot> {
+    imports.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.lib_ordinal.cmp(&right.lib_ordinal))
+            .then(left.weak.cmp(&right.weak))
+    });
+    imports.dedup_by(|left, right| {
+        left.name == right.name && left.lib_ordinal == right.lib_ordinal && left.weak == right.weak
+    });
+    imports
+}
+
+fn has_legacy_bind_info(mach: &MachFile<'_>) -> bool {
+    mach.load_commands().iter().any(|lc| match &lc.kind {
+        LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => {
+            data.bind_size > 0 || data.weak_bind_size > 0 || data.lazy_bind_size > 0
+        }
+        _ => false,
+    })
+}
+
 fn extract_imports(
     mach: &MachFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Vec<ImportSnapshot> {
-    if !has_chained_fixups(mach) {
+    if !has_chained_fixups(mach) && !has_legacy_bind_info(mach) {
         return Vec::new();
     }
 
-    let fixups = match parse_chained_fixups(mach) {
-        Ok(f) => f,
+    match extract_imports_from_dynamic_linker(mach) {
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
                 "imports",
-                format!("failed to parse chained fixups: {err}"),
+                err,
             );
             return Vec::new();
         }
-    };
-    fixups
-        .imports
-        .iter()
-        .map(|imp| ImportSnapshot {
-            name: imp.name.to_string(),
-            lib_ordinal: imp.lib_ordinal,
-            weak: imp.weak,
-        })
-        .collect()
+        Ok(imports) => imports,
+    }
+}
+
+fn extract_imports_from_dynamic_linker(
+    mach: &MachFile<'_>,
+) -> std::result::Result<Vec<ImportSnapshot>, String> {
+    if has_chained_fixups(mach) {
+        let fixups = parse_chained_fixups(mach)
+            .map_err(|err| format!("failed to parse chained fixups: {err}"))?;
+        return Ok(collect_imports(
+            fixups
+                .imports
+                .iter()
+                .map(|imp| ImportSnapshot {
+                    name: imp.name.to_string(),
+                    lib_ordinal: imp.lib_ordinal,
+                    weak: imp.weak,
+                })
+                .collect(),
+        ));
+    }
+
+    if has_legacy_bind_info(mach) {
+        let (regular, weak, lazy) =
+            parse_bind_entries(mach).map_err(|err| format!("failed to parse legacy bind info: {err}"))?;
+        return Ok(collect_imports(
+            regular
+                .into_iter()
+                .chain(weak)
+                .chain(lazy)
+                .map(|bind| ImportSnapshot {
+                    name: bind.symbol_name.to_string(),
+                    lib_ordinal: bind.lib_ordinal as i32,
+                    weak: bind.weak,
+                })
+                .collect(),
+        ));
+    }
+
+    Ok(Vec::new())
 }
 
 fn extract_objc(
@@ -360,8 +413,9 @@ fn extract_codesign(
         identifier: cd.identifier.map(|s| s.to_string()),
         team_id: cd.team_id.map(|s| s.to_string()),
         hash_type: cd.hash_type.name().to_string(),
-        has_entitlements: sig.entitlements_xml().is_some(),
+        has_entitlements: sig.entitlements_xml().is_some() || sig.entitlements_der().is_some(),
         entitlements_xml: sig.entitlements_xml().map(|s| s.to_string()),
+        has_der_entitlements: sig.entitlements_der().is_some(),
         has_cms_signature: sig.cms_signature_present(),
         n_code_slots: cd.n_code_slots,
         code_limit: cd.code_limit as u64,

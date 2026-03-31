@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::addr::map::AddressMap;
 use crate::addr::types::{ThinFileOffset, Va};
 use crate::dyld::exports::parse_exports;
@@ -60,10 +62,15 @@ impl SymbolRangeIndex {
     pub fn build(mach: &MachFile<'_>) -> Result<Self> {
         let mut raw: Vec<RawEntry> = Vec::new();
 
+        // Track nlist VAs in a HashSet for O(1) dedup checks instead of O(n)
+        // linear scans per entry.
+        let mut nlist_vas: HashSet<u64> = HashSet::new();
+
         // Collect defined nlist symbols
         if let Ok(symtab) = parse_symbol_table(mach) {
             for sym in symtab.symbols() {
                 if sym.sym_type == SymbolType::Section && sym.value != 0 {
+                    nlist_vas.insert(sym.value);
                     raw.push(RawEntry {
                         va: Va(sym.value),
                         entity: CodeEntity::Symbol {
@@ -89,16 +96,12 @@ impl SymbolRangeIndex {
                 if addr == 0 {
                     continue;
                 }
-                let va = Va(addr);
-                // Skip if we already have an nlist at this exact address
-                if raw
-                    .iter()
-                    .any(|e| e.va == va && e.source == RangeSource::Nlist)
-                {
+                // O(1) check instead of O(n) linear scan
+                if nlist_vas.contains(&addr) {
                     continue;
                 }
                 raw.push(RawEntry {
-                    va,
+                    va: Va(addr),
                     entity: CodeEntity::Export {
                         name: exp.name.clone(),
                     },
@@ -112,13 +115,7 @@ impl SymbolRangeIndex {
         if let Ok(objc) = parse_objc_metadata(mach) {
             for class in &objc.classes {
                 for method in &class.instance_methods {
-                    if method.imp.0 != 0 {
-                        if raw
-                            .iter()
-                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
-                        {
-                            continue;
-                        }
+                    if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -132,13 +129,7 @@ impl SymbolRangeIndex {
                     }
                 }
                 for method in &class.class_methods {
-                    if method.imp.0 != 0 {
-                        if raw
-                            .iter()
-                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
-                        {
-                            continue;
-                        }
+                    if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -154,13 +145,7 @@ impl SymbolRangeIndex {
             }
             for cat in &objc.categories {
                 for method in &cat.instance_methods {
-                    if method.imp.0 != 0 {
-                        if raw
-                            .iter()
-                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
-                        {
-                            continue;
-                        }
+                    if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -174,13 +159,7 @@ impl SymbolRangeIndex {
                     }
                 }
                 for method in &cat.class_methods {
-                    if method.imp.0 != 0 {
-                        if raw
-                            .iter()
-                            .any(|e| e.va == method.imp && e.source == RangeSource::Nlist)
-                        {
-                            continue;
-                        }
+                    if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -291,11 +270,78 @@ impl SymbolRangeIndex {
 }
 
 fn find_section_end(section_ends: &[(Va, Va)], va: Va) -> Option<Va> {
-    // Find the section that contains this VA
-    for &(start, end) in section_ends {
-        if va >= start && va < end {
-            return Some(end);
-        }
+    // Binary search for the section containing this VA. The array is sorted
+    // by section start address. We find the last section whose start <= va,
+    // then verify va < end.
+    let idx = section_ends.partition_point(|&(start, _)| start <= va);
+    if idx == 0 {
+        return None;
     }
-    None
+    let (start, end) = section_ends[idx - 1];
+    if va >= start && va < end {
+        Some(end)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_section_end_empty() {
+        assert_eq!(find_section_end(&[], Va(0x1000)), None);
+    }
+
+    #[test]
+    fn find_section_end_before_all_sections() {
+        let sections = vec![(Va(0x2000), Va(0x3000))];
+        assert_eq!(find_section_end(&sections, Va(0x1000)), None);
+    }
+
+    #[test]
+    fn find_section_end_at_section_start() {
+        let sections = vec![(Va(0x2000), Va(0x3000))];
+        assert_eq!(find_section_end(&sections, Va(0x2000)), Some(Va(0x3000)));
+    }
+
+    #[test]
+    fn find_section_end_in_middle_of_section() {
+        let sections = vec![(Va(0x2000), Va(0x3000))];
+        assert_eq!(find_section_end(&sections, Va(0x2800)), Some(Va(0x3000)));
+    }
+
+    #[test]
+    fn find_section_end_at_last_byte() {
+        let sections = vec![(Va(0x2000), Va(0x3000))];
+        // VA 0x2FFF is the last byte in the section [0x2000, 0x3000)
+        assert_eq!(find_section_end(&sections, Va(0x2FFF)), Some(Va(0x3000)));
+    }
+
+    #[test]
+    fn find_section_end_at_section_end_returns_none() {
+        let sections = vec![(Va(0x2000), Va(0x3000))];
+        // VA 0x3000 is past the section end
+        assert_eq!(find_section_end(&sections, Va(0x3000)), None);
+    }
+
+    #[test]
+    fn find_section_end_gap_between_sections() {
+        let sections = vec![(Va(0x1000), Va(0x2000)), (Va(0x3000), Va(0x4000))];
+        // VA 0x2500 is in the gap between sections
+        assert_eq!(find_section_end(&sections, Va(0x2500)), None);
+    }
+
+    #[test]
+    fn find_section_end_multiple_sections() {
+        let sections = vec![
+            (Va(0x1000), Va(0x2000)),
+            (Va(0x2000), Va(0x3000)),
+            (Va(0x4000), Va(0x5000)),
+        ];
+        assert_eq!(find_section_end(&sections, Va(0x1500)), Some(Va(0x2000)));
+        assert_eq!(find_section_end(&sections, Va(0x2000)), Some(Va(0x3000)));
+        assert_eq!(find_section_end(&sections, Va(0x4800)), Some(Va(0x5000)));
+    }
 }

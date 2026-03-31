@@ -1,6 +1,51 @@
 use macho::edit::resign::ResignPlan;
 use macho::edit::transaction::PatchTransaction;
 use macho::model::container::MachContainer;
+use macho::parse;
+
+fn malformed_codesign_binary() -> Vec<u8> {
+    const MH_MAGIC_64: u32 = 0xFEEDFACF;
+    const CPU_TYPE_ARM64: u32 = 0x0100000C;
+    const MH_EXECUTE: u32 = 2;
+    const LC_SEGMENT_64: u32 = 0x19;
+    const LC_CODE_SIGNATURE: u32 = 0x1D;
+
+    let code_sig_offset = 32u32 + 72 + 16;
+    let code_sig_size = 8u32;
+    let total_size = code_sig_offset + code_sig_size;
+
+    let mut data = Vec::new();
+    data.extend_from_slice(&MH_MAGIC_64.to_le_bytes());
+    data.extend_from_slice(&(CPU_TYPE_ARM64 as i32).to_le_bytes());
+    data.extend_from_slice(&0i32.to_le_bytes());
+    data.extend_from_slice(&MH_EXECUTE.to_le_bytes());
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&88u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    data.extend_from_slice(&LC_SEGMENT_64.to_le_bytes());
+    data.extend_from_slice(&72u32.to_le_bytes());
+    let mut segname = [0u8; 16];
+    segname[..6].copy_from_slice(b"__TEXT");
+    data.extend_from_slice(&segname);
+    data.extend_from_slice(&0x1000_0000u64.to_le_bytes());
+    data.extend_from_slice(&0x1000u64.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&(total_size as u64).to_le_bytes());
+    data.extend_from_slice(&5i32.to_le_bytes());
+    data.extend_from_slice(&5i32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+
+    data.extend_from_slice(&LC_CODE_SIGNATURE.to_le_bytes());
+    data.extend_from_slice(&16u32.to_le_bytes());
+    data.extend_from_slice(&code_sig_offset.to_le_bytes());
+    data.extend_from_slice(&code_sig_size.to_le_bytes());
+    data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0, 1, 2, 3]);
+
+    data
+}
 
 #[test]
 fn resign_plan_for_signed_binary() {
@@ -87,4 +132,16 @@ fn resign_plan_for_unsigned_binary_is_explicit() {
     assert!(plan.identifier.is_none());
     assert!(!plan.has_cms_signature);
     assert!(format!("{plan}").contains("no re-signing needed"));
+}
+
+#[test]
+fn resign_plan_reports_unreadable_signature_as_signed() {
+    let data = malformed_codesign_binary();
+    let container = parse(&data).expect("parse malformed binary");
+    let mach = container.first_mach();
+
+    let plan = ResignPlan::from_mach(mach);
+    assert!(plan.was_signed, "LC_CODE_SIGNATURE should still count as signed");
+    assert!(plan.signature_parse_error.is_some());
+    assert!(format!("{plan}").contains("Signature parse error"));
 }

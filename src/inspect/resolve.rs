@@ -4,12 +4,14 @@ use super::ImageInfo;
 /// in a dylib install name or rpath entry.
 ///
 /// - `@rpath/Foo.framework/Foo` is expanded by trying each rpath from
-///   `image_info.rpaths`, returning the first candidate with `@rpath`
+///   `image_info.rpaths` in order, returning the first candidate with `@rpath`
 ///   replaced. If no rpaths exist, the path is returned unchanged.
 /// - `@loader_path/...` is replaced with the directory of `loader_path`.
 /// - `@executable_path/...` is replaced with the directory of `executable_path`.
 ///
 /// If the path contains no special prefix it is returned unchanged.
+///
+/// To obtain all possible rpath expansions, use [`resolve_all_rpaths`].
 pub fn resolve_path(
     path: &str,
     image_info: &ImageInfo,
@@ -25,6 +27,38 @@ pub fn resolve_path(
     }
 
     resolve_single_variable(path, loader_path, executable_path)
+}
+
+/// Expand `@rpath/...` against every rpath in `image_info.rpaths`, returning
+/// all candidate paths. Each rpath entry is itself resolved for
+/// `@loader_path` / `@executable_path` before substitution.
+///
+/// If `path` does not start with `@rpath/`, returns a single-element vec with
+/// the result of [`resolve_path`].
+///
+/// Returns an empty vec only when the path starts with `@rpath/` and there are
+/// no rpaths in the image.
+pub fn resolve_all_rpaths(
+    path: &str,
+    image_info: &ImageInfo,
+    loader_path: Option<&str>,
+    executable_path: Option<&str>,
+) -> Vec<String> {
+    if let Some(suffix) = path.strip_prefix("@rpath/") {
+        if image_info.rpaths.is_empty() {
+            return Vec::new();
+        }
+        image_info
+            .rpaths
+            .iter()
+            .map(|rpath| {
+                let resolved = resolve_single_variable(rpath, loader_path, executable_path);
+                format!("{resolved}/{suffix}")
+            })
+            .collect()
+    } else {
+        vec![resolve_single_variable(path, loader_path, executable_path)]
+    }
 }
 
 fn resolve_single_variable(
@@ -140,5 +174,56 @@ mod tests {
         let info = dummy_info(vec!["/opt/lib".to_string()]);
         let result = resolve_path("@rpath/libfoo.dylib", &info, None, None);
         assert_eq!(result, "/opt/lib/libfoo.dylib");
+    }
+
+    #[test]
+    fn resolve_all_rpaths_multiple() {
+        let info = dummy_info(vec![
+            "/opt/lib".to_string(),
+            "/usr/local/lib".to_string(),
+            "@loader_path/../Frameworks".to_string(),
+        ]);
+        let result = resolve_all_rpaths(
+            "@rpath/libfoo.dylib",
+            &info,
+            Some("/Applications/App.app/Contents/MacOS/App"),
+            None,
+        );
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0], "/opt/lib/libfoo.dylib");
+        assert_eq!(result[1], "/usr/local/lib/libfoo.dylib");
+        assert_eq!(
+            result[2],
+            "/Applications/App.app/Contents/MacOS/../Frameworks/libfoo.dylib"
+        );
+    }
+
+    #[test]
+    fn resolve_all_rpaths_empty() {
+        let info = dummy_info(Vec::new());
+        let result = resolve_all_rpaths("@rpath/libfoo.dylib", &info, None, None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_all_rpaths_non_rpath_path() {
+        let info = dummy_info(vec!["/opt/lib".to_string()]);
+        let result = resolve_all_rpaths("/usr/lib/libSystem.B.dylib", &info, None, None);
+        assert_eq!(result, vec!["/usr/lib/libSystem.B.dylib"]);
+    }
+
+    #[test]
+    fn resolve_rpath_with_executable_path_in_rpath() {
+        let info = dummy_info(vec!["@executable_path/../Frameworks".to_string()]);
+        let result = resolve_path(
+            "@rpath/Foo.framework/Foo",
+            &info,
+            None,
+            Some("/Applications/App.app/Contents/MacOS/App"),
+        );
+        assert_eq!(
+            result,
+            "/Applications/App.app/Contents/MacOS/../Frameworks/Foo.framework/Foo"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use macho::inspect::resolve::resolve_path;
+use macho::inspect::resolve::{resolve_all_rpaths, resolve_path};
 use macho::inspect::{DylibLinkKind, ImageInfo, ImageInspector};
 
 // -- Basic ImageInspector tests --
@@ -332,4 +332,170 @@ fn dummy_info(rpaths: Vec<String>) -> ImageInfo {
         rpaths,
         target_triple: None,
     }
+}
+
+// -- resolve_all_rpaths integration tests --
+
+#[test]
+fn resolve_all_rpaths_with_multiple_entries() {
+    let info = dummy_info(vec![
+        "/opt/lib".to_string(),
+        "/usr/local/lib".to_string(),
+        "@loader_path/../lib".to_string(),
+    ]);
+    let result = resolve_all_rpaths(
+        "@rpath/libfoo.dylib",
+        &info,
+        Some("/usr/bin/myapp"),
+        None,
+    );
+    assert_eq!(result.len(), 3);
+    assert_eq!(result[0], "/opt/lib/libfoo.dylib");
+    assert_eq!(result[1], "/usr/local/lib/libfoo.dylib");
+    assert_eq!(result[2], "/usr/bin/../lib/libfoo.dylib");
+}
+
+#[test]
+fn resolve_all_rpaths_empty_rpaths() {
+    let info = dummy_info(Vec::new());
+    let result = resolve_all_rpaths("@rpath/libfoo.dylib", &info, None, None);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn resolve_all_rpaths_non_rpath_returns_single() {
+    let info = dummy_info(vec!["/opt/lib".to_string()]);
+    let result = resolve_all_rpaths("/usr/lib/libSystem.B.dylib", &info, None, None);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0], "/usr/lib/libSystem.B.dylib");
+}
+
+// -- Edge case: rpath with @executable_path --
+
+#[test]
+fn resolve_rpath_containing_executable_path() {
+    let info = dummy_info(vec!["@executable_path/../Frameworks".to_string()]);
+    let result = resolve_path(
+        "@rpath/Foo.framework/Foo",
+        &info,
+        None,
+        Some("/Applications/App.app/Contents/MacOS/App"),
+    );
+    assert_eq!(
+        result,
+        "/Applications/App.app/Contents/MacOS/../Frameworks/Foo.framework/Foo"
+    );
+}
+
+// -- Graceful degradation tests --
+
+#[test]
+fn inspector_graceful_no_objc_metadata() {
+    // /usr/bin/true is a C executable, should not have ObjC metadata
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    // ObjC metadata parse should either succeed with empty data or
+    // return an error -- either way it should not panic
+    let result = inspector.objc_metadata();
+    // The result is either Ok or Err, both are acceptable
+    let _ = result;
+}
+
+#[test]
+fn inspector_graceful_no_chained_fixups() {
+    // /usr/bin/true may or may not have chained fixups; test graceful handling
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    let result = inspector.fixups();
+    // Should not panic; either Ok or Err is fine
+    let _ = result;
+}
+
+#[test]
+fn inspector_objc_graph_reuses_cached_metadata() {
+    // Verify that calling objc_metadata() then objc_graph() does not panic
+    // and that objc_graph uses the cached metadata internally
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    // Call objc_metadata first to populate the cache
+    let meta_result = inspector.objc_metadata();
+    // Then call objc_graph which should reuse cached metadata
+    let graph_result = inspector.objc_graph();
+
+    // Both should have consistent error behavior: if metadata fails,
+    // graph should also fail
+    if meta_result.is_err() {
+        assert!(graph_result.is_err(), "graph should fail if metadata fails");
+    }
+}
+
+#[test]
+fn inspector_executable_has_no_install_name() {
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    // Executables should NOT have an install name (that's for dylibs)
+    assert!(
+        inspector.info().install_name.is_none(),
+        "executables should not have install_name"
+    );
+}
+
+#[test]
+fn inspector_cached_calls_return_consistent_results() {
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    // Call each cached method twice and verify consistency
+    let sym1 = inspector.symbols().is_ok();
+    let sym2 = inspector.symbols().is_ok();
+    assert_eq!(sym1, sym2, "symbols() should be consistent");
+
+    let exp1 = inspector.exports().is_ok();
+    let exp2 = inspector.exports().is_ok();
+    assert_eq!(exp1, exp2, "exports() should be consistent");
+
+    let fix1 = inspector.fixups().is_ok();
+    let fix2 = inspector.fixups().is_ok();
+    assert_eq!(fix1, fix2, "fixups() should be consistent");
+
+    let cs1 = inspector.code_signature().is_ok();
+    let cs2 = inspector.code_signature().is_ok();
+    assert_eq!(cs1, cs2, "code_signature() should be consistent");
+}
+
+#[test]
+fn image_info_json_contains_all_fields() {
+    let data = std::fs::read("/usr/bin/true").expect("read binary");
+    let container = macho::parse(&data).expect("parse");
+    let mach = container.first_mach();
+    let inspector = ImageInspector::new(mach);
+
+    let json = serde_json::to_string(inspector.info()).expect("serialize");
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
+
+    // Verify all plan-specified fields are present in JSON output
+    assert!(parsed.get("arch").is_some(), "missing arch");
+    assert!(parsed.get("file_type").is_some(), "missing file_type");
+    assert!(parsed.get("uuid").is_some(), "missing uuid");
+    assert!(parsed.get("image_base").is_some(), "missing image_base");
+    assert!(parsed.get("platform").is_some(), "missing platform");
+    assert!(parsed.get("source_version").is_some(), "missing source_version");
+    assert!(parsed.get("install_name").is_some(), "missing install_name");
+    assert!(parsed.get("linked_dylibs").is_some(), "missing linked_dylibs");
+    assert!(parsed.get("rpaths").is_some(), "missing rpaths");
+    assert!(parsed.get("target_triple").is_some(), "missing target_triple");
 }

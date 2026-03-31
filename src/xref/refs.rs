@@ -65,6 +65,11 @@ impl XrefIndex {
             .take_while(move |r| r.source == source)
     }
 
+    /// Find all xrefs whose target is the given internal VA.
+    ///
+    /// NOTE: This performs an O(n) linear scan because refs are sorted by
+    /// source address, not target. For performance-sensitive callers that
+    /// need reverse lookups, consider building a secondary index externally.
     pub fn refs_to(&self, target: Va) -> impl Iterator<Item = &Xref> {
         self.refs.iter().filter(move |r| match &r.target {
             XrefTarget::Internal(va) => *va == target,

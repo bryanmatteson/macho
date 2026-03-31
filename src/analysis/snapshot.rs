@@ -220,6 +220,7 @@ pub struct CodesignSnapshot {
     pub hash_type: String,
     pub has_entitlements: bool,
     pub entitlements_xml: Option<String>,
+    pub has_der_entitlements: bool,
     pub has_cms_signature: bool,
     pub n_code_slots: u32,
     pub code_limit: u64,

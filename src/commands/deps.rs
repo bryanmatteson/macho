@@ -57,7 +57,11 @@ pub fn run(args: DepsArgs) -> Result<()> {
                 if fat.arches().len() > 1 {
                     println!("=== {name} ===");
                 }
-                let prov_mach = provider.map(|c| c.first_mach());
+                // Try to match provider arch to target arch; fall back to first slice
+                let prov_mach = provider.map(|c| {
+                    c.find_arch(arch.mach.header().cpu_type)
+                        .unwrap_or_else(|| c.first_mach())
+                });
                 print_deps(
                     &arch.mach,
                     &args.path.display().to_string(),
@@ -105,13 +109,13 @@ fn print_deps(
     let mut self_count = 0usize;
     let mut main_count = 0usize;
     let mut dynamic_count = 0usize;
-    let mut flat_count = 0usize;
+    let mut weak_lookup_count = 0usize;
     for imp in &graph.imports {
         match &imp.provider {
             ImportProvider::SelfImage => self_count += 1,
             ImportProvider::MainExecutable => main_count += 1,
             ImportProvider::DynamicLookup => dynamic_count += 1,
-            ImportProvider::FlatNamespace => flat_count += 1,
+            ImportProvider::WeakLookup => weak_lookup_count += 1,
             _ => {}
         }
     }
@@ -132,8 +136,8 @@ fn print_deps(
     if dynamic_count > 0 {
         println!("  dynamic-lookup: {dynamic_count}");
     }
-    if flat_count > 0 {
-        println!("  flat-namespace: {flat_count}");
+    if weak_lookup_count > 0 {
+        println!("  weak-lookup: {weak_lookup_count}");
     }
 
     let issues = graph.validate();

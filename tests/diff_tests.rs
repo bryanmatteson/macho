@@ -79,6 +79,7 @@ fn synthetic_signed_snapshot() -> ContainerSnapshot {
         hash_type: "sha256".into(),
         has_entitlements: false,
         entitlements_xml: None,
+        has_der_entitlements: false,
         has_cms_signature: true,
         n_code_slots: 0,
         code_limit: 0,
@@ -415,6 +416,68 @@ fn diff_skips_code_signature_load_command_when_codesign_state_changes() {
             .findings
             .iter()
             .map(|finding| (&finding.domain, &finding.message))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn diff_reports_import_metadata_changes() {
+    let mut old = synthetic_snapshot();
+    old.slices[0].imports.push(macho::analysis::snapshot::ImportSnapshot {
+        name: "_objc_msgSend".into(),
+        lib_ordinal: 1,
+        weak: false,
+    });
+
+    let mut new = synthetic_snapshot();
+    new.slices[0].imports.push(macho::analysis::snapshot::ImportSnapshot {
+        name: "_objc_msgSend".into(),
+        lib_ordinal: 2,
+        weak: true,
+    });
+
+    let report = diff_containers(&old, &new);
+    let import_findings: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|finding| finding.domain == DiffDomain::Imports)
+        .collect();
+
+    assert!(
+        import_findings
+            .iter()
+            .any(|finding| finding.message.contains("library ordinal changed")),
+        "missing ordinal-change finding: {import_findings:?}"
+    );
+    assert!(
+        import_findings
+            .iter()
+            .any(|finding| finding.message.contains("weakness changed")),
+        "missing weak-import finding: {import_findings:?}"
+    );
+}
+
+#[test]
+fn diff_reports_der_entitlements_changes() {
+    let mut old = synthetic_signed_snapshot();
+    old.slices[0].codesign.as_mut().unwrap().has_entitlements = true;
+
+    let mut new = synthetic_signed_snapshot();
+    let codesign = new.slices[0].codesign.as_mut().unwrap();
+    codesign.has_entitlements = true;
+    codesign.has_der_entitlements = true;
+
+    let report = diff_containers(&old, &new);
+    assert!(
+        report
+            .findings
+            .iter()
+            .any(|finding| finding.message.contains("DER entitlements presence changed")),
+        "missing DER-entitlements diff: {:?}",
+        report
+            .findings
+            .iter()
+            .map(|finding| &finding.message)
             .collect::<Vec<_>>()
     );
 }

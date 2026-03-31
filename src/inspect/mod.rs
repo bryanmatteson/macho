@@ -93,8 +93,8 @@ impl<'data> ImageInspector<'data> {
     pub fn objc_graph(&self) -> Result<&ObjCGraph> {
         self.objc_graph
             .get_or_init(|| {
-                let meta = parse_objc_metadata(self.mach)?;
-                Ok(ObjCGraph::build_from_mach(&meta, self.mach))
+                let meta = self.objc_metadata()?;
+                Ok(ObjCGraph::build_from_mach(meta, self.mach))
             })
             .as_ref()
             .map_err(|e| e.clone())

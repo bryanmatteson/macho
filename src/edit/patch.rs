@@ -732,7 +732,7 @@ pub fn nop_bytes_for_arch(arch: PatchArch, count: usize) -> Result<Vec<u8>, Stri
     match arch {
         PatchArch::X86_64 => Ok(vec![0x90; count]),
         PatchArch::Arm64 | PatchArch::Arm64e => {
-            if !count.is_multiple_of(4) {
+            if count % 4 != 0 {
                 return Err(format!(
                     "{arch} NOP padding requires a count divisible by 4, got {count}"
                 ));
@@ -758,12 +758,12 @@ fn validate_patch_alignment(arch: PatchArch, address: u64, len: usize) -> Result
     match arch {
         PatchArch::X86_64 => Ok(()),
         PatchArch::Arm64 | PatchArch::Arm64e => {
-            if !address.is_multiple_of(4) {
+            if address % 4 != 0 {
                 return Err(format!(
                     "{arch} function-entry patch address must be 4-byte aligned, got {address:#x}"
                 ));
             }
-            if !len.is_multiple_of(4) {
+            if len % 4 != 0 {
                 return Err(format!(
                     "{arch} function-entry patch length must be divisible by 4, got {len}"
                 ));
@@ -818,12 +818,12 @@ fn encode_arm64_hook_jump(
     source_va: u64,
     destination_va: u64,
 ) -> Result<HookJump, String> {
-    if !source_va.is_multiple_of(4) {
+    if source_va % 4 != 0 {
         return Err(format!(
             "{arch} jump source must be 4-byte aligned, got {source_va:#x}"
         ));
     }
-    if !destination_va.is_multiple_of(4) {
+    if destination_va % 4 != 0 {
         return Err(format!(
             "{arch} jump destination must be 4-byte aligned, got {destination_va:#x}"
         ));
@@ -834,7 +834,7 @@ fn encode_arm64_hook_jump(
         let scaled = delta / 4;
         if (-(1_i128 << 25)..=(1_i128 << 25) - 1).contains(&scaled) {
             let imm26 = (i32::try_from(scaled)
-                .map_err(|_| format!("arm64 jump delta out of range"))?
+                .map_err(|_| "arm64 jump delta out of range".to_string())?
                 as u32)
                 & 0x03FF_FFFF;
             let insn = 0x1400_0000u32 | imm26;
@@ -1042,7 +1042,7 @@ fn checked_advance(current: usize, advance: usize, bytes: &[u8]) -> Result<usize
 }
 
 fn validate_arm64_trampoline_bytes(arch: PatchArch, bytes: &[u8]) -> Result<(), String> {
-    if !bytes.len().is_multiple_of(4) {
+    if bytes.len() % 4 != 0 {
         return Err(format!(
             "{arch} trampoline bytes must be a whole number of instructions, got {} bytes",
             bytes.len()
@@ -1088,7 +1088,7 @@ fn classify_arm64_relocated_instruction(insn: u32) -> Option<&'static str> {
     if insn & 0x3B00_0000 == 0x1800_0000 {
         return Some("literal load");
     }
-    if insn & 0xFE00_0000 == 0xD600_0000 || insn & 0xFE00_0000 == 0xD700_0000 {
+    if insn & 0xFE00_0000 == 0xD600_0000 || insn & 0xFF00_0000 == 0xD700_0000 {
         return Some("register or authenticated branch");
     }
     None

@@ -1,4 +1,5 @@
 use crate::codesign::parse_code_signature;
+use crate::model::load_command::LoadCommand;
 use crate::model::mach::MachFile;
 use serde::Serialize;
 
@@ -12,12 +13,17 @@ pub struct ResignPlan {
     pub entitlements_der_present: bool,
     pub has_cms_signature: bool,
     pub hash_type: Option<String>,
+    pub signature_parse_error: Option<String>,
     pub suggested_command: String,
 }
 
 impl ResignPlan {
     pub fn from_mach(mach: &MachFile<'_>) -> Self {
-        let sig = parse_code_signature(mach).ok();
+        let has_signature_load_command = mach
+            .load_commands()
+            .iter()
+            .any(|lc| matches!(lc.kind, LoadCommand::CodeSignature(_)));
+        let sig = parse_code_signature(mach);
 
         let (
             was_signed,
@@ -27,7 +33,8 @@ impl ResignPlan {
             entitlements_der_present,
             has_cms_signature,
             hash_type,
-        ) = if let Some(ref s) = sig {
+            signature_parse_error,
+        ) = if let Ok(ref s) = sig {
             let cd = s.code_directories().first();
             (
                 true,
@@ -37,9 +44,21 @@ impl ResignPlan {
                 s.entitlements_der().is_some(),
                 s.cms_signature_present(),
                 cd.map(|c| c.hash_type.name().to_string()),
+                None,
+            )
+        } else if has_signature_load_command {
+            (
+                true,
+                None,
+                None,
+                None,
+                false,
+                false,
+                None,
+                sig.err().map(|err| err.to_string()),
             )
         } else {
-            (false, None, None, None, false, false, None)
+            (false, None, None, None, false, false, None, None)
         };
 
         let has_entitlements = entitlements_xml.is_some() || entitlements_der_present;
@@ -54,6 +73,7 @@ impl ResignPlan {
             entitlements_der_present,
             has_cms_signature,
             hash_type,
+            signature_parse_error,
             suggested_command,
         }
     }
@@ -94,6 +114,9 @@ impl std::fmt::Display for ResignPlan {
         }
         if let Some(ref ht) = self.hash_type {
             writeln!(f, "  Hash type:  {ht}")?;
+        }
+        if let Some(ref err) = self.signature_parse_error {
+            writeln!(f, "  Signature parse error: {err}")?;
         }
         if self.has_cms_signature {
             writeln!(f, "  CMS signature present")?;
