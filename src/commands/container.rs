@@ -5,6 +5,12 @@ use std::path::PathBuf;
 
 use crate::commands::common::filter_snapshot_by_arch;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct ContainerArgs {
     /// Path to Mach-O binary

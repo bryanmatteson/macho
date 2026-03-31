@@ -11,6 +11,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::commands::common::arch_name_for_mach;
 
+macro_rules! print {
+    ($($arg:tt)*) => {
+        crate::out!($($arg)*)
+    };
+}
+
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        crate::errln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct PatchArgs {
     #[command(subcommand)]

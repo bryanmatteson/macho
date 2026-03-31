@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::common::for_each_selected_mach;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct ObjCArgs {
     #[command(subcommand)]

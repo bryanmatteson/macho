@@ -3,6 +3,12 @@ use macho::container_analysis::ContainerReport;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct FilesetArgs {
     #[command(subcommand)]

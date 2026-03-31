@@ -70,6 +70,27 @@ where
     run_from(std::iter::once(OsString::from("macho")).chain(args.into_iter().map(Into::into)))
 }
 
+pub struct CapturedRun {
+    pub code: u8,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub fn run_captured<I, S>(args: I) -> CapturedRun
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
+    let capture = crate::output::begin_capture();
+    let code = run(args);
+    let captured = capture.finish();
+    CapturedRun {
+        code,
+        stdout: captured.stdout,
+        stderr: captured.stderr,
+    }
+}
+
 fn run_from<I, S>(args: I) -> u8
 where
     I: IntoIterator<Item = S>,
@@ -80,7 +101,7 @@ where
             Ok(()) => 0,
             Err(err) => {
                 let _ = std::io::stdout().flush();
-                eprintln!("Error: {err:#}");
+                crate::errln!("Error: {err:#}");
                 1
             }
         },

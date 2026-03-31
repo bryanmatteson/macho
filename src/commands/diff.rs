@@ -6,6 +6,12 @@ use std::path::{Path, PathBuf};
 
 use crate::commands::common::filter_snapshot_by_arch;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct DiffArgs {
     /// Path to the old (baseline) Mach-O binary

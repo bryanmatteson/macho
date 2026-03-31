@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 use crate::commands::common::filter_snapshot_by_arch;
 use crate::output::sarif;
 
+macro_rules! println {
+    ($($arg:tt)*) => {
+        crate::outln!($($arg)*)
+    };
+}
+
 #[derive(clap::Args)]
 pub struct AuditArgs {
     /// Path to Mach-O binary

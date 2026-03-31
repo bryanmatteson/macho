@@ -6,6 +6,13 @@ const DYLD_CACHE_MAGIC_PREFIX: &[u8] = b"dyld_v1";
 const HEADER_MIN_SIZE: usize = 32;
 const MAPPING_INFO_SIZE: usize = 32;
 const IMAGE_INFO_SIZE: usize = 32;
+const IMAGE_TEXT_INFO_SIZE: usize = 32;
+
+// Header offsets for the modern imagesText fields (dyld_cache_format.h)
+const IMAGES_TEXT_OFFSET_OFF: usize = 0x88;
+const IMAGES_TEXT_COUNT_OFF: usize = 0x90;
+// Minimum header size to contain the imagesText fields
+const MODERN_HEADER_MIN: usize = IMAGES_TEXT_COUNT_OFF + 8;
 
 /// Read-only index of a dyld shared cache file.
 ///
@@ -25,8 +32,6 @@ pub struct DyldCacheHeader {
     pub arch: String,
     pub mapping_offset: u32,
     pub mapping_count: u32,
-    pub images_offset: u32,
-    pub images_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,8 +47,7 @@ pub struct CacheMapping {
 pub struct CacheImage {
     pub address: u64,
     pub path: String,
-    pub mod_time: u64,
-    pub inode: u64,
+    pub text_size: u32,
 }
 
 /// Parse a dyld shared cache from a memory-mapped buffer.
@@ -70,25 +74,47 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
         .trim()
         .to_string();
 
-    // All fields are little-endian
-    let mapping_offset = u32::from_le_bytes(data[16..20].try_into().unwrap());
-    let mapping_count = u32::from_le_bytes(data[20..24].try_into().unwrap());
-    let images_offset = u32::from_le_bytes(data[24..28].try_into().unwrap());
-    let images_count = u32::from_le_bytes(data[28..32].try_into().unwrap());
+    let mapping_offset = read_u32_le(data, 16);
+    let mapping_count = read_u32_le(data, 20);
+    let images_offset_old = read_u32_le(data, 24);
+    let images_count_old = read_u32_le(data, 28);
 
     let header = DyldCacheHeader {
         magic,
         arch,
         mapping_offset,
         mapping_count,
-        images_offset,
-        images_count,
     };
 
     // Parse mappings
-    let mut mappings = Vec::with_capacity(mapping_count as usize);
-    for i in 0..mapping_count as usize {
-        let off = mapping_offset as usize + i * MAPPING_INFO_SIZE;
+    let mappings = parse_mappings(data, mapping_offset as usize, mapping_count as usize)?;
+
+    // Parse images: try old format first, fall back to modern imagesText format
+    let images = if images_count_old > 0 && images_offset_old > 0 {
+        parse_images_old(data, images_offset_old as usize, images_count_old as usize)?
+    } else if data.len() >= MODERN_HEADER_MIN {
+        let images_text_offset = read_u64_le(data, IMAGES_TEXT_OFFSET_OFF);
+        let images_text_count = read_u64_le(data, IMAGES_TEXT_COUNT_OFF);
+        if images_text_count > 0 && images_text_offset > 0 {
+            parse_images_text(data, images_text_offset as usize, images_text_count as usize)?
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok(DyldCache {
+        header,
+        mappings,
+        images,
+    })
+}
+
+fn parse_mappings(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheMapping>> {
+    let mut mappings = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = offset + i * MAPPING_INFO_SIZE;
         if off + MAPPING_INFO_SIZE > data.len() {
             return Err(Error::Bounds {
                 offset: off as u64,
@@ -97,18 +123,22 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
             });
         }
         mappings.push(CacheMapping {
-            address: u64::from_le_bytes(data[off..off + 8].try_into().unwrap()),
-            size: u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap()),
-            file_offset: u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap()),
-            max_prot: u32::from_le_bytes(data[off + 24..off + 28].try_into().unwrap()),
-            init_prot: u32::from_le_bytes(data[off + 28..off + 32].try_into().unwrap()),
+            address: read_u64_le(data, off),
+            size: read_u64_le(data, off + 8),
+            file_offset: read_u64_le(data, off + 16),
+            max_prot: read_u32_le(data, off + 24),
+            init_prot: read_u32_le(data, off + 28),
         });
     }
+    Ok(mappings)
+}
 
-    // Parse images
-    let mut images = Vec::with_capacity(images_count as usize);
-    for i in 0..images_count as usize {
-        let off = images_offset as usize + i * IMAGE_INFO_SIZE;
+/// Parse the old-style dyld_cache_image_info entries.
+/// Layout: address(u64) + modTime(u64) + inode(u64) + pathFileOffset(u32) + pad(u32)
+fn parse_images_old(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheImage>> {
+    let mut images = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = offset + i * IMAGE_INFO_SIZE;
         if off + IMAGE_INFO_SIZE > data.len() {
             return Err(Error::Bounds {
                 offset: off as u64,
@@ -116,26 +146,45 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
                 available: data.len() as u64,
             });
         }
-        let address = u64::from_le_bytes(data[off..off + 8].try_into().unwrap());
-        let mod_time = u64::from_le_bytes(data[off + 8..off + 16].try_into().unwrap());
-        let inode = u64::from_le_bytes(data[off + 16..off + 24].try_into().unwrap());
-        let path_offset = u32::from_le_bytes(data[off + 24..off + 28].try_into().unwrap());
-
+        let address = read_u64_le(data, off);
+        let path_offset = read_u32_le(data, off + 24);
         let path = read_c_string(data, path_offset as usize);
 
         images.push(CacheImage {
             address,
             path,
-            mod_time,
-            inode,
+            text_size: 0,
         });
     }
+    Ok(images)
+}
 
-    Ok(DyldCache {
-        header,
-        mappings,
-        images,
-    })
+/// Parse the modern dyld_cache_image_text_info entries.
+/// Layout: uuid(16) + loadAddress(u64) + textSegmentSize(u32) + pathOffset(u32)
+fn parse_images_text(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheImage>> {
+    let mut images = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = offset + i * IMAGE_TEXT_INFO_SIZE;
+        if off + IMAGE_TEXT_INFO_SIZE > data.len() {
+            return Err(Error::Bounds {
+                offset: off as u64,
+                needed: IMAGE_TEXT_INFO_SIZE as u64,
+                available: data.len() as u64,
+            });
+        }
+        // Skip uuid (16 bytes)
+        let address = read_u64_le(data, off + 16);
+        let text_size = read_u32_le(data, off + 24);
+        let path_offset = read_u32_le(data, off + 28);
+        let path = read_c_string(data, path_offset as usize);
+
+        images.push(CacheImage {
+            address,
+            path,
+            text_size,
+        });
+    }
+    Ok(images)
 }
 
 impl DyldCache {
@@ -167,8 +216,10 @@ impl DyldCache {
     /// Extract the Mach-O bytes for the image at the given index.
     ///
     /// Returns a slice into the original cache data that starts at the image's
-    /// mapped location and extends to the next image boundary or mapping end.
-    /// The returned slice can be passed to [`crate::parse::parse`].
+    /// mapped location. When the image has a known `text_size`, that is used
+    /// as the slice length. Otherwise the slice extends to the next image
+    /// boundary or mapping end. The returned slice can be passed to
+    /// [`crate::parse::parse`].
     pub fn extract_image<'data>(&self, index: usize, data: &'data [u8]) -> Result<&'data [u8]> {
         let image = self
             .images
@@ -176,7 +227,10 @@ impl DyldCache {
             .ok_or_else(|| Error::Format(format!("image index {index} out of range")))?;
 
         let file_offset = self.va_to_file_offset(image.address).ok_or_else(|| {
-            Error::Address(format!("image VA {:#x} not in any mapping", image.address))
+            Error::Address(format!(
+                "image VA {:#x} not in any mapping",
+                image.address
+            ))
         })?;
 
         let start = file_offset as usize;
@@ -188,8 +242,13 @@ impl DyldCache {
             });
         }
 
-        // Determine the end of this image's data. Use the next image in the
-        // same mapping, or the mapping boundary, whichever comes first.
+        // If we know the text segment size, use it as the extraction length
+        if image.text_size > 0 {
+            let end = (start + image.text_size as usize).min(data.len());
+            return Ok(&data[start..end]);
+        }
+
+        // Fallback: find the next image boundary or mapping end
         let mapping_end = self
             .mappings
             .iter()
@@ -197,7 +256,6 @@ impl DyldCache {
             .map(|m| (m.file_offset + m.size) as usize)
             .unwrap_or(data.len());
 
-        // Find the next image by file offset (some images may not be sorted)
         let mut next_offset = mapping_end;
         for other in &self.images {
             if let Some(other_fo) = self.va_to_file_offset(other.address) {
@@ -211,6 +269,14 @@ impl DyldCache {
         let end = next_offset.min(data.len());
         Ok(&data[start..end])
     }
+}
+
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap())
+}
+
+fn read_u64_le(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap())
 }
 
 fn read_c_string(data: &[u8], offset: usize) -> String {
@@ -230,7 +296,7 @@ mod tests {
     use super::*;
 
     fn make_minimal_cache(arch: &str) -> Vec<u8> {
-        // Build a minimal dyld cache with 1 mapping and 1 image
+        // Build a minimal old-format dyld cache with 1 mapping and 1 image
         let mut magic = [0u8; 16];
         let prefix = format!("dyld_v1  {arch}");
         let bytes = prefix.as_bytes();
@@ -261,17 +327,17 @@ mod tests {
 
         // Mapping: covers the image region
         let m_off = mapping_offset as usize;
-        data[m_off..m_off + 8].copy_from_slice(&image_va.to_le_bytes()); // address
-        data[m_off + 8..m_off + 16].copy_from_slice(&4096u64.to_le_bytes()); // size
-        data[m_off + 16..m_off + 24].copy_from_slice(&image_file_offset.to_le_bytes()); // file_offset
-        data[m_off + 24..m_off + 28].copy_from_slice(&5u32.to_le_bytes()); // max_prot (r+x)
-        data[m_off + 28..m_off + 32].copy_from_slice(&5u32.to_le_bytes()); // init_prot
+        data[m_off..m_off + 8].copy_from_slice(&image_va.to_le_bytes());
+        data[m_off + 8..m_off + 16].copy_from_slice(&4096u64.to_le_bytes());
+        data[m_off + 16..m_off + 24].copy_from_slice(&image_file_offset.to_le_bytes());
+        data[m_off + 24..m_off + 28].copy_from_slice(&5u32.to_le_bytes());
+        data[m_off + 28..m_off + 32].copy_from_slice(&5u32.to_le_bytes());
 
-        // Image info
+        // Image info (old format: address + modTime + inode + pathOffset + pad)
         let i_off = images_offset as usize;
-        data[i_off..i_off + 8].copy_from_slice(&image_va.to_le_bytes()); // address
-        data[i_off + 8..i_off + 16].copy_from_slice(&0u64.to_le_bytes()); // mod_time
-        data[i_off + 16..i_off + 24].copy_from_slice(&0u64.to_le_bytes()); // inode
+        data[i_off..i_off + 8].copy_from_slice(&image_va.to_le_bytes());
+        data[i_off + 8..i_off + 16].copy_from_slice(&0u64.to_le_bytes());
+        data[i_off + 16..i_off + 24].copy_from_slice(&0u64.to_le_bytes());
         data[i_off + 24..i_off + 28].copy_from_slice(&path_offset.to_le_bytes());
 
         // Path string
@@ -281,14 +347,85 @@ mod tests {
         data
     }
 
+    fn make_modern_cache(arch: &str) -> Vec<u8> {
+        // Build a minimal modern-format cache (old image fields zeroed, uses imagesText)
+        let mut magic = [0u8; 16];
+        let prefix = format!("dyld_v1  {arch}");
+        let bytes = prefix.as_bytes();
+        let len = bytes.len().min(15);
+        magic[..len].copy_from_slice(&bytes[..len]);
+
+        let mapping_offset: u32 = 0x98; // after header (needs room for imagesText fields)
+        let mapping_count: u32 = 1;
+
+        let image_va: u64 = 0x1_8000_0000;
+        let image_file_offset: u64 = 4096;
+
+        // imagesText entries start after the mapping
+        let images_text_offset: u64 = (mapping_offset as u64) + MAPPING_INFO_SIZE as u64;
+        let images_text_count: u64 = 1;
+
+        // Path after the image text info
+        let path_offset: u32 = (images_text_offset as u32) + IMAGE_TEXT_INFO_SIZE as u32;
+        let path = b"/usr/lib/libSystem.B.dylib\0";
+
+        let total_size = path_offset as usize + path.len() + image_file_offset as usize + 4096;
+        let mut data = vec![0u8; total_size];
+
+        // Header
+        data[..16].copy_from_slice(&magic);
+        data[16..20].copy_from_slice(&mapping_offset.to_le_bytes());
+        data[20..24].copy_from_slice(&mapping_count.to_le_bytes());
+        // Old image fields: zero
+        data[24..28].copy_from_slice(&0u32.to_le_bytes());
+        data[28..32].copy_from_slice(&0u32.to_le_bytes());
+
+        // imagesText fields at offsets 0x88/0x90
+        data[0x88..0x90].copy_from_slice(&images_text_offset.to_le_bytes());
+        data[0x90..0x98].copy_from_slice(&images_text_count.to_le_bytes());
+
+        // Mapping
+        let m_off = mapping_offset as usize;
+        data[m_off..m_off + 8].copy_from_slice(&image_va.to_le_bytes());
+        data[m_off + 8..m_off + 16].copy_from_slice(&0x100000u64.to_le_bytes());
+        data[m_off + 16..m_off + 24].copy_from_slice(&image_file_offset.to_le_bytes());
+        data[m_off + 24..m_off + 28].copy_from_slice(&5u32.to_le_bytes());
+        data[m_off + 28..m_off + 32].copy_from_slice(&5u32.to_le_bytes());
+
+        // Image text info: uuid(16) + loadAddress(8) + textSegmentSize(4) + pathOffset(4)
+        let i_off = images_text_offset as usize;
+        // uuid: leave as zeros
+        data[i_off + 16..i_off + 24].copy_from_slice(&image_va.to_le_bytes());
+        data[i_off + 24..i_off + 28].copy_from_slice(&0x50000u32.to_le_bytes()); // text_size
+        data[i_off + 28..i_off + 32].copy_from_slice(&path_offset.to_le_bytes());
+
+        // Path string
+        let p_off = path_offset as usize;
+        data[p_off..p_off + path.len()].copy_from_slice(path);
+
+        data
+    }
+
     #[test]
-    fn parse_minimal_cache() {
+    fn parse_old_format_cache() {
         let data = make_minimal_cache("arm64e");
         let cache = parse_dyld_cache(&data).expect("failed to parse");
         assert_eq!(cache.arch(), "arm64e");
         assert_eq!(cache.mappings().len(), 1);
         assert_eq!(cache.images().len(), 1);
         assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
+    }
+
+    #[test]
+    fn parse_modern_format_cache() {
+        let data = make_modern_cache("arm64e");
+        let cache = parse_dyld_cache(&data).expect("failed to parse");
+        assert_eq!(cache.arch(), "arm64e");
+        assert_eq!(cache.mappings().len(), 1);
+        assert_eq!(cache.images().len(), 1);
+        assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
+        assert_eq!(cache.images()[0].text_size, 0x50000);
+        assert_eq!(cache.images()[0].address, 0x1_8000_0000);
     }
 
     #[test]
@@ -306,6 +443,15 @@ mod tests {
         let data = make_minimal_cache("arm64e");
         let cache = parse_dyld_cache(&data).expect("failed to parse");
         let slice = cache.extract_image(0, &data).expect("failed to extract");
+        assert!(!slice.is_empty());
+    }
+
+    #[test]
+    fn extract_modern_image_uses_text_size() {
+        let data = make_modern_cache("arm64e");
+        let cache = parse_dyld_cache(&data).expect("failed to parse");
+        let slice = cache.extract_image(0, &data).expect("failed to extract");
+        // text_size is 0x50000, but data may be smaller — should be clamped
         assert!(!slice.is_empty());
     }
 
