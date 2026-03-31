@@ -377,7 +377,7 @@ fn format_entity(entity: &CodeEntity, do_demangle: bool) -> String {
     match entity {
         CodeEntity::Symbol { name, external } => {
             let display = if do_demangle {
-                demangle_symbol(name).to_string()
+                demangle_symbol(name).unwrap_or_else(|| name.clone())
             } else {
                 name.clone()
             };
@@ -397,7 +397,7 @@ fn format_entity(entity: &CodeEntity, do_demangle: bool) -> String {
         }
         CodeEntity::Export { name } => {
             let display = if do_demangle {
-                demangle_symbol(name).to_string()
+                demangle_symbol(name).unwrap_or_else(|| name.clone())
             } else {
                 name.clone()
             };
