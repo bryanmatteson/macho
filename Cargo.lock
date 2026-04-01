@@ -194,16 +194,62 @@ name = "macho"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "bitflags",
  "clap",
- "cpp_demangle",
- "gimli",
+ "macho-analysis",
+ "macho-core",
+ "macho-edit",
+ "macho-extract",
  "memmap2",
- "rustc-demangle",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "macho-analysis"
+version = "0.1.0"
+dependencies = [
+ "macho-core",
+ "serde",
+]
+
+[[package]]
+name = "macho-cli"
+version = "0.1.0"
+dependencies = [
+ "macho",
+]
+
+[[package]]
+name = "macho-core"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "cpp_demangle",
+ "rustc-demangle",
+ "serde",
  "thiserror",
  "zerocopy",
+]
+
+[[package]]
+name = "macho-edit"
+version = "0.1.0"
+dependencies = [
+ "macho-analysis",
+ "macho-core",
+ "serde",
+ "zerocopy",
+]
+
+[[package]]
+name = "macho-extract"
+version = "0.1.0"
+dependencies = [
+ "cpp_demangle",
+ "gimli",
+ "macho-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

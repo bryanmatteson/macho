@@ -1,0 +1,16 @@
+[package]
+name = "macho-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Thin CLI wrapper for macho"
+
+[[bin]]
+name = "macho"
+path = "src/main.rs"
+
+[dependencies]
+macho.workspace = true

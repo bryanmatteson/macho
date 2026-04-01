@@ -1,0 +1,289 @@
+use crate::analysis::container::{
+    ContainerReport, FilesetEntryInspection, FilesetMemberReport, FilesetReport,
+};
+use crate::analysis::diff::DiffReport;
+use crate::analysis::snapshot::{ContainerFormat, ContainerSnapshot};
+use crate::format::parse;
+use crate::model::container::{FatBinary, MachoContainer};
+use crate::model::load_command::LoadCommand;
+use crate::model::macho_file::MachoFile;
+
+pub trait FatBinaryExt<'data> {
+    fn snapshot(&self) -> ContainerSnapshot;
+    fn container_report(&self) -> ContainerReport;
+    fn parity_report(&self) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn parity_report_with_domains(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn check_parity(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn fileset_report(&self) -> Option<FilesetReport>;
+    fn resolve_cross_image(&self) -> crate::analysis::container::resolve::CrossImageResolution;
+    fn common_exports(&self) -> Vec<String>;
+    fn divergent_exports(&self) -> Vec<crate::analysis::container::resolve::ExportOwnership>;
+    fn common_imports(&self) -> Vec<String>;
+    fn all_signed(&self) -> bool;
+    fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<DiffReport>;
+    fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection>;
+}
+
+impl<'data> FatBinaryExt<'data> for FatBinary<'data> {
+    fn snapshot(&self) -> ContainerSnapshot {
+        ContainerSnapshot {
+            format: ContainerFormat::Fat,
+            slices: self
+                .arches
+                .iter()
+                .map(|arch| {
+                    let mut snap =
+                        crate::analysis::snapshot::SliceSnapshot::from_macho(&arch.macho);
+                    snap.arch = arch.spec.name();
+                    snap
+                })
+                .collect(),
+        }
+    }
+
+    fn container_report(&self) -> ContainerReport {
+        ContainerReport::from_snapshot(&self.snapshot())
+    }
+
+    fn parity_report(&self) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        self.parity_report_with_domains(crate::analysis::container::parity::all_domains())
+    }
+
+    fn parity_report_with_domains(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        if self.snapshot().slices.len() > 1 {
+            Some(
+                crate::analysis::container::parity::compute_parity_with_domains(
+                    &self.snapshot().slices,
+                    domains,
+                ),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn check_parity(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        self.parity_report_with_domains(domains)
+    }
+
+    fn fileset_report(&self) -> Option<FilesetReport> {
+        ContainerReport::from_snapshot(&self.snapshot()).fileset
+    }
+
+    fn resolve_cross_image(&self) -> crate::analysis::container::resolve::CrossImageResolution {
+        crate::analysis::container::resolve::resolve_cross_image(&self.snapshot())
+    }
+
+    fn common_exports(&self) -> Vec<String> {
+        crate::analysis::container::resolve::common_exports(&self.snapshot())
+    }
+
+    fn divergent_exports(&self) -> Vec<crate::analysis::container::resolve::ExportOwnership> {
+        crate::analysis::container::resolve::divergent_exports(&self.snapshot())
+    }
+
+    fn common_imports(&self) -> Vec<String> {
+        crate::analysis::container::resolve::common_imports(&self.snapshot())
+    }
+
+    fn all_signed(&self) -> bool {
+        crate::analysis::container::resolve::all_signed(&self.snapshot())
+    }
+
+    fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<DiffReport> {
+        crate::analysis::container::resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
+    }
+
+    fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
+        self.arches
+            .iter()
+            .flat_map(|arch| {
+                let arch_name = arch.spec.name();
+                inspect_fileset_entry_in_macho(&arch.macho, &arch_name, entry_id)
+            })
+            .collect()
+    }
+}
+
+pub trait MachoContainerExt<'data> {
+    fn snapshot(&self) -> crate::analysis::snapshot::ContainerSnapshot;
+    fn container_report(&self) -> ContainerReport;
+    fn parity_report(&self) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn parity_report_with_domains(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn check_parity(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport>;
+    fn fileset_report(&self) -> Option<FilesetReport>;
+    fn resolve_cross_image(&self) -> crate::analysis::container::resolve::CrossImageResolution;
+    fn common_exports(&self) -> Vec<String>;
+    fn divergent_exports(&self) -> Vec<crate::analysis::container::resolve::ExportOwnership>;
+    fn common_imports(&self) -> Vec<String>;
+    fn all_signed(&self) -> bool;
+    fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<DiffReport>;
+    fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection>;
+}
+
+impl<'data> MachoContainerExt<'data> for MachoContainer<'data> {
+    fn snapshot(&self) -> crate::analysis::snapshot::ContainerSnapshot {
+        match self {
+            Self::Thin(macho) => {
+                let format = if macho.header().file_type.name() == "MH_FILESET" {
+                    ContainerFormat::Fileset
+                } else {
+                    ContainerFormat::Thin
+                };
+                ContainerSnapshot {
+                    format,
+                    slices: vec![crate::analysis::snapshot::SliceSnapshot::from_macho(macho)],
+                }
+            }
+            Self::Fat(fat) => fat.snapshot(),
+        }
+    }
+
+    fn container_report(&self) -> ContainerReport {
+        ContainerReport::from_container(self)
+    }
+
+    fn parity_report(&self) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        self.parity_report_with_domains(crate::analysis::container::parity::all_domains())
+    }
+
+    fn parity_report_with_domains(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        match self {
+            Self::Thin(_) => None,
+            Self::Fat(fat) => fat.parity_report_with_domains(domains),
+        }
+    }
+
+    fn check_parity(
+        &self,
+        domains: &[crate::analysis::container::parity::ParityDomain],
+    ) -> Option<crate::analysis::container::parity::ArchParityReport> {
+        self.parity_report_with_domains(domains)
+    }
+
+    fn fileset_report(&self) -> Option<FilesetReport> {
+        self.container_report().fileset
+    }
+
+    fn resolve_cross_image(&self) -> crate::analysis::container::resolve::CrossImageResolution {
+        crate::analysis::container::resolve::resolve_cross_image(&self.snapshot())
+    }
+
+    fn common_exports(&self) -> Vec<String> {
+        crate::analysis::container::resolve::common_exports(&self.snapshot())
+    }
+
+    fn divergent_exports(&self) -> Vec<crate::analysis::container::resolve::ExportOwnership> {
+        crate::analysis::container::resolve::divergent_exports(&self.snapshot())
+    }
+
+    fn common_imports(&self) -> Vec<String> {
+        crate::analysis::container::resolve::common_imports(&self.snapshot())
+    }
+
+    fn all_signed(&self) -> bool {
+        crate::analysis::container::resolve::all_signed(&self.snapshot())
+    }
+
+    fn diff_slices(&self, old_arch: &str, new_arch: &str) -> Option<DiffReport> {
+        crate::analysis::container::resolve::diff_slices(&self.snapshot(), old_arch, new_arch)
+    }
+
+    fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
+        match self {
+            Self::Thin(macho) => {
+                let arch = macho.header().cpu_type.name().to_string();
+                inspect_fileset_entry_in_macho(macho, &arch, entry_id)
+            }
+            Self::Fat(fat) => fat.inspect_fileset_entry(entry_id),
+        }
+    }
+}
+
+fn inspect_fileset_entry_in_macho(
+    macho: &MachoFile<'_>,
+    arch: &str,
+    entry_id: &str,
+) -> Vec<FilesetEntryInspection> {
+    let mut inspections = Vec::new();
+
+    for data in macho
+        .load_commands()
+        .iter()
+        .filter_map(|lc| match &lc.kind {
+            LoadCommand::FilesetEntry(data) if data.entry_id == entry_id => Some(data),
+            _ => None,
+        })
+    {
+        let (member, parse_error) = inspect_fileset_member(macho, data.file_offset);
+        inspections.push(FilesetEntryInspection {
+            arch: arch.to_string(),
+            entry_id: data.entry_id.clone(),
+            vm_addr: data.vm_addr,
+            file_offset: data.file_offset,
+            member,
+            parse_error,
+        });
+    }
+
+    inspections
+}
+
+fn inspect_fileset_member(
+    macho: &MachoFile<'_>,
+    file_offset: u64,
+) -> (Option<FilesetMemberReport>, Option<String>) {
+    let Ok(offset) = usize::try_from(file_offset) else {
+        return (
+            None,
+            Some(format!("member offset {file_offset:#x} is too large")),
+        );
+    };
+
+    if offset >= macho.bytes().len() {
+        return (
+            None,
+            Some(format!(
+                "member offset {file_offset:#x} is outside image bounds ({:#x} bytes)",
+                macho.bytes().len()
+            )),
+        );
+    }
+
+    match parse(&macho.bytes()[offset..]) {
+        Ok(member) => {
+            let member_mach = member.first_mach();
+            (
+                Some(FilesetMemberReport {
+                    file_type: member_mach.header().file_type.name().to_string(),
+                    cpu: member_mach.header().cpu_type.to_string(),
+                    load_commands: member_mach.load_commands().len(),
+                    segments: member_mach.segments().len(),
+                }),
+                None,
+            )
+        }
+        Err(err) => (None, Some(err.to_string())),
+    }
+}

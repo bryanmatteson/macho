@@ -1,0 +1,17 @@
+[package]
+    name                   = "macho-core"
+    version.workspace      = true
+    edition.workspace      = true
+    rust-version.workspace = true
+    license.workspace      = true
+    homepage.workspace     = true
+    repository.workspace   = true
+    description            = "Core Mach-O parsing and data model"
+
+[dependencies]
+    zerocopy.workspace       = true
+    thiserror.workspace      = true
+    bitflags.workspace       = true
+    serde.workspace          = true
+    rustc-demangle.workspace = true
+    cpp_demangle.workspace   = true

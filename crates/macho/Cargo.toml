@@ -1,0 +1,22 @@
+[package]
+name = "macho"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Mach-O library and command surface"
+keywords = ["macho", "binary", "dylib", "executable", "macos"]
+categories = ["development-tools::debugging", "development-tools::profiling"]
+
+[dependencies]
+macho-core.workspace = true
+macho-analysis.workspace = true
+macho-edit.workspace = true
+macho-extract.workspace = true
+clap.workspace = true
+memmap2.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
