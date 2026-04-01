@@ -1,6 +1,6 @@
-use crate::addr::ThinFileOffset;
-use crate::addr::Va;
-use crate::constants::*;
+use crate::format::constants::*;
+use crate::model::addr::ThinFileOffset;
+use crate::model::addr::Va;
 use crate::model::names::{SectionName, SegmentName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

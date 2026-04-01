@@ -2,12 +2,12 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use macho::header_infer::{
-    ClangSyntaxValidator, ConfidenceSummary, EntityCoverageValidator, EntityKind, EvidenceBundle,
-    EvidenceEntity, EvidenceFact, EvidenceSource, EvidenceSourceKind, EvidenceStrength,
-    HeaderInferenceModel, HeaderInferenceSession, HeaderLanguage, HeaderUnit, InferenceOptions,
-    InferredDeclaration, InferredUnresolved, ModelOutput, OutputContractValidator, PromptSet,
-    ValidationTarget, ValidationTargetKind, build_prompt, validate_bundle,
+use macho::recovery::headers::{
+    ClangSyntaxValidator, ConfidenceSummary, EntityKind, EvidenceBundle, EvidenceEntity,
+    EvidenceFact, EvidenceSource, EvidenceSourceKind, EvidenceStrength, HeaderInferenceModel,
+    HeaderInferenceSession, HeaderLanguage, HeaderUnit, InferenceOptions, InferredDeclaration,
+    InferredUnresolved, ModelOutput, PromptSet, ValidationTarget, ValidationTargetKind,
+    build_prompt, validate_bundle,
 };
 use support::{run_cli, temp_file_path};
 
@@ -64,7 +64,7 @@ fn sample_bundle(language: HeaderLanguage) -> EvidenceBundle {
             }],
             payload: serde_json::Value::Null,
         }],
-        unresolved: vec![macho::header_infer::UnresolvedGap {
+        unresolved: vec![macho::recovery::headers::UnresolvedGap {
             id: "gap.ret".into(),
             entity_id: "entity.widget".into(),
             summary: "Return type alias may be source-specific".into(),
@@ -319,7 +319,7 @@ fn cli_prompt_and_apply_flow() {
         "apply stderr: {}",
         String::from_utf8_lossy(&apply.stderr)
     );
-    let sidecar: macho::header_infer::SidecarOutput =
+    let sidecar: macho::recovery::headers::SidecarOutput =
         serde_json::from_slice(&apply.stdout).expect("valid sidecar json");
     assert!(sidecar.valid);
 

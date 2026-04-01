@@ -174,10 +174,10 @@ fn validation_passes_for_system_binary() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     for mach in container.mach_files() {
-        let diags = macho::validate::validate(mach);
+        let diags = macho::model::validate::validate(mach);
         let errors: Vec<_> = diags
             .iter()
-            .filter(|d| d.severity == macho::validate::Severity::Error)
+            .filter(|d| d.severity == macho::model::validate::Severity::Error)
             .collect();
         assert!(
             errors.is_empty(),

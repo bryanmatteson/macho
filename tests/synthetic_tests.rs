@@ -270,7 +270,7 @@ fn fat_arch_extends_past_file() {
 
 #[test]
 fn cpu_subtype_masking() {
-    use macho::constants::*;
+    use macho::format::constants::*;
     use macho::model::header::{CpuSubtype, CpuType};
 
     // Simulate arm64e with capability bits set (0x80000002)
@@ -286,8 +286,8 @@ fn cpu_subtype_masking() {
 
 #[test]
 fn arch_spec_arm64e_with_cap_bits() {
-    use macho::constants::*;
-    use macho::model::fat::ArchSpec;
+    use macho::format::constants::*;
+    use macho::model::header::ArchSpec;
     use macho::model::header::{CpuSubtype, CpuType};
 
     let spec = ArchSpec {
@@ -336,7 +336,7 @@ fn load_command_typed_accessors() {
 
 #[test]
 fn validation_detects_malformed() {
-    use macho::validate::{self, Severity};
+    use macho::model::validate::{self, Severity};
 
     let data = minimal_thin_64();
     let container = macho::parse(&data).expect("failed to parse");
@@ -431,7 +431,7 @@ fn huge_sizeofcmds_overflow() {
 
 #[test]
 fn fat_arch_thin_offset_translation() {
-    use macho::addr::{FatFileOffset, ThinFileOffset};
+    use macho::model::addr::{FatFileOffset, ThinFileOffset};
 
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");

@@ -1,6 +1,6 @@
-use macho::dyld::chained::parse_chained_fixups;
-use macho::dyld::exports::{find_export, parse_exports};
-use macho::dyld::types::{ExportKind, FixupKind};
+use macho::metadata::dyld::chained::parse_chained_fixups;
+use macho::metadata::dyld::exports::{find_export, parse_exports};
+use macho::metadata::dyld::types::{ExportKind, FixupKind};
 use macho::model::container::MachContainer;
 
 fn load_binary(path: &str) -> memmap2::Mmap {

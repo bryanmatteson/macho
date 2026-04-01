@@ -1,4 +1,4 @@
-use macho::codesign::{HashType, parse_code_signature};
+use macho::metadata::codesign::{HashType, parse_code_signature};
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -99,7 +99,7 @@ fn no_signature_graceful() {
 
 #[test]
 fn code_signature_via_ext_trait() {
-    use macho::codesign::CodeSignature;
+    use macho::metadata::codesign::CodeSignature;
 
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");

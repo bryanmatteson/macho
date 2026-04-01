@@ -2,11 +2,11 @@ mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use macho::inspect::ImageInspector;
+use macho::api::ImageInspector;
+use macho::metadata::objc::graph::ObjCGraph;
+use macho::metadata::objc::parse_objc_metadata;
+use macho::metadata::swift::SwiftTypeIndex;
 use macho::model::container::MachContainer;
-use macho::objc::graph::ObjCGraph;
-use macho::objc::parse_objc_metadata;
-use macho::swift::SwiftTypeIndex;
 use support::{copy_macho_fixture, run_cli, temp_file_path};
 
 #[cfg(unix)]
@@ -55,7 +55,7 @@ fn unique_marker(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn has_rpath(mach: &macho::model::mach::MachFile<'_>, needle: &str) -> bool {
+fn has_rpath(mach: &macho::model::mach_file::MachFile<'_>, needle: &str) -> bool {
     mach.load_commands()
         .iter()
         .any(|lc| lc.kind.as_rpath() == Some(needle))

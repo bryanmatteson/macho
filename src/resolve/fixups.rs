@@ -1,0 +1,86 @@
+use std::collections::BTreeMap;
+
+use crate::Result;
+use crate::metadata::dyld::bind::parse_bind_entries;
+use crate::metadata::dyld::chained::parse_chained_fixups;
+use crate::metadata::dyld::rebase::parse_rebase_entries;
+use crate::metadata::dyld::types::FixupKind;
+use crate::model::addr::Va;
+use crate::model::mach_file::MachFile;
+
+use super::pointers::{ResolutionContext, ResolvedTarget};
+
+pub fn collect_resolved_targets(mach: &MachFile<'_>) -> BTreeMap<u64, ResolvedTarget> {
+    let mut fixups = BTreeMap::new();
+    if let Ok(chained) = parse_chained_fixups(mach) {
+        for fixup in &chained.fixups {
+            let Some(seg) = mach.segments().get(fixup.segment_index) else {
+                continue;
+            };
+            let file_offset = seg.file_offset.0 + fixup.segment_offset;
+            let target = match &fixup.kind {
+                FixupKind::Rebase { target } | FixupKind::AuthRebase { target, .. } => {
+                    ResolvedTarget::Address(Va(mach.image_base().0 + target))
+                }
+                FixupKind::Bind { import_index, .. } | FixupKind::AuthBind { import_index, .. } => {
+                    let Some(import) = chained.imports.get(*import_index as usize) else {
+                        continue;
+                    };
+                    ResolvedTarget::Import {
+                        name: import.name.to_string(),
+                        lib_ordinal: import.lib_ordinal,
+                    }
+                }
+            };
+            fixups.insert(file_offset, target);
+        }
+        return fixups;
+    }
+
+    if let Ok((regular, weak, lazy)) = parse_bind_entries(mach) {
+        for bind in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
+            if let Some(seg) = mach.segments().get(bind.segment_index) {
+                let file_offset = seg.file_offset.0 + bind.segment_offset;
+                fixups.insert(
+                    file_offset,
+                    ResolvedTarget::Import {
+                        name: bind.symbol_name.to_string(),
+                        lib_ordinal: bind.lib_ordinal.clamp(i32::MIN as i64, i32::MAX as i64)
+                            as i32,
+                    },
+                );
+            }
+        }
+    }
+
+    if let Ok(rebases) = parse_rebase_entries(mach) {
+        for rebase in rebases {
+            if let Some(seg) = mach.segments().get(rebase.segment_index) {
+                let file_offset = seg.file_offset.0 + rebase.segment_offset;
+                fixups.insert(file_offset, ResolvedTarget::Address(Va(0)));
+            }
+        }
+    }
+
+    fixups
+}
+
+pub fn resolve_pointer_target(
+    ctx: &ResolutionContext<'_, '_>,
+    fixups: &BTreeMap<u64, ResolvedTarget>,
+    va: Va,
+) -> Result<ResolvedTarget> {
+    let offset = ctx.mach().address_map().va_to_thin_offset(va)?;
+    if let Some(target) = fixups.get(&offset.0) {
+        if let ResolvedTarget::Address(resolved) = target {
+            if resolved.0 == 0 {
+                let raw = ctx.read_pointer(va)?;
+                return Ok(ResolvedTarget::Address(Va(raw)));
+            }
+        }
+        return Ok(target.clone());
+    }
+
+    let raw = ctx.read_pointer(va)?;
+    Ok(ResolvedTarget::Address(Va(raw)))
+}

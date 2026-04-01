@@ -1,36 +1,18 @@
+mod error;
+
+pub mod analysis;
+pub mod api;
+pub mod cli;
+pub mod format;
+pub mod inputs;
+pub mod metadata;
+pub mod model;
+pub mod mutate;
+pub mod recovery;
+pub mod resolve;
+pub mod symbols;
+
 extern crate self as macho;
 
-pub mod addr;
-pub mod analysis;
-pub mod audit;
-pub mod c;
-pub mod cli;
-pub mod codesign;
-pub(crate) mod commands;
-pub mod constants;
-pub mod container_analysis;
-pub mod cpp;
-pub mod data_surface;
-pub mod demangle;
-pub mod depgraph;
-pub mod diff;
-pub mod dwarf;
-pub mod dyld;
-pub mod dyld_cache;
-pub mod edit;
-pub mod error;
-pub mod ext;
-pub mod header_infer;
-pub mod inspect;
-pub mod io;
-pub mod model;
-pub mod objc;
-pub(crate) mod output;
-pub mod parse;
-pub mod prelude;
-pub mod swift;
-pub mod validate;
-pub mod xref;
-
-pub use error::{Error, Result};
-pub use parse::parse;
+pub use crate::error::{Error, Result};
+pub use crate::format::parse;

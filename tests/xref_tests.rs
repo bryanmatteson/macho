@@ -1,6 +1,6 @@
-use macho::addr::types::Va;
-use macho::xref::ranges::{CodeEntity, RangeSource, SymbolRangeIndex};
-use macho::xref::refs::{XrefIndex, XrefKind, XrefTarget};
+use macho::analysis::xref::ranges::{CodeEntity, RangeSource, SymbolRangeIndex};
+use macho::analysis::xref::refs::{XrefIndex, XrefKind, XrefTarget};
+use macho::model::addr::types::Va;
 
 fn load_binary(path: &str) -> memmap2::Mmap {
     let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));

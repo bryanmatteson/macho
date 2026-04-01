@@ -1,6 +1,6 @@
-use macho::edit::resign::ResignPlan;
-use macho::edit::transaction::PatchTransaction;
 use macho::model::container::MachContainer;
+use macho::mutate::resign::ResignPlan;
+use macho::mutate::transaction::PatchTransaction;
 use macho::parse;
 
 fn malformed_codesign_binary() -> Vec<u8> {

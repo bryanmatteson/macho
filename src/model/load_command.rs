@@ -1,5 +1,5 @@
-use crate::addr::ThinFileOffset;
-use crate::constants::*;
+use crate::format::constants::*;
+use crate::model::addr::ThinFileOffset;
 use std::fmt;
 
 #[derive(Debug, Clone)]

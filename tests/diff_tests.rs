@@ -1,13 +1,13 @@
 mod support;
 
+use macho::analysis::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
     DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
-    ImportSnapshot, LoadCommandSnapshot, ObjCCategorySnapshot, ObjCClassSnapshot,
-    ObjCMethodSnapshot, ObjCPropertySnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot,
-    SliceSnapshot,
+    LoadCommandSnapshot, ObjCCategorySnapshot, ObjCClassSnapshot, ObjCMethodSnapshot,
+    ObjCPropertySnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
 };
-use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
+use macho::symbols::imports::ImportRecord;
 use support::run_cli;
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
@@ -294,8 +294,8 @@ fn diff_report_serializes_to_json() {
 
 #[test]
 fn diff_json_uses_machine_readable_domain_and_severity_names() {
-    let report = macho::diff::DiffReport {
-        findings: vec![macho::diff::DiffFinding {
+    let report = macho::analysis::diff::DiffReport {
+        findings: vec![macho::analysis::diff::DiffFinding {
             domain: DiffDomain::LoadCommands,
             severity: ChangeSeverity::Breaking,
             arch: Some("arm64".into()),
@@ -535,7 +535,7 @@ fn diff_reports_import_metadata_changes() {
     let mut old = synthetic_snapshot();
     old.slices[0]
         .imports
-        .push(macho::analysis::snapshot::ImportSnapshot {
+        .push(macho::symbols::imports::ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 1,
             weak: false,
@@ -544,7 +544,7 @@ fn diff_reports_import_metadata_changes() {
     let mut new = synthetic_snapshot();
     new.slices[0]
         .imports
-        .push(macho::analysis::snapshot::ImportSnapshot {
+        .push(macho::symbols::imports::ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 2,
             weak: true,
@@ -585,12 +585,12 @@ fn diff_ignores_layout_only_linkedit_load_command_churn() {
 fn diff_reports_import_variant_changes_for_duplicate_names() {
     let mut old = synthetic_snapshot();
     old.slices[0].imports.extend([
-        ImportSnapshot {
+        ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 1,
             weak: false,
         },
-        ImportSnapshot {
+        ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 2,
             weak: false,
@@ -599,12 +599,12 @@ fn diff_reports_import_variant_changes_for_duplicate_names() {
 
     let mut new = synthetic_snapshot();
     new.slices[0].imports.extend([
-        ImportSnapshot {
+        ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 1,
             weak: false,
         },
-        ImportSnapshot {
+        ImportRecord {
             name: "_objc_msgSend".into(),
             lib_ordinal: 3,
             weak: true,

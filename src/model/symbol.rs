@@ -1,5 +1,5 @@
-use crate::constants::*;
 use crate::error::{Error, Result};
+use crate::format::constants::*;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

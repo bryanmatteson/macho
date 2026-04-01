@@ -1,14 +1,14 @@
 mod support;
 
-use macho::edit::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
 use macho::model::container::MachContainer;
 use macho::model::load_command::LoadCommand;
-use macho::model::mach::MachFile;
-use support::copy_macho_fixture;
+use macho::model::mach_file::MachFile;
+use macho::mutate::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
+use std::path::Path;
 
-fn with_thin_mach(f: impl FnOnce(&macho::model::mach::MachFile<'_>)) {
-    let fixture = copy_macho_fixture("/usr/bin/true", "transaction-true");
-    let data = std::fs::read(fixture.path()).expect("read");
+fn with_thin_mach(f: impl FnOnce(&macho::model::mach_file::MachFile<'_>)) {
+    let source = Path::new("/usr/bin/true");
+    let data = std::fs::read(source).expect("read");
     let container = macho::parse(&data).expect("parse");
     match &container {
         MachContainer::Fat(fat) => f(&fat.arches()[0].mach),

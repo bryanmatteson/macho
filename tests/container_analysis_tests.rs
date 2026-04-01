@@ -1,16 +1,17 @@
-use macho::analysis::snapshot::ContainerSnapshot;
-use macho::analysis::snapshot::{
-    CodesignSnapshot, ContainerFormat, ExportSnapshot, FixupSnapshot, HeaderSnapshot,
-    ImportSnapshot, ObjCSnapshot, SliceSnapshot,
-};
-use macho::container_analysis::ContainerReport;
-use macho::container_analysis::parity::{
+use macho::analysis::container::ContainerReport;
+use macho::analysis::container::parity::{
     ParityDomain, compute_parity, compute_parity_with_domains,
 };
-use macho::container_analysis::resolve::{
+use macho::analysis::container::resolve::{
     all_signed, common_exports, common_imports, diff_slices, divergent_exports, resolve_cross_image,
 };
+use macho::analysis::snapshot::ContainerSnapshot;
+use macho::analysis::snapshot::{
+    CodesignSnapshot, ContainerFormat, ExportSnapshot, FixupSnapshot, HeaderSnapshot, ObjCSnapshot,
+    SliceSnapshot,
+};
 use macho::model::container::MachContainer;
+use macho::symbols::imports::ImportRecord;
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
@@ -79,7 +80,7 @@ fn synthetic_cross_slice_snapshot() -> ContainerSnapshot {
                 .collect(),
             imports: imports
                 .iter()
-                .map(|name| ImportSnapshot {
+                .map(|name| ImportRecord {
                     name: (*name).into(),
                     lib_ordinal: 0,
                     weak: false,

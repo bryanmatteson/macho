@@ -1,6 +1,6 @@
-use macho::edit::MachEditor;
+use macho::mutate::MachEditor;
 use macho::model::load_command::LoadCommand;
-use macho::model::mach::MachFile;
+use macho::model::mach_file::MachFile;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -197,10 +197,10 @@ fn segments_still_valid_after_add() {
     assert!(text.is_some(), "expected __TEXT segment");
 
     // Validation should pass
-    let diags = macho::validate::validate(rm);
+    let diags = macho::model::validate::validate(rm);
     let errors: Vec<_> = diags
         .iter()
-        .filter(|d| d.severity == macho::validate::Severity::Error)
+        .filter(|d| d.severity == macho::model::validate::Severity::Error)
         .collect();
     assert!(
         errors.is_empty(),

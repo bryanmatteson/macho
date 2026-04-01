@@ -1,5 +1,6 @@
-use macho::inspect::resolve::{resolve_all_rpaths, resolve_path};
-use macho::inspect::{DylibLinkKind, ImageInfo, ImageInspector};
+use macho::api::ImageInspector;
+use macho::metadata::image::{DylibLinkKind, ImageInfo};
+use macho::resolve::paths::{resolve_all_rpaths, resolve_path};
 
 // -- Basic ImageInspector tests --
 
@@ -167,7 +168,7 @@ fn inspector_cached_codesign() {
     let mach = container.first_mach();
     let inspector = ImageInspector::new(mach);
 
-    let result = inspector.code_signature();
+    let result = inspector.parse_code_signature();
     assert!(result.is_ok(), "system binary should be signed");
 
     let sig = result.unwrap();
@@ -394,7 +395,7 @@ fn inspector_graceful_no_objc_metadata() {
 
     // ObjC metadata parse should either succeed with empty data or
     // return an error -- either way it should not panic
-    let result = inspector.objc_metadata();
+    let result = inspector.parse_objc_metadata();
     // The result is either Ok or Err, both are acceptable
     let _ = result;
 }
@@ -407,7 +408,7 @@ fn inspector_graceful_no_chained_fixups() {
     let mach = container.first_mach();
     let inspector = ImageInspector::new(mach);
 
-    let result = inspector.fixups();
+    let result = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach());
     // Should not panic; either Ok or Err is fine
     let _ = result;
 }
@@ -422,9 +423,9 @@ fn inspector_objc_graph_reuses_cached_metadata() {
     let inspector = ImageInspector::new(mach);
 
     // Call objc_metadata first to populate the cache
-    let meta_result = inspector.objc_metadata();
+    let meta_result = inspector.parse_objc_metadata();
     // Then call objc_graph which should reuse cached metadata
-    let graph_result = inspector.objc_graph();
+    let graph_result = inspector.parse_objc_graph();
 
     // Both should have consistent error behavior: if metadata fails,
     // graph should also fail
@@ -440,14 +441,16 @@ fn inspector_swift_types_are_cached_and_match_direct_build() {
     let mach = container.first_mach();
     let inspector = ImageInspector::new(mach);
 
-    let first = inspector.swift_types().expect("swift types");
-    let second = inspector.swift_types().expect("swift types from cache");
+    let first = inspector.parse_swift_types().expect("swift types");
+    let second = inspector
+        .parse_swift_types()
+        .expect("swift types from cache");
     assert!(
         std::ptr::eq(first, second),
         "swift type index should come from the inspector cache"
     );
 
-    let direct = macho::swift::SwiftTypeIndex::build(mach);
+    let direct = macho::metadata::swift::SwiftTypeIndex::build(mach);
     assert_eq!(
         first.types.iter().map(|ty| &ty.name).collect::<Vec<_>>(),
         direct.types.iter().map(|ty| &ty.name).collect::<Vec<_>>()
@@ -484,12 +487,12 @@ fn inspector_cached_calls_return_consistent_results() {
     let exp2 = inspector.exports().is_ok();
     assert_eq!(exp1, exp2, "exports() should be consistent");
 
-    let fix1 = inspector.fixups().is_ok();
-    let fix2 = inspector.fixups().is_ok();
+    let fix1 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach()).is_ok();
+    let fix2 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach()).is_ok();
     assert_eq!(fix1, fix2, "fixups() should be consistent");
 
-    let cs1 = inspector.code_signature().is_ok();
-    let cs2 = inspector.code_signature().is_ok();
+    let cs1 = inspector.parse_code_signature().is_ok();
+    let cs2 = inspector.parse_code_signature().is_ok();
     assert_eq!(cs1, cs2, "code_signature() should be consistent");
 }
 

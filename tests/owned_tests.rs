@@ -1,7 +1,7 @@
-use macho::addr::ThinFileOffset;
-use macho::edit::transaction::PatchTransaction;
+use macho::model::addr::ThinFileOffset;
 use macho::model::container::MachContainer;
-use macho::model::owned::OwnedFatBinary;
+use macho::mutate::owned::OwnedFatBinary;
+use macho::mutate::transaction::PatchTransaction;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -102,7 +102,8 @@ fn write_pod_at() {
         .write_pod_at(ThinFileOffset(0x200), &val)
         .expect("write_pod_at failed");
 
-    let read_back: u32 = macho::io::pod::read_pod(owned.bytes(), 0x200).expect("read_pod failed");
+    let read_back: u32 =
+        macho::format::io::pod::read_pod(owned.bytes(), 0x200).expect("read_pod failed");
     assert_eq!(read_back, val);
 }
 

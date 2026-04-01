@@ -1,6 +1,8 @@
 mod support;
 
-use macho::cpp::{build_headers_for_mach, build_image_index, unify_images, validate_header_syntax};
+use macho::recovery::cpp::{
+    build_headers_for_mach, build_image_index, unify_images, validate_header_syntax,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};

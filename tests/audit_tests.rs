@@ -1,10 +1,10 @@
 mod support;
 
+use macho::analysis::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use macho::analysis::snapshot::{
     CodesignSnapshot, ContainerFormat, ContainerSnapshot, FixupSnapshot, HeaderSnapshot,
     LoadCommandSnapshot, ObjCSnapshot, SegmentSnapshot, SliceSnapshot,
 };
-use macho::audit::{AuditSeverity, audit_slice, audit_snapshot};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use support::run_cli;

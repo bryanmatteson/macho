@@ -1,5 +1,5 @@
+use macho::format::relocations::relocations_for_section;
 use macho::model::symbol::{SymbolTable, SymbolType};
-use macho::parse::relocations::relocations_for_section;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -114,7 +114,7 @@ fn parse_symbol_table_standalone() {
     let container = macho::parse(&mmap).expect("failed to parse");
     let mach = container.first_mach();
 
-    let symtab = macho::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
+    let symtab = macho::format::parse_symbol_table(mach).expect("failed to parse symbol table");
     assert!(!symtab.is_empty());
 }
 
@@ -148,7 +148,7 @@ fn missing_symtab_returns_error() {
     let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
-    let result = macho::parse::parse_symbol_table(mach);
+    let result = macho::format::parse_symbol_table(mach);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -164,7 +164,7 @@ fn stab_symbols_have_stab_type() {
 
     // Check all arches — some may have stab symbols from debug info
     for mach in container.mach_files() {
-        let symtab = match macho::parse::parse_symbol_table(mach) {
+        let symtab = match macho::format::parse_symbol_table(mach) {
             Ok(st) => st,
             Err(_) => continue,
         };
@@ -235,7 +235,7 @@ fn synthetic_symtab_parsing() {
     let container = macho::parse(&data).expect("failed to parse");
     let mach = container.first_mach();
 
-    let symtab = macho::parse::parse_symbol_table(mach).expect("failed to parse symbol table");
+    let symtab = macho::format::parse_symbol_table(mach).expect("failed to parse symbol table");
 
     assert_eq!(symtab.len(), 2);
 

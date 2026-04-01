@@ -1,5 +1,6 @@
-use macho::depgraph::compat::{CompatCategory, CompatReport, CompatSeverity};
-use macho::depgraph::graph::{DepGraph, DylibLinkKind, ImportProvider, IssueSeverity};
+use macho::analysis::deps::compat::{CompatCategory, CompatReport, CompatSeverity};
+use macho::analysis::deps::graph::{DepGraph, ImportProvider, IssueSeverity};
+use macho::metadata::image::DylibLinkKind;
 use macho::model::container::MachContainer;
 
 fn load_binary(path: &str) -> memmap2::Mmap {

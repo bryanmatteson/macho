@@ -1,5 +1,5 @@
-use crate::addr::{ThinFileOffset, Va};
-use crate::constants::{SegmentFlags, VmProtection};
+use crate::format::constants::{SegmentFlags, VmProtection};
+use crate::model::addr::{ThinFileOffset, Va};
 use crate::model::names::SegmentName;
 use crate::model::section::Section;
 

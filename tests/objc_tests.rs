@@ -1,4 +1,4 @@
-use macho::objc::{ObjCMetadata, parse_objc_metadata};
+use macho::metadata::objc::{ObjCMetadata, parse_objc_metadata};
 
 fn load_plutil() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/plutil").expect("failed to open /usr/bin/plutil");
@@ -101,7 +101,7 @@ fn header_rendering() {
     for mach in container.mach_files() {
         if let Ok(meta) = parse_objc_metadata(mach) {
             for class in &meta.classes {
-                let header = macho::objc::render::render_class_header(class);
+                let header = macho::metadata::objc::render::render_class_header(class);
                 assert!(header.contains("@interface"));
                 assert!(header.contains("@end"));
                 assert!(header.contains(&class.name));

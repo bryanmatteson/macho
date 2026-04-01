@@ -1,16 +1,16 @@
 use std::collections::BTreeMap;
 
-use macho::addr::ThinFileOffset;
-use macho::addr::Va;
-use macho::model::container::MachContainer;
-use macho::objc::graph::{
+use macho::metadata::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, PropertyEntry, ProtocolNode,
     SelectorOwner,
 };
-use macho::objc::{
+use macho::metadata::objc::{
     ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, ObjCProperty, ObjCProtocol,
     parse_objc_metadata,
 };
+use macho::model::addr::ThinFileOffset;
+use macho::model::addr::Va;
+use macho::model::container::MachContainer;
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
     let data = std::fs::read(path).expect("read");
@@ -93,7 +93,9 @@ fn graph_effective_methods_includes_all() {
                 >= node
                     .instance_methods
                     .iter()
-                    .filter(|m| { matches!(m.origin, macho::objc::graph::MethodOrigin::Class) })
+                    .filter(|m| {
+                        matches!(m.origin, macho::metadata::objc::graph::MethodOrigin::Class)
+                    })
                     .count()
         );
 
@@ -221,7 +223,7 @@ fn graph_method_resolution_follows_inheritance() {
     assert_eq!(resolved.class_name, "BaseWidget");
     assert!(matches!(
         resolved.resolution,
-        macho::objc::graph::MethodResolution::Inherited { .. }
+        macho::metadata::objc::graph::MethodResolution::Inherited { .. }
     ));
 }
 
@@ -465,7 +467,7 @@ fn graph_method_impl_helpers_report_va_and_offset() {
         .expect("expected method file offset");
     let expected_offset = mach
         .address_map()
-        .va_to_thin_offset(macho::addr::Va(method.imp))
+        .va_to_thin_offset(macho::model::addr::Va(method.imp))
         .expect("expected address-map translation");
     assert_eq!(method_offset, expected_offset);
     assert!(matches!(method_offset, ThinFileOffset(_)));
