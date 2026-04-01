@@ -1,5 +1,5 @@
 use crate::cpp::types::{
-    CppClass, CppFunctionDecl, CppHeaderUnit, CppRefQualifier, CppUnifiedIndex,
+    CppClass, CppFunctionDecl, CppHeaderUnit, CppRefQualifier, CppUnifiedIndex, QualifiedName,
 };
 use std::collections::BTreeMap;
 
@@ -26,25 +26,14 @@ pub fn render_header(unit: &CppHeaderUnit) -> String {
         out.push('\n');
     }
 
-    if !ordered_classes.is_empty() {
-        for class in &ordered_classes {
-            out.push_str(&format!("class {};\n", class.name));
-        }
-        out.push('\n');
-    }
-
-    for class in &ordered_classes {
-        out.push_str(&render_class(class));
-        out.push('\n');
-    }
-
-    for function in dedup_functions(&unit.free_functions)
-        .into_iter()
-        .filter(|function| !is_runtime_operator(function))
-    {
-        out.push_str(&render_function(function, true));
-        out.push('\n');
-    }
+    render_namespace_members(
+        &mut out,
+        &ordered_classes,
+        &dedup_functions(&unit.free_functions)
+            .into_iter()
+            .filter(|function| !is_runtime_operator(function))
+            .collect::<Vec<_>>(),
+    );
 
     out
 }
@@ -89,9 +78,10 @@ pub fn default_header_unit(index: &CppUnifiedIndex) -> CppHeaderUnit {
 }
 
 fn render_class(class: &CppClass) -> String {
+    let qualified = QualifiedName::from_text(&class.name);
     let mut out = String::new();
     out.push_str("class ");
-    out.push_str(&class.name);
+    out.push_str(qualified.leaf().unwrap_or(&class.name));
     if !class.bases.is_empty() {
         let bases = class
             .bases
@@ -123,19 +113,7 @@ fn render_class(class: &CppClass) -> String {
 fn dedup_functions<'a>(functions: &'a [CppFunctionDecl]) -> Vec<&'a CppFunctionDecl> {
     let mut ordered: BTreeMap<String, &CppFunctionDecl> = BTreeMap::new();
     for function in functions {
-        let key = format!(
-            "{}|{}|{}|{}",
-            function.name.leaf().unwrap_or_default(),
-            function
-                .signature
-                .params
-                .iter()
-                .map(|param| param.ty.render())
-                .collect::<Vec<_>>()
-                .join(","),
-            function.is_constructor,
-            function.is_destructor
-        );
+        let key = function.overload_key();
         ordered.entry(key).or_insert(function);
     }
     ordered.into_values().collect()
@@ -153,6 +131,7 @@ fn is_runtime_operator(function: &CppFunctionDecl) -> bool {
 
 fn render_function(function: &CppFunctionDecl, terminate: bool) -> String {
     let mut out = String::new();
+    let qualified = function.name.parent();
     if function.is_virtual {
         out.push_str("virtual ");
     }
@@ -167,7 +146,19 @@ fn render_function(function: &CppFunctionDecl, terminate: bool) -> String {
         );
         out.push(' ');
     }
-    out.push_str(function.name.leaf().unwrap_or_default());
+    if terminate {
+        if let Some(parent) = qualified {
+            if !is_namespace_owner(&parent, function) {
+                out.push_str(&function.name.as_string());
+            } else {
+                out.push_str(function.name.leaf().unwrap_or_default());
+            }
+        } else {
+            out.push_str(function.name.leaf().unwrap_or_default());
+        }
+    } else {
+        out.push_str(function.name.leaf().unwrap_or_default());
+    }
     out.push('(');
     out.push_str(
         &function
@@ -200,6 +191,86 @@ fn render_function(function: &CppFunctionDecl, terminate: bool) -> String {
         out.push(';');
     }
     out
+}
+
+fn render_namespace_members(
+    out: &mut String,
+    classes: &[&CppClass],
+    functions: &[&CppFunctionDecl],
+) {
+    #[derive(Default)]
+    struct NamespaceBucket<'a> {
+        classes: Vec<&'a CppClass>,
+        functions: Vec<&'a CppFunctionDecl>,
+    }
+
+    let mut buckets: BTreeMap<Vec<String>, NamespaceBucket<'_>> = BTreeMap::new();
+
+    for class in classes {
+        let q = QualifiedName::from_text(&class.name);
+        let ns = q
+            .components
+            .get(..q.components.len().saturating_sub(1))
+            .unwrap_or(&[])
+            .to_vec();
+        buckets.entry(ns).or_default().classes.push(*class);
+    }
+    for function in functions {
+        let q = &function.name;
+        let ns = q
+            .components
+            .get(..q.components.len().saturating_sub(1))
+            .unwrap_or(&[])
+            .to_vec();
+        buckets.entry(ns).or_default().functions.push(*function);
+    }
+
+    for (namespace, bucket) in buckets {
+        open_namespaces(out, &namespace);
+        if !bucket.classes.is_empty() {
+            for class in &bucket.classes {
+                let leaf = QualifiedName::from_text(&class.name)
+                    .leaf()
+                    .unwrap_or(&class.name)
+                    .to_string();
+                out.push_str(&format!("class {leaf};\n"));
+            }
+            out.push('\n');
+        }
+        for class in &bucket.classes {
+            out.push_str(&render_class(class));
+            out.push('\n');
+        }
+        for function in &bucket.functions {
+            out.push_str(&render_function(function, true));
+            out.push('\n');
+        }
+        close_namespaces(out, namespace.len());
+    }
+}
+
+fn open_namespaces(out: &mut String, namespace: &[String]) {
+    for component in namespace {
+        out.push_str("namespace ");
+        out.push_str(component);
+        out.push_str(" {\n");
+    }
+}
+
+fn close_namespaces(out: &mut String, depth: usize) {
+    for _ in 0..depth {
+        out.push_str("} // namespace\n");
+    }
+    if depth > 0 {
+        out.push('\n');
+    }
+}
+
+fn is_namespace_owner(parent: &QualifiedName, function: &CppFunctionDecl) -> bool {
+    !function.is_method
+        && !function.is_constructor
+        && !function.is_destructor
+        && !parent.components.is_empty()
 }
 
 #[cfg(test)]

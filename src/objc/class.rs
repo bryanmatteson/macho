@@ -3,10 +3,10 @@ use crate::error::Result;
 use crate::io::pod::{self, RawClassRoT64};
 use crate::objc::ivar::parse_ivar_list;
 use crate::objc::method::parse_method_list;
-use crate::objc::property::parse_property_list;
+use crate::objc::property::{parse_property_list, parse_property_list_with_kind};
 use crate::objc::protocol::parse_protocol_name_list;
 use crate::objc::resolve::ObjCResolver;
-use crate::objc::types::{ObjCClass, RO_META};
+use crate::objc::types::{ObjCClass, ObjCMethod, ObjCProperty, RO_META};
 
 pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClass> {
     let class_offset = resolver.va_to_offset(class_va)?;
@@ -74,10 +74,13 @@ pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClas
 
     // Parse metaclass for class methods
     let meta_offset = class_offset.as_usize() as u64; // isa field
-    let class_methods = match resolver.read_pointer_at_offset(meta_offset)? {
-        Some(meta_va) => parse_metaclass_methods(resolver, meta_va).unwrap_or_default(),
-        None => Vec::new(),
+    let (class_methods, class_properties) = match resolver.read_pointer_at_offset(meta_offset)? {
+        Some(meta_va) => parse_metaclass_surface(resolver, meta_va).unwrap_or_default(),
+        None => (Vec::new(), Vec::new()),
     };
+
+    let mut properties = properties;
+    properties.extend(class_properties);
 
     Ok(ObjCClass {
         name,
@@ -128,23 +131,31 @@ pub(crate) fn resolve_class_name_from_va(
     resolver.read_cstring(name_va).ok().map(|s| s.to_string())
 }
 
-fn parse_metaclass_methods(
+fn parse_metaclass_surface(
     resolver: &ObjCResolver<'_>,
     meta_va: Va,
-) -> Result<Vec<crate::objc::types::ObjCMethod>> {
+) -> Result<(Vec<ObjCMethod>, Vec<ObjCProperty>)> {
     let meta_offset = resolver.va_to_offset(meta_va)?;
 
     let data_ptr_offset = meta_offset.as_usize() as u64 + 32;
     let data_va = match resolver.read_pointer_at_offset(data_ptr_offset)? {
         Some(va) => Va(va.0 & !1),
-        None => return Ok(Vec::new()),
+        None => return Ok((Vec::new(), Vec::new())),
     };
 
     let ro_offset = resolver.va_to_offset(data_va)?;
 
     let methods_ptr_offset = ro_offset.as_usize() as u64 + 32;
-    match resolver.read_pointer_at_offset(methods_ptr_offset)? {
+    let methods = match resolver.read_pointer_at_offset(methods_ptr_offset)? {
         Some(va) if va.0 != 0 => parse_method_list(resolver, va),
         _ => Ok(Vec::new()),
-    }
+    }?;
+
+    let props_ptr_offset = ro_offset.as_usize() as u64 + 64;
+    let properties = match resolver.read_pointer_at_offset(props_ptr_offset)? {
+        Some(va) if va.0 != 0 => parse_property_list_with_kind(resolver, va, true),
+        _ => Ok(Vec::new()),
+    }?;
+
+    Ok((methods, properties))
 }

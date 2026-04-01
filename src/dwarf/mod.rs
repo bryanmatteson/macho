@@ -1,4 +1,4 @@
-use gimli::{Dwarf, SectionId};
+use gimli::{DwarfSections, SectionId};
 
 use crate::error::{Error, Result};
 use crate::model::mach::MachFile;
@@ -8,12 +8,12 @@ pub fn has_dwarf_sections(mach: &MachFile<'_>) -> bool {
         .any(|section| section.segment_name == "__DWARF" || section.section_name == "__debug_info")
 }
 
-pub fn load_dwarf(mach: &MachFile<'_>) -> Result<Option<Dwarf<Vec<u8>>>> {
+pub fn load_dwarf(mach: &MachFile<'_>) -> Result<Option<DwarfSections<Vec<u8>>>> {
     if !has_dwarf_sections(mach) {
         return Ok(None);
     }
 
-    let dwarf = Dwarf::load(|id| load_section_bytes(mach, id))
+    let dwarf = DwarfSections::load(|id| load_section_bytes(mach, id))
         .map_err(|err| Error::Format(format!("failed to load DWARF sections: {err}")))?;
     Ok(Some(dwarf))
 }

@@ -277,9 +277,9 @@ impl HeaderCorrelator for FilesystemHeaderCorrelator {
 
 pub fn analyze_headers(mach: &MachFile<'_>, options: &CAnalysisOptions) -> Result<CAnalysis> {
     let mut builder = CAnalysisBuilder::default();
-    if let Some(dwarf) = load_dwarf(mach)? {
+    if let Some(sections) = load_dwarf(mach)? {
         let endian = runtime_endian(mach.endian());
-        let borrowed = dwarf.borrow(|section| EndianSlice::new(section, endian));
+        let borrowed = sections.borrow(|section| EndianSlice::new(section, endian));
         builder.ingest_dwarf(&borrowed)?;
     }
 
@@ -611,8 +611,8 @@ where
             _ => None,
         };
 
-        out.functions.insert(
-            name.clone(),
+        upsert_function(
+            &mut out.functions,
             CFunctionDecl {
                 name,
                 return_type,
@@ -648,8 +648,8 @@ where
         let source = self.source_for(entry)?;
         let external = attr_flag(entry, gimli::DW_AT_external)?;
 
-        out.globals.insert(
-            name.clone(),
+        upsert_global(
+            &mut out.globals,
             CGlobalDecl {
                 name,
                 ty,
@@ -900,12 +900,14 @@ where
         let name = attr_string(self.dwarf, self.unit, entry, gimli::DW_AT_name)?
             .unwrap_or_else(|| synthetic_tag_name(kind, offset.0 as u64));
         let source = self.source_for(entry)?;
+        let declaration_only = attr_flag(entry, gimli::DW_AT_declaration)?;
         let size = entry
             .attr_value(gimli::DW_AT_byte_size)
             .and_then(attr_udata);
+        let mut fields = Vec::new();
+        let mut complete = !declaration_only;
 
-        if !out.records.contains_key(&name) {
-            let mut fields = Vec::new();
+        if !declaration_only {
             let mut tree = self
                 .unit
                 .entries_tree(Some(offset))
@@ -939,24 +941,25 @@ where
                     bit_size,
                 });
             }
-
-            out.records.insert(
-                name.clone(),
-                CRecordDecl {
-                    kind,
-                    name: name.clone(),
-                    fields,
-                    complete: true,
-                    size,
-                    source,
-                    evidence: vec![EvidenceFact {
-                        kind: EvidenceKind::Dwarf,
-                        confidence: Confidence::DwarfExact,
-                        detail: format!("{kind:?} recovered from DWARF"),
-                    }],
-                },
-            );
+            complete = complete && (size.is_some() || !fields.is_empty());
         }
+
+        upsert_record(
+            &mut out.records,
+            CRecordDecl {
+                kind,
+                name: name.clone(),
+                fields,
+                complete,
+                size,
+                source,
+                evidence: vec![EvidenceFact {
+                    kind: EvidenceKind::Dwarf,
+                    confidence: Confidence::DwarfExact,
+                    detail: format!("{kind:?} recovered from DWARF"),
+                }],
+            },
+        );
 
         Ok(CType::Named {
             name,
@@ -973,9 +976,9 @@ where
         let name = attr_string(self.dwarf, self.unit, entry, gimli::DW_AT_name)?
             .unwrap_or_else(|| synthetic_tag_name(CTagKind::Enum, offset.0 as u64));
         let source = self.source_for(entry)?;
-
-        if !out.enums.contains_key(&name) {
-            let mut variants = Vec::new();
+        let declaration_only = attr_flag(entry, gimli::DW_AT_declaration)?;
+        let mut variants = Vec::new();
+        if !declaration_only {
             let mut tree = self
                 .unit
                 .entries_tree(Some(offset))
@@ -1004,22 +1007,22 @@ where
                     value,
                 });
             }
-
-            out.enums.insert(
-                name.clone(),
-                CEnumDecl {
-                    name: name.clone(),
-                    variants,
-                    complete: true,
-                    source,
-                    evidence: vec![EvidenceFact {
-                        kind: EvidenceKind::Dwarf,
-                        confidence: Confidence::DwarfExact,
-                        detail: "enum recovered from DWARF".to_string(),
-                    }],
-                },
-            );
         }
+
+        upsert_enum(
+            &mut out.enums,
+            CEnumDecl {
+                name: name.clone(),
+                variants,
+                complete: !declaration_only,
+                source,
+                evidence: vec![EvidenceFact {
+                    kind: EvidenceKind::Dwarf,
+                    confidence: Confidence::DwarfExact,
+                    detail: "enum recovered from DWARF".to_string(),
+                }],
+            },
+        );
 
         Ok(CType::Named {
             name,
@@ -1067,13 +1070,21 @@ fn build_header_units(analysis: &CAnalysis) -> Vec<CHeaderUnit> {
             .or_default()
             .push(render_typedef(typedef));
     }
-    for global in &analysis.globals {
+    for global in analysis
+        .globals
+        .iter()
+        .filter(|global| should_emit_global(global))
+    {
         grouped
             .entry(header_name(&global.source))
             .or_default()
             .push(render_global(global));
     }
-    for function in &analysis.functions {
+    for function in analysis
+        .functions
+        .iter()
+        .filter(|function| should_emit_function(function))
+    {
         grouped
             .entry(header_name(&function.source))
             .or_default()
@@ -1361,11 +1372,7 @@ fn classify_symbol(mach: &MachFile<'_>, symbol: &Symbol<'_>) -> SymbolClassifica
         return SymbolClassification::Skip;
     }
     let Some(section) = section_for_symbol(mach, symbol) else {
-        return if symbol.is_undefined() {
-            SymbolClassification::Function
-        } else {
-            SymbolClassification::Skip
-        };
+        return SymbolClassification::Skip;
     };
     if section.section_name == "__text" {
         SymbolClassification::Function
@@ -1402,7 +1409,8 @@ fn normalize_c_symbol_name(name: &str) -> Option<String> {
 
 fn is_probable_c_symbol(name: &str) -> bool {
     let stripped = name.strip_prefix('_').unwrap_or(name);
-    !stripped.starts_with("OBJC_")
+    !stripped.starts_with("ltmp")
+        && !stripped.starts_with("OBJC_")
         && !stripped.starts_with("_OBJC_")
         && !stripped.starts_with("$s")
         && !stripped.starts_with("swift")
@@ -1417,6 +1425,159 @@ fn synthetic_tag_name(kind: CTagKind, offset: u64) -> String {
         CTagKind::Union => format!("__anon_union_{offset:x}"),
         CTagKind::Enum => format!("__anon_enum_{offset:x}"),
     }
+}
+
+fn should_emit_function(function: &CFunctionDecl) -> bool {
+    function.external
+}
+
+fn should_emit_global(global: &CGlobalDecl) -> bool {
+    global.external
+}
+
+fn upsert_function(map: &mut BTreeMap<String, CFunctionDecl>, decl: CFunctionDecl) {
+    match map.get_mut(&decl.name) {
+        Some(existing) => merge_function(existing, decl),
+        None => {
+            map.insert(decl.name.clone(), decl);
+        }
+    }
+}
+
+fn merge_function(existing: &mut CFunctionDecl, incoming: CFunctionDecl) {
+    if existing.confidence <= incoming.confidence {
+        let mut merged = incoming;
+        merged.external |= existing.external;
+        if merged.address.is_none() {
+            merged.address = existing.address;
+        }
+        if merged.source.file.is_none() {
+            merged.source.file = existing.source.file.clone();
+        }
+        if merged.source.line.is_none() {
+            merged.source.line = existing.source.line;
+        }
+        if merged.params.is_empty() {
+            merged.params = existing.params.clone();
+        }
+        merged.variadic |= existing.variadic;
+        merged.evidence.extend(existing.evidence.clone());
+        *existing = merged;
+    } else {
+        existing.external |= incoming.external;
+        if existing.address.is_none() {
+            existing.address = incoming.address;
+        }
+        if existing.source.file.is_none() {
+            existing.source.file = incoming.source.file;
+        }
+        if existing.source.line.is_none() {
+            existing.source.line = incoming.source.line;
+        }
+        if existing.params.is_empty() && !incoming.params.is_empty() {
+            existing.params = incoming.params;
+        }
+        existing.variadic |= incoming.variadic;
+        existing.evidence.extend(incoming.evidence);
+    }
+}
+
+fn upsert_global(map: &mut BTreeMap<String, CGlobalDecl>, decl: CGlobalDecl) {
+    match map.get_mut(&decl.name) {
+        Some(existing) => merge_global(existing, decl),
+        None => {
+            map.insert(decl.name.clone(), decl);
+        }
+    }
+}
+
+fn merge_global(existing: &mut CGlobalDecl, incoming: CGlobalDecl) {
+    if existing.confidence <= incoming.confidence {
+        let mut merged = incoming;
+        merged.external |= existing.external;
+        if merged.address.is_none() {
+            merged.address = existing.address;
+        }
+        if merged.source.file.is_none() {
+            merged.source.file = existing.source.file.clone();
+        }
+        if merged.source.line.is_none() {
+            merged.source.line = existing.source.line;
+        }
+        merged.evidence.extend(existing.evidence.clone());
+        *existing = merged;
+    } else {
+        existing.external |= incoming.external;
+        if existing.address.is_none() {
+            existing.address = incoming.address;
+        }
+        if existing.source.file.is_none() {
+            existing.source.file = incoming.source.file;
+        }
+        if existing.source.line.is_none() {
+            existing.source.line = incoming.source.line;
+        }
+        existing.evidence.extend(incoming.evidence);
+    }
+}
+
+fn upsert_record(map: &mut BTreeMap<String, CRecordDecl>, decl: CRecordDecl) {
+    match map.get_mut(&decl.name) {
+        Some(existing) => merge_record(existing, decl),
+        None => {
+            map.insert(decl.name.clone(), decl);
+        }
+    }
+}
+
+fn merge_record(existing: &mut CRecordDecl, incoming: CRecordDecl) {
+    if !existing.complete && incoming.complete {
+        let mut merged = incoming;
+        merged.evidence.extend(existing.evidence.clone());
+        *existing = merged;
+        return;
+    }
+    if existing.size.is_none() {
+        existing.size = incoming.size;
+    }
+    if existing.source.file.is_none() {
+        existing.source.file = incoming.source.file;
+    }
+    if existing.source.line.is_none() {
+        existing.source.line = incoming.source.line;
+    }
+    if existing.fields.is_empty() && !incoming.fields.is_empty() {
+        existing.fields = incoming.fields;
+    }
+    existing.evidence.extend(incoming.evidence);
+}
+
+fn upsert_enum(map: &mut BTreeMap<String, CEnumDecl>, decl: CEnumDecl) {
+    match map.get_mut(&decl.name) {
+        Some(existing) => merge_enum(existing, decl),
+        None => {
+            map.insert(decl.name.clone(), decl);
+        }
+    }
+}
+
+fn merge_enum(existing: &mut CEnumDecl, incoming: CEnumDecl) {
+    if !existing.complete && incoming.complete {
+        let mut merged = incoming;
+        merged.evidence.extend(existing.evidence.clone());
+        *existing = merged;
+        return;
+    }
+    if existing.source.file.is_none() {
+        existing.source.file = incoming.source.file;
+    }
+    if existing.source.line.is_none() {
+        existing.source.line = incoming.source.line;
+    }
+    if existing.variants.is_empty() && !incoming.variants.is_empty() {
+        existing.variants = incoming.variants;
+    }
+    existing.evidence.extend(incoming.evidence);
 }
 
 fn runtime_endian(endian: Endian) -> RunTimeEndian {
@@ -1528,19 +1689,17 @@ mod tests {
 
     #[test]
     fn renders_function_pointer_type() {
-        let ty = CType::Pointer {
-            to: Box::new(CType::FunctionPointer {
-                return_type: Box::new(CType::Builtin {
-                    name: "int".to_string(),
-                }),
-                params: vec![CParamType {
-                    name: Some("value".to_string()),
-                    ty: CType::Builtin {
-                        name: "int".to_string(),
-                    },
-                }],
-                variadic: false,
+        let ty = CType::FunctionPointer {
+            return_type: Box::new(CType::Builtin {
+                name: "int".to_string(),
             }),
+            params: vec![CParamType {
+                name: Some("value".to_string()),
+                ty: CType::Builtin {
+                    name: "int".to_string(),
+                },
+            }],
+            variadic: false,
         };
 
         assert_eq!(

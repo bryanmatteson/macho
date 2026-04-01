@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::cpp::mark_virtual_methods;
 use crate::cpp::types::{
     CppClass, CppConfidence, CppFunctionDecl, CppHeaderMatch, CppImageIndex, CppUnifiedIndex,
 };
@@ -25,6 +26,10 @@ pub fn unify_images(images: &[CppImageIndex]) -> CppUnifiedIndex {
                 .and_modify(|existing| merge_function(existing, function))
                 .or_insert_with(|| function.clone());
         }
+    }
+
+    for class in classes.values_mut() {
+        mark_virtual_methods(class);
     }
 
     CppUnifiedIndex {
@@ -81,14 +86,7 @@ fn merge_function(existing: &mut CppFunctionDecl, incoming: &CppFunctionDecl) {
 }
 
 fn function_key(function: &CppFunctionDecl) -> String {
-    let params = function
-        .signature
-        .params
-        .iter()
-        .map(|param| param.ty.render())
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("{}({params})", function.name)
+    function.overload_key()
 }
 
 pub fn correlation_stub(header: &str, declaration: &str) -> CppHeaderMatch {

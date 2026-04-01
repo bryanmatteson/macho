@@ -12,7 +12,8 @@ Those drafts have been consolidated into the plan set below. Plans `01` through
 `05` describe the analysis foundation that is already partially represented in
 the current tree (`src/analysis/`, `src/diff/`, `src/audit/`,
 `src/container_analysis/`, `src/objc/graph.rs`, `src/swift/`). Plans `06`
-through `10` are the canonical follow-on API and analysis tracks.
+through `14` are the canonical follow-on API, fidelity, inference, and
+packaging tracks.
 
 ## Canonical Plan Set
 
@@ -31,6 +32,10 @@ through `10` are the canonical follow-on API and analysis tracks.
 8. `08-dependency-and-compatibility-plan.md`
 9. `09-binary-data-analysis-plan.md`
 10. `10-objc-header-fidelity-plan.md`
+11. `11-cpp-header-fidelity-plan.md`
+12. `12-c-header-fidelity-plan.md`
+13. `13-llm-header-inference-plan.md`
+14. `14-workspace-crate-refactor-plan.md`
 
 ## Recommended Sequence
 
@@ -47,6 +52,10 @@ that keeps shared infrastructure from being reinvented:
 8. `08-dependency-and-compatibility-plan.md`
 9. `09-binary-data-analysis-plan.md`
 10. `10-objc-header-fidelity-plan.md`
+11. `11-cpp-header-fidelity-plan.md`
+12. `12-c-header-fidelity-plan.md`
+13. `13-llm-header-inference-plan.md`
+14. `14-workspace-crate-refactor-plan.md`
 
 ## Dependency Notes
 
@@ -69,6 +78,12 @@ that keeps shared infrastructure from being reinvented:
 - `10-objc-header-fidelity-plan.md` is the canonical home for raising
   `macho objc --headers` toward class-dump-style fidelity using structured
   ObjC encoding parsing and richer header rendering.
+- `11-cpp-header-fidelity-plan.md`, `12-c-header-fidelity-plan.md`, and
+  `13-llm-header-inference-plan.md` extend the roadmap from metadata recovery
+  into higher-fidelity declaration reconstruction and evidence-driven inference.
+- `14-workspace-crate-refactor-plan.md` is the canonical home for the package
+  and crate-boundary refactor that turns the current monolithic crate into a
+  reusable workspace.
 
 ## Repository Anchors
 

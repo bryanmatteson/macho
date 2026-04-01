@@ -54,9 +54,10 @@ fn dwarf_analysis_recovers_c_surface() {
         };
 
         int shared_value = 7;
+        enum Mode current_mode = MODE_BUSY;
 
         int widget_sum(Widget *widget, int extra) {
-            return widget->count + extra;
+            return widget->count + extra + current_mode;
         }
         "#,
     );
@@ -149,6 +150,68 @@ fn c_command_outputs_json() {
             .expect("single-arch payload")
     };
     assert!(payload["functions"].is_array());
+
+    let _ = std::fs::remove_file(&object);
+}
+
+#[test]
+fn no_dwarf_fallback_does_not_guess_undefined_imports_as_functions() {
+    let object = unique_path("c-no-dwarf-imports", "o");
+    let source = unique_path("c-no-dwarf-imports", "c");
+    std::fs::write(
+        &source,
+        r#"
+        extern int printf(const char *, ...);
+        int local_sum(int value) { return printf("%d", value); }
+        "#,
+    )
+    .expect("write source");
+
+    let output = Command::new("clang")
+        .arg("-g0")
+        .arg("-c")
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("run clang");
+    assert!(
+        output.status.success(),
+        "clang failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bytes = std::fs::read(&object).expect("read object");
+    let container = macho::parse(&bytes).expect("parse object");
+    let mach = container.first_mach();
+    let analysis = analyze_headers(mach, &CAnalysisOptions::default()).expect("analyze");
+    let header = render_header(&analysis);
+
+    assert!(header.contains("local_sum"));
+    assert!(!header.contains("printf("));
+
+    let _ = std::fs::remove_file(&source);
+    let _ = std::fs::remove_file(&object);
+}
+
+#[test]
+fn header_output_skips_internal_static_symbols() {
+    let object = compile_c_fixture(
+        "c-static-filter",
+        r#"
+        static int internal_helper(int value) { return value + 2; }
+        int exported_value(int value) { return internal_helper(value); }
+        "#,
+    );
+
+    let bytes = std::fs::read(&object).expect("read object");
+    let container = macho::parse(&bytes).expect("parse object");
+    let mach = container.first_mach();
+    let analysis = analyze_headers(mach, &CAnalysisOptions::default()).expect("analyze");
+    let header = render_header(&analysis);
+
+    assert!(header.contains("exported_value"));
+    assert!(!header.contains("internal_helper"));
 
     let _ = std::fs::remove_file(&object);
 }

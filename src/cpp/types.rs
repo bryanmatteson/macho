@@ -240,6 +240,47 @@ pub struct CppFunctionDecl {
     pub body_analysis: Option<CppBodyAnalysis>,
 }
 
+impl CppFunctionDecl {
+    pub fn signature_key(&self) -> String {
+        let mut out = String::new();
+        out.push_str(&self.name.as_string());
+        out.push('(');
+        out.push_str(
+            &self
+                .signature
+                .params
+                .iter()
+                .map(|param| param.ty.render())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        out.push(')');
+        if self.signature.is_const {
+            out.push_str(" const");
+        }
+        if self.signature.is_volatile {
+            out.push_str(" volatile");
+        }
+        if let Some(ref_qualifier) = &self.signature.ref_qualifier {
+            match ref_qualifier {
+                CppRefQualifier::Lvalue => out.push_str(" &"),
+                CppRefQualifier::Rvalue => out.push_str(" &&"),
+            }
+        }
+        out
+    }
+
+    pub fn overload_key(&self) -> String {
+        format!(
+            "{}|ctor:{}|dtor:{}|noexcept:{}",
+            self.signature_key(),
+            self.is_constructor,
+            self.is_destructor,
+            self.signature.noexcept
+        )
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CppSymbolKind {

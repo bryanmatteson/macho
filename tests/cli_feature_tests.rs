@@ -545,7 +545,7 @@ fn objc_xrefs_json_reports_symbol_links() {
 }
 
 #[test]
-fn objc_headers_render_typed_selectors_and_property_comments() {
+fn objc_headers_render_class_dump_style_property_accessors() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-headers-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
@@ -576,7 +576,9 @@ fn objc_headers_render_typed_selectors_and_property_comments() {
     assert!(stdout.contains(
         "- (id)initWithArguments:(id)arg1 outputFileHandle:(id)arg2 errorFileHandle:(id)arg3;"
     ));
-    assert!(stdout.contains("@property (strong) NSString *format; // ivar: _format"));
+    assert!(stdout.contains("@property (strong) NSString *format;"));
+    assert!(stdout.contains("- (NSString *)format;"));
+    assert!(stdout.contains("- (void)setFormat:(NSString *)arg1;"));
 }
 
 #[test]

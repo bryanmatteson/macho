@@ -4,7 +4,8 @@ use macho::analysis::snapshot::{
     AnalysisIssueSnapshot, CodesignSnapshot, ContainerFormat, ContainerSnapshot,
     DiagnosticSnapshot, FilesetEntrySnapshot, FixupKindSnapshot, FixupSnapshot, HeaderSnapshot,
     ImportSnapshot, LoadCommandSnapshot, ObjCCategorySnapshot, ObjCClassSnapshot,
-    ObjCMethodSnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot, SliceSnapshot,
+    ObjCMethodSnapshot, ObjCPropertySnapshot, ObjCProtocolSnapshot, ObjCSnapshot, PlatformSnapshot,
+    SliceSnapshot,
 };
 use macho::diff::{ChangeSeverity, DiffDomain, diff_containers};
 use support::run_cli;
@@ -105,7 +106,11 @@ fn synthetic_objc_snapshot() -> ContainerSnapshot {
                 type_encoding: "v16@0:8".into(),
             }],
             class_methods: Vec::new(),
-            properties: vec!["title".into()],
+            properties: vec![ObjCPropertySnapshot {
+                name: "title".into(),
+                attributes: "T@\"NSString\",&,N,V_title".into(),
+                is_class: false,
+            }],
             protocols: vec!["WidgetProtocol".into()],
             ivars: vec!["_title".into()],
             is_swift: false,
@@ -120,10 +125,18 @@ fn synthetic_objc_snapshot() -> ContainerSnapshot {
         }],
         protocols: vec![ObjCProtocolSnapshot {
             name: "WidgetProtocol".into(),
-            instance_methods: vec!["render".into()],
+            instance_methods: vec![ObjCMethodSnapshot {
+                name: "render".into(),
+                type_encoding: "v16@0:8".into(),
+            }],
             class_methods: Vec::new(),
             optional_instance_methods: Vec::new(),
             optional_class_methods: Vec::new(),
+            properties: vec![ObjCPropertySnapshot {
+                name: "delegate".into(),
+                attributes: "T@\"NSObject\",W".into(),
+                is_class: false,
+            }],
             adopted_protocols: vec!["NSObject".into()],
         }],
     };
@@ -622,15 +635,37 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
     let class = &mut new.slices[0].objc.classes[0];
     class.superclass = Some("UIResponder".into());
     class.is_swift = true;
-    class.properties.push("subtitle".into());
+    class.properties.push(ObjCPropertySnapshot {
+        name: "subtitle".into(),
+        attributes: "T@\"NSString\",&,N,V_subtitle".into(),
+        is_class: false,
+    });
+    class.properties.push(ObjCPropertySnapshot {
+        name: "sharedWidget".into(),
+        attributes: "T@\"Widget\",&,N".into(),
+        is_class: true,
+    });
+    class.properties[0].attributes = "T@\"NSNumber\",&,N,V_title".into();
     class.ivars.push("_subtitle".into());
     class.protocols.push("Serializable".into());
     new.slices[0].objc.categories[0]
         .properties
-        .push("handler".into());
+        .push(ObjCPropertySnapshot {
+            name: "handler".into(),
+            attributes: "T@?,C,N".into(),
+            is_class: false,
+        });
     new.slices[0].objc.categories[0]
         .protocols
         .push("Inspectable".into());
+    new.slices[0].objc.protocols[0]
+        .properties
+        .push(ObjCPropertySnapshot {
+            name: "title".into(),
+            attributes: "T@\"NSString\",R".into(),
+            is_class: false,
+        });
+    new.slices[0].objc.protocols[0].instance_methods[0].type_encoding = "v24@0:8@16".into();
     new.slices[0].objc.protocols[0]
         .adopted_protocols
         .push("NSCopying".into());
@@ -661,6 +696,14 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
     assert!(
         objc_messages
             .iter()
+            .any(|message| message.contains("class property added: sharedWidget"))
+    );
+    assert!(objc_messages.iter().any(|message| {
+        message.contains("ObjC class Widget property changed: title attributes:")
+    }));
+    assert!(
+        objc_messages
+            .iter()
             .any(|message| message.contains("ivar added: _subtitle"))
     );
     assert!(
@@ -683,6 +726,14 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
             .iter()
             .any(|message| message.contains("adopted protocol added: NSCopying"))
     );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("ObjC protocol WidgetProtocol property added: title"))
+    );
+    assert!(objc_messages.iter().any(|message| {
+        message.contains("protocol WidgetProtocol required: -render type encoding changed:")
+    }));
 }
 
 #[test]

@@ -690,22 +690,12 @@ fn diff_objc(
                 ),
             });
         }
-        diff_string_set(
-            DiffDomain::ObjC,
-            ChangeSeverity::Info,
-            ChangeSeverity::Warning,
+        diff_objc_properties(
+            &format!("ObjC class {name}"),
+            &oc.properties,
+            &nc.properties,
             arch,
             findings,
-            (
-                oc.properties.iter().map(|value| value.as_str()).collect(),
-                nc.properties.iter().map(|value| value.as_str()).collect(),
-            ),
-            |value, removed| {
-                format!(
-                    "ObjC class {name} property {}: {value}",
-                    if removed { "removed" } else { "added" }
-                )
-            },
         );
         diff_string_set(
             DiffDomain::ObjC,
@@ -818,22 +808,12 @@ fn diff_objc(
                 )
             },
         );
-        diff_string_set(
-            DiffDomain::ObjC,
-            ChangeSeverity::Info,
-            ChangeSeverity::Warning,
+        diff_objc_properties(
+            &format!("ObjC category {cat} on {cls}"),
+            &oc.properties,
+            &nc.properties,
             arch,
             findings,
-            (
-                oc.properties.iter().map(|value| value.as_str()).collect(),
-                nc.properties.iter().map(|value| value.as_str()).collect(),
-            ),
-            |value, removed| {
-                format!(
-                    "ObjC category {cat} on {cls} property {}: {value}",
-                    if removed { "removed" } else { "added" }
-                )
-            },
         );
         diff_objc_methods(
             &label,
@@ -901,33 +881,40 @@ fn diff_objc(
                 )
             },
         );
-        diff_protocol_selectors(
-            name,
-            "required-",
+        diff_objc_properties(
+            &format!("ObjC protocol {name}"),
+            &op.properties,
+            &np.properties,
+            arch,
+            findings,
+        );
+        diff_objc_methods(
+            &format!("protocol {name} required"),
+            '-',
             &op.instance_methods,
             &np.instance_methods,
             arch,
             findings,
         );
-        diff_protocol_selectors(
-            name,
-            "required+",
+        diff_objc_methods(
+            &format!("protocol {name} required"),
+            '+',
             &op.class_methods,
             &np.class_methods,
             arch,
             findings,
         );
-        diff_protocol_selectors(
-            name,
-            "optional-",
+        diff_objc_methods(
+            &format!("protocol {name} optional"),
+            '-',
             &op.optional_instance_methods,
             &np.optional_instance_methods,
             arch,
             findings,
         );
-        diff_protocol_selectors(
-            name,
-            "optional+",
+        diff_objc_methods(
+            &format!("protocol {name} optional"),
+            '+',
             &op.optional_class_methods,
             &np.optional_class_methods,
             arch,
@@ -1373,7 +1360,7 @@ fn diff_objc_methods(
     }
     for (sel, old_enc) in &old_map {
         if let Some(new_enc) = new_map.get(sel) {
-            if !old_enc.is_empty() && !new_enc.is_empty() && old_enc != new_enc {
+            if old_enc != new_enc {
                 findings.push(DiffFinding {
                     domain: DiffDomain::ObjC,
                     severity: ChangeSeverity::Warning,
@@ -1387,31 +1374,76 @@ fn diff_objc_methods(
     }
 }
 
-/// Diff two protocol selector lists (plain strings, no type encoding).
-fn diff_protocol_selectors(
-    protocol: &str,
-    method_kind: &str,
-    old: &[String],
-    new: &[String],
+fn diff_objc_properties(
+    subject: &str,
+    old: &[ObjCPropertySnapshot],
+    new: &[ObjCPropertySnapshot],
     arch: &Option<String>,
     findings: &mut Vec<DiffFinding>,
 ) {
-    let old_set: BTreeSet<&str> = old.iter().map(|s| s.as_str()).collect();
-    let new_set: BTreeSet<&str> = new.iter().map(|s| s.as_str()).collect();
-    for sel in old_set.difference(&new_set) {
-        findings.push(DiffFinding {
-            domain: DiffDomain::ObjC,
-            severity: ChangeSeverity::Warning,
-            arch: arch.clone(),
-            message: format!("protocol {protocol}: {method_kind} method removed: {sel}"),
-        });
+    let old_map: BTreeMap<(bool, &str), &str> = old
+        .iter()
+        .map(|property| {
+            (
+                (property.is_class, property.name.as_str()),
+                property.attributes.as_str(),
+            )
+        })
+        .collect();
+    let new_map: BTreeMap<(bool, &str), &str> = new
+        .iter()
+        .map(|property| {
+            (
+                (property.is_class, property.name.as_str()),
+                property.attributes.as_str(),
+            )
+        })
+        .collect();
+
+    for name in old_map.keys() {
+        if !new_map.contains_key(name) {
+            findings.push(DiffFinding {
+                domain: DiffDomain::ObjC,
+                severity: ChangeSeverity::Warning,
+                arch: arch.clone(),
+                message: format!("{subject} {} removed: {}", property_label(name.0), name.1),
+            });
+        }
     }
-    for sel in new_set.difference(&old_set) {
-        findings.push(DiffFinding {
-            domain: DiffDomain::ObjC,
-            severity: ChangeSeverity::Info,
-            arch: arch.clone(),
-            message: format!("protocol {protocol}: {method_kind} method added: {sel}"),
-        });
+
+    for name in new_map.keys() {
+        if !old_map.contains_key(name) {
+            findings.push(DiffFinding {
+                domain: DiffDomain::ObjC,
+                severity: ChangeSeverity::Info,
+                arch: arch.clone(),
+                message: format!("{subject} {} added: {}", property_label(name.0), name.1),
+            });
+        }
+    }
+
+    for (name, old_attrs) in &old_map {
+        if let Some(new_attrs) = new_map.get(name) {
+            if old_attrs != new_attrs {
+                findings.push(DiffFinding {
+                    domain: DiffDomain::ObjC,
+                    severity: ChangeSeverity::Warning,
+                    arch: arch.clone(),
+                    message: format!(
+                        "{subject} {} changed: {} attributes: {old_attrs} -> {new_attrs}",
+                        property_label(name.0),
+                        name.1,
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn property_label(is_class: bool) -> &'static str {
+    if is_class {
+        "class property"
+    } else {
+        "property"
     }
 }

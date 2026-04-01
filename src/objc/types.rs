@@ -75,6 +75,7 @@ impl ObjCIvar {
 pub struct ObjCProperty {
     pub name: String,
     pub attributes: String,
+    pub is_class: bool,
 }
 
 impl ObjCProperty {

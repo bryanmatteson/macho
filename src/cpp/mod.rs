@@ -28,7 +28,19 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
 
     let mut symbols = Vec::new();
     let mut classes: BTreeMap<String, types::CppClass> = BTreeMap::new();
-    let mut free_functions = Vec::new();
+    let mut pending_functions = Vec::new();
+    let mut probable_classes: std::collections::BTreeSet<String> =
+        typeinfos.keys().cloned().collect();
+
+    for vtable in vtables.vtables() {
+        if let Some(name) = vtable
+            .name
+            .as_deref()
+            .and_then(|text| text.strip_prefix("vtable for "))
+        {
+            probable_classes.insert(name.to_string());
+        }
+    }
 
     for symbol in symtab.symbols() {
         let Some(mut record) = parse_symbol(symbol.name, Some(symbol.value)) else {
@@ -37,19 +49,12 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
 
         if let types::CppSymbolKind::Function { ref mut decl } = record.kind {
             decl.body_analysis = analyze_symbol_body(mach, &symtab, symbol);
-            if let Some(class_name) = decl
-                .name
-                .parent()
-                .and_then(|parent| parent.leaf().map(str::to_string))
-            {
-                classes
-                    .entry(class_name.clone())
-                    .or_insert_with(|| seed_class(&class_name, typeinfos.get(&class_name)))
-                    .methods
-                    .push(decl.clone());
-            } else {
-                free_functions.push(decl.clone());
+            if let Some(parent) = decl.name.parent() {
+                if decl.is_constructor || decl.is_destructor {
+                    probable_classes.insert(parent.as_string());
+                }
             }
+            pending_functions.push(decl.clone());
         }
 
         symbols.push(record);
@@ -72,7 +77,24 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
             confidence: types::CppConfidence::High,
             detail: format!("{} @ {:#x}", name, vtable.va.0),
         });
-        mark_virtual_methods(class);
+    }
+
+    let mut free_functions = Vec::new();
+    for mut function in pending_functions {
+        if let Some(parent) = function.name.parent() {
+            let owner = parent.as_string();
+            if probable_classes.contains(&owner) {
+                function.is_method = true;
+                classes
+                    .entry(owner.clone())
+                    .or_insert_with(|| seed_class(&owner, typeinfos.get(&owner)))
+                    .methods
+                    .push(function);
+                continue;
+            }
+        }
+        function.is_method = false;
+        free_functions.push(function);
     }
 
     for (name, typeinfo) in &typeinfos {
@@ -85,14 +107,20 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
             .or_insert_with(|| seed_class(name, Some(typeinfo)));
     }
 
+    for class in classes.values_mut() {
+        mark_virtual_methods(class);
+    }
+
     Ok(types::CppImageIndex {
         image: types::CppImageInfo {
             arch: mach.header().cpu_type.name().to_string(),
             uuid: mach.uuid().map(crate::model::load_command::format_uuid),
-            install_name: mach
-                .load_commands()
-                .iter()
-                .find_map(|lc| lc.kind.as_dylib().map(|data| data.name.to_string())),
+            install_name: mach.load_commands().iter().find_map(|lc| match &lc.kind {
+                crate::model::load_command::LoadCommand::IdDylib(data) => {
+                    Some(data.name.to_string())
+                }
+                _ => None,
+            }),
         },
         symbols,
         typeinfos,
@@ -156,20 +184,33 @@ fn convert_vtable(vtable: &crate::data_surface::vtable::VtableEntry) -> types::C
     }
 }
 
-fn mark_virtual_methods(class: &mut types::CppClass) {
+pub(crate) fn mark_virtual_methods(class: &mut types::CppClass) {
     let mut method_names = std::collections::BTreeSet::new();
     for vtable in &class.vtables {
         for slot in &vtable.slots {
             if let Some(target_name) = &slot.target_name {
                 method_names.insert(target_name.clone());
+                if let Some(without_return) = strip_leading_return_type(target_name) {
+                    method_names.insert(without_return.to_string());
+                }
             }
         }
     }
     for method in &mut class.methods {
-        if method_names.contains(&method.demangled_name) {
+        if method_names.contains(&method.demangled_name)
+            || method_names.contains(&method.name.as_string())
+            || method_names.contains(&method.signature_key())
+        {
             method.is_virtual = true;
         }
     }
+}
+
+fn strip_leading_return_type(text: &str) -> Option<&str> {
+    let open = text.find('(')?;
+    let prefix = &text[..open];
+    let split = prefix.rfind(' ')?;
+    Some(text[split + 1..].trim_start())
 }
 
 pub fn build_headers_for_mach(mach: &MachFile<'_>) -> Result<String> {

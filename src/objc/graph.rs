@@ -24,7 +24,7 @@ pub struct ClassNode {
     pub class_methods: Vec<MethodEntry>,
     pub effective_instance_methods: Vec<MethodEntry>,
     pub effective_class_methods: Vec<MethodEntry>,
-    pub properties: Vec<String>,
+    pub properties: Vec<PropertyEntry>,
     pub ivars: Vec<String>,
     pub protocols: Vec<String>,
     pub categories: Vec<String>,
@@ -58,8 +58,15 @@ pub struct ProtocolNode {
     pub class_methods: Vec<String>,
     pub optional_instance_methods: Vec<String>,
     pub optional_class_methods: Vec<String>,
+    pub properties: Vec<PropertyEntry>,
     pub adopted_protocols: Vec<String>,
     pub conforming_classes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PropertyEntry {
+    pub name: String,
+    pub is_class: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -153,7 +160,14 @@ impl ObjCGraph {
                     .collect(),
                 effective_instance_methods: Vec::new(),
                 effective_class_methods: Vec::new(),
-                properties: cls.properties.iter().map(|p| p.name.clone()).collect(),
+                properties: cls
+                    .properties
+                    .iter()
+                    .map(|p| PropertyEntry {
+                        name: p.name.clone(),
+                        is_class: p.is_class,
+                    })
+                    .collect(),
                 ivars: cls.ivars.iter().map(|iv| iv.name.clone()).collect(),
                 protocols: cls.protocols.clone(),
                 categories: Vec::new(),
@@ -190,7 +204,10 @@ impl ObjCGraph {
                 node.categories.push(cat.name.clone());
                 node.protocols.extend(cat.protocols.iter().cloned());
                 node.properties
-                    .extend(cat.properties.iter().map(|prop| prop.name.clone()));
+                    .extend(cat.properties.iter().map(|prop| PropertyEntry {
+                        name: prop.name.clone(),
+                        is_class: prop.is_class,
+                    }));
                 fold_category_methods(node, cat, &mut selectors, addr_to_sym);
             }
         }
@@ -232,6 +249,16 @@ impl ObjCGraph {
                             .optional_class_methods
                             .iter()
                             .map(|m| m.name.clone())
+                            .collect(),
+                    ),
+                    properties: sorted_unique_properties(
+                        proto
+                            .properties
+                            .iter()
+                            .map(|property| PropertyEntry {
+                                name: property.name.clone(),
+                                is_class: property.is_class,
+                            })
                             .collect(),
                     ),
                     adopted_protocols: sorted_unique(proto.adopted_protocols.clone()),
@@ -446,7 +473,7 @@ fn finalize_class_node(node: &mut ClassNode) {
 
     node.instance_methods = sort_method_entries(instance_methods);
     node.class_methods = sort_method_entries(class_methods);
-    node.properties = sorted_unique(std::mem::take(&mut node.properties));
+    node.properties = sorted_unique_properties(std::mem::take(&mut node.properties));
     node.ivars = sorted_unique(std::mem::take(&mut node.ivars));
     node.protocols = sorted_unique(std::mem::take(&mut node.protocols));
     node.categories = sorted_unique(std::mem::take(&mut node.categories));
@@ -484,6 +511,12 @@ fn method_origin_sort_key(origin: &MethodOrigin) -> (u8, &str) {
 }
 
 fn sorted_unique(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn sorted_unique_properties(mut values: Vec<PropertyEntry>) -> Vec<PropertyEntry> {
     values.sort();
     values.dedup();
     values

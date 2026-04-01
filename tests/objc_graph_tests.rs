@@ -4,7 +4,8 @@ use macho::addr::ThinFileOffset;
 use macho::addr::Va;
 use macho::model::container::MachContainer;
 use macho::objc::graph::{
-    ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, ProtocolNode, SelectorOwner,
+    ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, PropertyEntry, ProtocolNode,
+    SelectorOwner,
 };
 use macho::objc::{
     ObjCCategory, ObjCClass, ObjCMetadata, ObjCMethod, ObjCProperty, ObjCProtocol,
@@ -381,6 +382,7 @@ fn graph_folds_category_protocols_into_class_and_protocol_views() {
             properties: vec![ObjCProperty {
                 name: "title".into(),
                 attributes: "T@\"NSString\",&,N,V_title".into(),
+                is_class: false,
             }],
             protocols: vec!["WidgetBase".into()],
             instance_size: 0,
@@ -420,6 +422,10 @@ fn graph_folds_category_protocols_into_class_and_protocol_views() {
     let graph = ObjCGraph::build(&metadata);
     let class = graph.class("Widget").expect("expected Widget class");
     assert!(class.protocols.contains(&"Debuggable".to_string()));
+    assert!(class.properties.contains(&PropertyEntry {
+        name: "title".into(),
+        is_class: false,
+    }));
 
     let protocol = graph
         .protocol("Debuggable")
@@ -540,4 +546,64 @@ fn graph_category_folding_uses_metadata_order_for_overrides() {
 
     let owners = graph.implementations_of("draw", MethodKind::Instance);
     assert_eq!(owners.len(), 3);
+}
+
+#[test]
+fn graph_preserves_class_property_kind_and_protocol_properties() {
+    let metadata = ObjCMetadata {
+        classes: vec![ObjCClass {
+            name: "Widget".into(),
+            superclass_name: None,
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            ivars: Vec::new(),
+            properties: vec![
+                ObjCProperty {
+                    name: "title".into(),
+                    attributes: "T@\"NSString\",&,N".into(),
+                    is_class: false,
+                },
+                ObjCProperty {
+                    name: "sharedWidget".into(),
+                    attributes: "T@\"Widget\",&,N".into(),
+                    is_class: true,
+                },
+            ],
+            protocols: vec!["WidgetProtocol".into()],
+            instance_size: 0,
+            is_meta: false,
+            is_swift: false,
+        }],
+        categories: Vec::new(),
+        protocols: vec![ObjCProtocol {
+            name: "WidgetProtocol".into(),
+            instance_methods: Vec::new(),
+            class_methods: Vec::new(),
+            optional_instance_methods: Vec::new(),
+            optional_class_methods: Vec::new(),
+            properties: vec![ObjCProperty {
+                name: "delegate".into(),
+                attributes: "T@\"NSObject\",W".into(),
+                is_class: false,
+            }],
+            adopted_protocols: Vec::new(),
+        }],
+    };
+
+    let graph = ObjCGraph::build(&metadata);
+    let class = graph.class("Widget").expect("expected Widget class");
+    assert!(class.properties.contains(&PropertyEntry {
+        name: "title".into(),
+        is_class: false,
+    }));
+    assert!(class.properties.contains(&PropertyEntry {
+        name: "sharedWidget".into(),
+        is_class: true,
+    }));
+
+    let proto = graph.protocol("WidgetProtocol").expect("expected protocol");
+    assert!(proto.properties.contains(&PropertyEntry {
+        name: "delegate".into(),
+        is_class: false,
+    }));
 }

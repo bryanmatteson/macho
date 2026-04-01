@@ -368,7 +368,7 @@ fn extract_objc(
                 superclass: c.superclass_name.clone(),
                 instance_methods: c.instance_methods.iter().map(snap_method).collect(),
                 class_methods: c.class_methods.iter().map(snap_method).collect(),
-                properties: c.properties.iter().map(|p| p.name.clone()).collect(),
+                properties: c.properties.iter().map(snap_property).collect(),
                 protocols: c.protocols.clone(),
                 ivars: c.ivars.iter().map(|iv| iv.name.clone()).collect(),
                 is_swift: c.is_swift,
@@ -382,7 +382,7 @@ fn extract_objc(
                 class_name: c.class_name.clone(),
                 instance_methods: c.instance_methods.iter().map(snap_method).collect(),
                 class_methods: c.class_methods.iter().map(snap_method).collect(),
-                properties: c.properties.iter().map(|p| p.name.clone()).collect(),
+                properties: c.properties.iter().map(snap_property).collect(),
                 protocols: c.protocols.clone(),
             })
             .collect(),
@@ -391,18 +391,15 @@ fn extract_objc(
             .iter()
             .map(|p| ObjCProtocolSnapshot {
                 name: p.name.clone(),
-                instance_methods: p.instance_methods.iter().map(|m| m.name.clone()).collect(),
-                class_methods: p.class_methods.iter().map(|m| m.name.clone()).collect(),
+                instance_methods: p.instance_methods.iter().map(snap_method).collect(),
+                class_methods: p.class_methods.iter().map(snap_method).collect(),
                 optional_instance_methods: p
                     .optional_instance_methods
                     .iter()
-                    .map(|m| m.name.clone())
+                    .map(snap_method)
                     .collect(),
-                optional_class_methods: p
-                    .optional_class_methods
-                    .iter()
-                    .map(|m| m.name.clone())
-                    .collect(),
+                optional_class_methods: p.optional_class_methods.iter().map(snap_method).collect(),
+                properties: p.properties.iter().map(snap_property).collect(),
                 adopted_protocols: p.adopted_protocols.clone(),
             })
             .collect(),
@@ -450,6 +447,14 @@ fn extract_codesign(
         n_code_slots: cd.n_code_slots,
         code_limit: cd.code_limit as u64,
     })
+}
+
+fn snap_property(property: &crate::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
+    ObjCPropertySnapshot {
+        name: property.name.clone(),
+        attributes: property.attributes.clone(),
+        is_class: property.is_class,
+    }
 }
 
 fn collect_entitlement_keys(xml: Option<&str>, der: Option<&[u8]>) -> Vec<String> {

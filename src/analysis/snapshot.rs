@@ -217,12 +217,19 @@ pub struct ObjCMethodSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ObjCPropertySnapshot {
+    pub name: String,
+    pub attributes: String,
+    pub is_class: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ObjCClassSnapshot {
     pub name: String,
     pub superclass: Option<String>,
     pub instance_methods: Vec<ObjCMethodSnapshot>,
     pub class_methods: Vec<ObjCMethodSnapshot>,
-    pub properties: Vec<String>,
+    pub properties: Vec<ObjCPropertySnapshot>,
     pub protocols: Vec<String>,
     pub ivars: Vec<String>,
     pub is_swift: bool,
@@ -234,17 +241,18 @@ pub struct ObjCCategorySnapshot {
     pub class_name: String,
     pub instance_methods: Vec<ObjCMethodSnapshot>,
     pub class_methods: Vec<ObjCMethodSnapshot>,
-    pub properties: Vec<String>,
+    pub properties: Vec<ObjCPropertySnapshot>,
     pub protocols: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ObjCProtocolSnapshot {
     pub name: String,
-    pub instance_methods: Vec<String>,
-    pub class_methods: Vec<String>,
-    pub optional_instance_methods: Vec<String>,
-    pub optional_class_methods: Vec<String>,
+    pub instance_methods: Vec<ObjCMethodSnapshot>,
+    pub class_methods: Vec<ObjCMethodSnapshot>,
+    pub optional_instance_methods: Vec<ObjCMethodSnapshot>,
+    pub optional_class_methods: Vec<ObjCMethodSnapshot>,
+    pub properties: Vec<ObjCPropertySnapshot>,
     pub adopted_protocols: Vec<String>,
 }
 

@@ -2,7 +2,7 @@ use crate::addr::Va;
 use crate::error::Result;
 use crate::objc::class::{resolve_class_name_from_va, resolve_class_ref_name};
 use crate::objc::method::parse_method_list;
-use crate::objc::property::parse_property_list;
+use crate::objc::property::{parse_property_list, parse_property_list_with_kind};
 use crate::objc::protocol::parse_protocol_name_list;
 use crate::objc::resolve::ObjCResolver;
 use crate::objc::types::ObjCCategory;
@@ -50,6 +50,17 @@ pub fn parse_category(resolver: &ObjCResolver<'_>, cat_va: Va) -> Result<ObjCCat
         Ok(Some(va)) if va.0 != 0 => parse_property_list(resolver, va).unwrap_or_default(),
         _ => Vec::new(),
     };
+
+    let class_props_offset = offset.as_usize() as u64 + 48;
+    let class_properties = match resolver.read_pointer_at_offset(class_props_offset) {
+        Ok(Some(va)) if va.0 != 0 => {
+            parse_property_list_with_kind(resolver, va, true).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    };
+
+    let mut properties = properties;
+    properties.extend(class_properties);
 
     Ok(ObjCCategory {
         name,

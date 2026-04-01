@@ -1,13 +1,17 @@
 use crate::addr::Va;
 use crate::error::Result;
-use crate::io::pod;
+use crate::io::pod::{self, RawProtocolT64};
 use crate::objc::method::parse_method_list;
-use crate::objc::property::parse_property_list;
+use crate::objc::property::{parse_property_list, parse_property_list_with_kind};
 use crate::objc::resolve::ObjCResolver;
 use crate::objc::types::ObjCProtocol;
 
 pub fn parse_protocol(resolver: &ObjCResolver<'_>, proto_va: Va) -> Result<ObjCProtocol> {
     let offset = resolver.va_to_offset(proto_va)?;
+    let data = resolver.mach().bytes();
+    let endian = resolver.endian();
+    let raw: RawProtocolT64 = pod::read_pod(data, offset.as_usize())?;
+    let protocol_size = endian.interpret_u32(raw.size) as usize;
     let name_ptr_offset = offset.as_usize() as u64 + 8;
     let name = match resolver.read_pointer_at_offset(name_ptr_offset)? {
         Some(va) => resolver.read_cstring(va).unwrap_or("<invalid>").to_string(),
@@ -44,11 +48,26 @@ pub fn parse_protocol(resolver: &ObjCResolver<'_>, proto_va: Va) -> Result<ObjCP
         _ => Vec::new(),
     };
 
+    let class_properties = if protocol_size >= 96 {
+        let class_props_offset = offset.as_usize() as u64 + 88;
+        match resolver.read_pointer_at_offset(class_props_offset) {
+            Ok(Some(va)) if va.0 != 0 => {
+                parse_property_list_with_kind(resolver, va, true).unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let protos_offset = offset.as_usize() as u64 + 16;
     let adopted_protocols = match resolver.read_pointer_at_offset(protos_offset)? {
         Some(va) if va.0 != 0 => parse_protocol_name_list(resolver, va).unwrap_or_default(),
         _ => Vec::new(),
     };
+
+    let mut properties = properties;
+    properties.extend(class_properties);
 
     Ok(ObjCProtocol {
         name,

@@ -136,7 +136,7 @@ fn parse_function(
             noexcept,
         },
         address,
-        is_method: name.components.len() > 1,
+        is_method: false,
         is_constructor,
         is_destructor,
         is_operator,

@@ -5,6 +5,14 @@ use crate::objc::resolve::ObjCResolver;
 use crate::objc::types::{METHOD_LIST_ENTSIZE_MASK, ObjCProperty};
 
 pub fn parse_property_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<ObjCProperty>> {
+    parse_property_list_with_kind(resolver, va, false)
+}
+
+pub fn parse_property_list_with_kind(
+    resolver: &ObjCResolver<'_>,
+    va: Va,
+    is_class: bool,
+) -> Result<Vec<ObjCProperty>> {
     let offset = resolver.va_to_offset(va)?;
     let data = resolver.mach().bytes();
     let endian = resolver.endian();
@@ -41,6 +49,7 @@ pub fn parse_property_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<Ob
         props.push(ObjCProperty {
             name: name.to_string(),
             attributes: attributes.to_string(),
+            is_class,
         });
     }
 

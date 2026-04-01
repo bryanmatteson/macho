@@ -196,7 +196,7 @@ impl ObjCPropertyAttributes {
     pub fn parse(attrs: &str) -> Self {
         let mut parsed = Self::default();
 
-        for component in attrs.split(',') {
+        for component in split_property_attribute_components(attrs) {
             if component.is_empty() {
                 continue;
             }
@@ -224,6 +224,20 @@ impl ObjCPropertyAttributes {
         }
 
         parsed
+    }
+
+    pub fn effective_type(&self) -> Option<ObjCQualifiedType> {
+        let legacy = self
+            .old_type_encoding
+            .as_deref()
+            .and_then(|encoding| ObjCQualifiedType::parse(encoding).ok());
+
+        match (&self.ty, legacy) {
+            (Some(current), Some(legacy)) if current.is_less_specific_than(&legacy) => Some(legacy),
+            (Some(current), _) => Some(current.clone()),
+            (None, Some(legacy)) => Some(legacy),
+            (None, None) => None,
+        }
     }
 }
 
@@ -325,6 +339,31 @@ impl ObjCType {
             Self::BitField(bits) => format!("unsigned int : {bits}"),
             Self::Unknown(code) => format!("unknown /* {code} */"),
         }
+    }
+
+    fn is_less_specific_than(&self, other: &Self) -> bool {
+        match self {
+            Self::Unknown(_) => !matches!(other, Self::Unknown(_)),
+            Self::Object {
+                class_name: None,
+                protocols,
+                is_block: false,
+            } => match other {
+                Self::Object {
+                    class_name,
+                    protocols: other_protocols,
+                    ..
+                } => class_name.is_some() || other_protocols.len() > protocols.len(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+}
+
+impl ObjCQualifiedType {
+    fn is_less_specific_than(&self, other: &Self) -> bool {
+        self.qualifiers == other.qualifiers && self.ty.is_less_specific_than(&other.ty)
     }
 }
 
@@ -589,7 +628,11 @@ fn parse_quoted_object_metadata(quoted: &str) -> (Option<String>, Vec<String>) {
             break;
         };
         let proto = &rest[start + 1..start + 1 + end];
-        if !proto.is_empty() {
+        for proto in proto
+            .split(',')
+            .map(str::trim)
+            .filter(|proto| !proto.is_empty())
+        {
             protocols.push(proto.to_string());
         }
         rest = &rest[start + 2 + end..];
@@ -609,6 +652,43 @@ fn parse_quoted_object_metadata(quoted: &str) -> (Option<String>, Vec<String>) {
     };
 
     (class_name, protocols)
+}
+
+fn split_property_attribute_components(attrs: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut in_quotes = false;
+    let mut angle_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+
+    for (idx, ch) in attrs.char_indices() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            '<' if !in_quotes => angle_depth += 1,
+            '>' if !in_quotes && angle_depth > 0 => angle_depth -= 1,
+            '{' if !in_quotes => brace_depth += 1,
+            '}' if !in_quotes && brace_depth > 0 => brace_depth -= 1,
+            '(' if !in_quotes => paren_depth += 1,
+            ')' if !in_quotes && paren_depth > 0 => paren_depth -= 1,
+            '[' if !in_quotes => bracket_depth += 1,
+            ']' if !in_quotes && bracket_depth > 0 => bracket_depth -= 1,
+            ',' if !in_quotes
+                && angle_depth == 0
+                && brace_depth == 0
+                && paren_depth == 0
+                && bracket_depth == 0 =>
+            {
+                parts.push(&attrs[start..idx]);
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    parts.push(&attrs[start..]);
+    parts
 }
 
 #[cfg(test)]
@@ -682,6 +762,32 @@ mod tests {
         assert_eq!(attrs.getter.as_deref(), Some("customTitle"));
         assert_eq!(attrs.setter.as_deref(), Some("setCustomTitle:"));
         assert_eq!(attrs.ivar.as_deref(), Some("_title"));
+    }
+
+    #[test]
+    fn parses_property_attributes_with_commas_inside_quoted_type_metadata() {
+        let attrs =
+            ObjCPropertyAttributes::parse("T@\"NSObject<NSCopying, NSSecureCoding>\",&,N,V_value");
+        assert_eq!(
+            attrs.effective_type().expect("typed property").to_string(),
+            "NSObject<NSCopying, NSSecureCoding> *"
+        );
+        assert!(attrs.strong);
+        assert!(attrs.nonatomic);
+        assert_eq!(attrs.ivar.as_deref(), Some("_value"));
+    }
+
+    #[test]
+    fn prefers_more_specific_legacy_property_type() {
+        let attrs = ObjCPropertyAttributes {
+            ty: Some(ObjCQualifiedType::parse("@").expect("parse id type")),
+            old_type_encoding: Some("@\"NSString\"".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            attrs.effective_type().expect("effective type").to_string(),
+            "NSString *"
+        );
     }
 
     #[test]
