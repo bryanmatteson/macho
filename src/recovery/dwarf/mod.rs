@@ -4,7 +4,8 @@ use crate::error::{Error, Result};
 use crate::model::macho_file::MachoFile;
 
 pub fn has_dwarf_sections(macho: &MachoFile<'_>) -> bool {
-    macho.all_sections()
+    macho
+        .all_sections()
         .any(|section| section.segment_name == "__DWARF" || section.section_name == "__debug_info")
 }
 
@@ -31,7 +32,8 @@ fn load_section_bytes(macho: &MachoFile<'_>, id: SectionId) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
 
-    macho.read_bytes_at(section.offset, section.size as usize)
+    macho
+        .read_bytes_at(section.offset, section.size as usize)
         .map(|bytes| bytes.to_vec())
 }
 

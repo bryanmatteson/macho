@@ -326,7 +326,11 @@ pub fn run_ranges(args: RangesArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_ranges_text(macho: &MachoFile<'_>, args: &RangesArgs, lookup_va: Option<Va>) -> Result<()> {
+fn print_ranges_text(
+    macho: &MachoFile<'_>,
+    args: &RangesArgs,
+    lookup_va: Option<Va>,
+) -> Result<()> {
     let index = macho.ext::<SymbolRangeIndex>()?;
 
     if let Some(va) = lookup_va {

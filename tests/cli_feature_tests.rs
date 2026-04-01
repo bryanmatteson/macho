@@ -56,7 +56,8 @@ fn unique_marker(prefix: &str) -> String {
 }
 
 fn has_rpath(macho: &macho::model::macho_file::MachoFile<'_>, needle: &str) -> bool {
-    macho.load_commands()
+    macho
+        .load_commands()
         .iter()
         .any(|lc| lc.kind.as_rpath() == Some(needle))
 }

@@ -64,7 +64,9 @@ fn write_bytes_at_va() {
     let mut owned = macho.to_owned_mach();
 
     // Find a section with data we can patch
-    let section = macho.section("__TEXT", "__text").expect("no __text section");
+    let section = macho
+        .section("__TEXT", "__text")
+        .expect("no __text section");
     let va = section.addr;
 
     let original = owned

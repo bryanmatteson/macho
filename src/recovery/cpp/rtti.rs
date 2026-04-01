@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use crate::Result;
 use crate::model::addr::Va;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
@@ -8,7 +9,6 @@ use crate::recovery::cpp::types::{
 };
 use crate::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
 use crate::resolve::{ResolutionContext, ResolvedTarget};
-use crate::Result;
 
 pub fn build_typeinfo_index(macho: &MachoFile<'_>) -> Result<BTreeMap<String, CppTypeInfoNode>> {
     let symtab = macho.ext::<SymbolTable<'_>>()?;
@@ -189,11 +189,19 @@ impl<'a> PointerResolver<'a> {
 
     fn read_u32(&self, va: Va) -> Result<u32> {
         let bytes = self.ctx.macho().read_bytes_at_va(va, 4)?;
-        Ok(self.ctx.macho().endian().read_u32(bytes.try_into().unwrap()))
+        Ok(self
+            .ctx
+            .macho()
+            .endian()
+            .read_u32(bytes.try_into().unwrap()))
     }
 
     fn read_u64(&self, va: Va) -> Result<u64> {
         let bytes = self.ctx.macho().read_bytes_at_va(va, 8)?;
-        Ok(self.ctx.macho().endian().read_u64(bytes.try_into().unwrap()))
+        Ok(self
+            .ctx
+            .macho()
+            .endian()
+            .read_u64(bytes.try_into().unwrap()))
     }
 }

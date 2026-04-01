@@ -70,7 +70,8 @@ fn into_record(bind: BindEntry) -> ImportRecord {
 }
 
 fn has_chained_fixups(macho: &MachoFile<'_>) -> bool {
-    macho.load_commands()
+    macho
+        .load_commands()
         .iter()
         .any(|lc| matches!(lc.kind, LoadCommand::DyldChainedFixups(_)))
 }

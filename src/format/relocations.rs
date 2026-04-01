@@ -8,7 +8,10 @@ use crate::model::section::Section;
 const MAX_RELOCS_PER_SECTION: usize = 1_000_000;
 
 /// Parse relocation entries for a given section.
-pub fn relocations_for_section(macho: &MachoFile<'_>, section: &Section) -> Result<Vec<Relocation>> {
+pub fn relocations_for_section(
+    macho: &MachoFile<'_>,
+    section: &Section,
+) -> Result<Vec<Relocation>> {
     let nreloc = section.nreloc as usize;
     if nreloc == 0 {
         return Ok(Vec::new());

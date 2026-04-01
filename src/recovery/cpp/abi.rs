@@ -50,7 +50,8 @@ fn symbol_bytes<'a>(
         .min()
         .unwrap_or(symbol.value + max_len as u64);
     let len = (next_va - symbol.value).min(max_len as u64) as usize;
-    macho.read_bytes_at_va(crate::model::addr::Va(symbol.value), len.max(1))
+    macho
+        .read_bytes_at_va(crate::model::addr::Va(symbol.value), len.max(1))
         .ok()
 }
 

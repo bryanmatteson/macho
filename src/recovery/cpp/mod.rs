@@ -16,7 +16,7 @@ use crate::recovery::cpp::symbol::parse_symbol;
 use crate::recovery::vtables::{SlotTarget, VtableIndex};
 use crate::{Error, Result};
 
-pub use correlate::{correlate_functions, ExternalHeaderIndex, HeaderCandidate};
+pub use correlate::{ExternalHeaderIndex, HeaderCandidate, correlate_functions};
 pub use render::{default_header_unit, render_header};
 pub use types::*;
 pub use unify::unify_images;

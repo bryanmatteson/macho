@@ -234,7 +234,8 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
         }
         Err(_) => {
             // Try legacy bind/rebase opcodes
-            if let Ok((regular, weak, lazy)) = crate::metadata::dyld::bind::parse_bind_entries(macho)
+            if let Ok((regular, weak, lazy)) =
+                crate::metadata::dyld::bind::parse_bind_entries(macho)
             {
                 for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
