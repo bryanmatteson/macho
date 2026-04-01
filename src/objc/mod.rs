@@ -1,5 +1,6 @@
 pub mod category;
 pub mod class;
+pub mod encoding;
 pub mod graph;
 pub mod ivar;
 pub mod method;

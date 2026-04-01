@@ -392,6 +392,7 @@ fn graph_folds_category_protocols_into_class_and_protocol_views() {
             class_name: "Widget".into(),
             instance_methods: Vec::new(),
             class_methods: Vec::new(),
+            properties: Vec::new(),
             protocols: vec!["Debuggable".into()],
         }],
         protocols: vec![
@@ -510,6 +511,7 @@ fn graph_category_folding_uses_metadata_order_for_overrides() {
                     imp: Va(0x2000),
                 }],
                 class_methods: vec![],
+                properties: vec![],
                 protocols: vec![],
             },
             ObjCCategory {
@@ -521,6 +523,7 @@ fn graph_category_folding_uses_metadata_order_for_overrides() {
                     imp: Va(0x3000),
                 }],
                 class_methods: vec![],
+                properties: vec![],
                 protocols: vec![],
             },
         ],

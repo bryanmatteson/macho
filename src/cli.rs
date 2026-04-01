@@ -14,6 +14,8 @@ struct Cli {
 
 #[derive(clap::Subcommand)]
 enum Commands {
+    /// Recover C declarations from DWARF, symbols, and header correlation
+    C(commands::c::CArgs),
     /// Display headers, segments, sections, and load commands
     Inspect(commands::inspect::InspectArgs),
     /// List symbols from the symbol table
@@ -26,10 +28,14 @@ enum Commands {
     Imports(commands::imports::ImportsArgs),
     /// Walk chained fixup chains showing binds and rebases
     Fixups(commands::fixups::FixupsArgs),
+    /// Package evidence and validate LLM-assisted header inference
+    HeaderInfer(commands::header_infer::HeaderInferArgs),
     /// Display Objective-C metadata (classes, categories, protocols)
     Objc(commands::objc::ObjCArgs),
     /// Inspect code signature (entitlements, code directory, CMS)
     Codesign(commands::codesign::CodesignArgs),
+    /// Recover C++ symbols, RTTI, vtables, and headers
+    Cpp(commands::cpp::CppArgs),
     /// Dump a full JSON snapshot of the binary
     Snapshot(commands::snapshot::SnapshotArgs),
     /// Compare two Mach-O binaries semantically
@@ -115,14 +121,17 @@ where
 
 fn dispatch(command: Commands) -> anyhow::Result<()> {
     match command {
+        Commands::C(args) => commands::c::run(args),
         Commands::Inspect(args) => commands::inspect::run(args),
         Commands::Symbols(args) => commands::symbols::run(args),
         Commands::Relocations(args) => commands::relocations::run(args),
         Commands::Exports(args) => commands::exports::run(args),
         Commands::Imports(args) => commands::imports::run(args),
         Commands::Fixups(args) => commands::fixups::run(args),
+        Commands::HeaderInfer(args) => commands::header_infer::run(args),
         Commands::Objc(args) => commands::objc::run(args),
         Commands::Codesign(args) => commands::codesign::run(args),
+        Commands::Cpp(args) => commands::cpp::run(args),
         Commands::Snapshot(args) => commands::snapshot::run(args),
         Commands::Diff(args) => commands::diff::run(args),
         Commands::Audit(args) => commands::audit::run(args),

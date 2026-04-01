@@ -40,12 +40,9 @@ pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClas
         None => "<null>".to_string(),
     };
 
-    // Read superclass name from bind (if available)
+    // Resolve superclass name from either a bind or an in-image class pointer.
     let superclass_offset = class_offset.as_usize() as u64 + 8;
-    let superclass_name = resolver.bind_name_at_offset(superclass_offset).map(|s| {
-        // Strip _OBJC_CLASS_$_ prefix if present
-        s.strip_prefix("_OBJC_CLASS_$_").unwrap_or(s).to_string()
-    });
+    let superclass_name = resolve_class_ref_name(resolver, superclass_offset);
 
     // Parse methods
     let methods_ptr_offset = ro_offset.as_usize() as u64 + 32;
@@ -94,6 +91,41 @@ pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClas
         is_meta,
         is_swift,
     })
+}
+
+pub(crate) fn resolve_class_ref_name(
+    resolver: &ObjCResolver<'_>,
+    class_ref_offset: u64,
+) -> Option<String> {
+    if let Some(bind_name) = resolver.bind_name_at_offset(class_ref_offset) {
+        return Some(
+            bind_name
+                .strip_prefix("_OBJC_CLASS_$_")
+                .unwrap_or(bind_name)
+                .to_string(),
+        );
+    }
+
+    let class_va = resolver.read_pointer_at_offset(class_ref_offset).ok()??;
+    resolve_class_name_from_va(resolver, class_va)
+}
+
+pub(crate) fn resolve_class_name_from_va(
+    resolver: &ObjCResolver<'_>,
+    class_va: Va,
+) -> Option<String> {
+    let class_offset = resolver.va_to_offset(class_va).ok()?;
+
+    // data field is at +32 in objc_class, with bit 0 used for the Swift flag.
+    let data_ptr_offset = class_offset.as_usize() as u64 + 32;
+    let data_va = resolver.read_pointer_at_offset(data_ptr_offset).ok()??;
+    let data_va = Va(data_va.0 & !1);
+    let ro_offset = resolver.va_to_offset(data_va).ok()?;
+
+    // name field is at +24 in class_ro_t.
+    let name_ptr_offset = ro_offset.as_usize() as u64 + 24;
+    let name_va = resolver.read_pointer_at_offset(name_ptr_offset).ok()??;
+    resolver.read_cstring(name_va).ok().map(|s| s.to_string())
 }
 
 fn parse_metaclass_methods(

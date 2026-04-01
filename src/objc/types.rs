@@ -1,4 +1,5 @@
 use crate::addr::Va;
+use crate::objc::encoding::{ObjCMethodSignature, ObjCPropertyAttributes, ObjCQualifiedType};
 use std::fmt;
 
 #[derive(Debug, Clone)]
@@ -21,6 +22,7 @@ pub struct ObjCCategory {
     pub class_name: String,
     pub instance_methods: Vec<ObjCMethod>,
     pub class_methods: Vec<ObjCMethod>,
+    pub properties: Vec<ObjCProperty>,
     pub protocols: Vec<String>,
 }
 
@@ -48,6 +50,12 @@ impl fmt::Display for ObjCMethod {
     }
 }
 
+impl ObjCMethod {
+    pub fn parsed_signature(&self) -> Option<ObjCMethodSignature> {
+        ObjCMethodSignature::parse(&self.type_encoding).ok()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjCIvar {
     pub name: String,
@@ -57,10 +65,22 @@ pub struct ObjCIvar {
     pub alignment: u32,
 }
 
+impl ObjCIvar {
+    pub fn parsed_type(&self) -> Option<ObjCQualifiedType> {
+        ObjCQualifiedType::parse(&self.type_encoding).ok()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ObjCProperty {
     pub name: String,
     pub attributes: String,
+}
+
+impl ObjCProperty {
+    pub fn parsed_attributes(&self) -> ObjCPropertyAttributes {
+        ObjCPropertyAttributes::parse(&self.attributes)
+    }
 }
 
 // ObjC class_ro_t flags

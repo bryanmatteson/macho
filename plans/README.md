@@ -12,7 +12,7 @@ Those drafts have been consolidated into the plan set below. Plans `01` through
 `05` describe the analysis foundation that is already partially represented in
 the current tree (`src/analysis/`, `src/diff/`, `src/audit/`,
 `src/container_analysis/`, `src/objc/graph.rs`, `src/swift/`). Plans `06`
-through `09` are the canonical follow-on API and analysis tracks.
+through `10` are the canonical follow-on API and analysis tracks.
 
 ## Canonical Plan Set
 
@@ -30,6 +30,7 @@ through `09` are the canonical follow-on API and analysis tracks.
 7. `07-symbol-and-xref-resolution-plan.md`
 8. `08-dependency-and-compatibility-plan.md`
 9. `09-binary-data-analysis-plan.md`
+10. `10-objc-header-fidelity-plan.md`
 
 ## Recommended Sequence
 
@@ -45,6 +46,7 @@ that keeps shared infrastructure from being reinvented:
 7. `07-symbol-and-xref-resolution-plan.md`
 8. `08-dependency-and-compatibility-plan.md`
 9. `09-binary-data-analysis-plan.md`
+10. `10-objc-header-fidelity-plan.md`
 
 ## Dependency Notes
 
@@ -64,6 +66,9 @@ that keeps shared infrastructure from being reinvented:
 - `09-binary-data-analysis-plan.md` groups string-region discovery and C++
   vtable indexing because both are data-surface discovery features used by
   patching and reverse-engineering workflows.
+- `10-objc-header-fidelity-plan.md` is the canonical home for raising
+  `macho objc --headers` toward class-dump-style fidelity using structured
+  ObjC encoding parsing and richer header rendering.
 
 ## Repository Anchors
 

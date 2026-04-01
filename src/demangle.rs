@@ -144,6 +144,22 @@ pub fn demangle_symbol(name: &str) -> Option<String> {
     demangler.cache.remove(name).flatten()
 }
 
+/// Demangle a C++ symbol with explicit demangling options.
+pub fn demangle_cpp_symbol_with_options(
+    name: &str,
+    options: cpp_demangle::DemangleOptions,
+) -> Option<String> {
+    for candidate in symbol_candidates(name) {
+        if !looks_like_cpp_symbol(candidate) {
+            continue;
+        }
+        let symbol = cpp_demangle::Symbol::new(candidate).ok()?;
+        let demangled = symbol.demangle_with_options(&options).ok()?;
+        return Some(simplify_cpp_demangled(&demangled));
+    }
+    None
+}
+
 /// Return either the original name or a demangled replacement.
 pub fn format_symbol<'a>(name: &'a str, demangle: bool) -> Cow<'a, str> {
     if !demangle {

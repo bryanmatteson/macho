@@ -115,6 +115,7 @@ fn synthetic_objc_snapshot() -> ContainerSnapshot {
             class_name: "Widget".into(),
             instance_methods: Vec::new(),
             class_methods: Vec::new(),
+            properties: Vec::new(),
             protocols: vec!["Debuggable".into()],
         }],
         protocols: vec![ObjCProtocolSnapshot {
@@ -625,6 +626,9 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
     class.ivars.push("_subtitle".into());
     class.protocols.push("Serializable".into());
     new.slices[0].objc.categories[0]
+        .properties
+        .push("handler".into());
+    new.slices[0].objc.categories[0]
         .protocols
         .push("Inspectable".into());
     new.slices[0].objc.protocols[0]
@@ -668,6 +672,11 @@ fn diff_reports_objc_surface_changes_beyond_methods() {
         objc_messages
             .iter()
             .any(|message| message.contains("category Debug on Widget protocol added: Inspectable"))
+    );
+    assert!(
+        objc_messages
+            .iter()
+            .any(|message| message.contains("category Debug on Widget property added: handler"))
     );
     assert!(
         objc_messages

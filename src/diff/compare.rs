@@ -818,6 +818,23 @@ fn diff_objc(
                 )
             },
         );
+        diff_string_set(
+            DiffDomain::ObjC,
+            ChangeSeverity::Info,
+            ChangeSeverity::Warning,
+            arch,
+            findings,
+            (
+                oc.properties.iter().map(|value| value.as_str()).collect(),
+                nc.properties.iter().map(|value| value.as_str()).collect(),
+            ),
+            |value, removed| {
+                format!(
+                    "ObjC category {cat} on {cls} property {}: {value}",
+                    if removed { "removed" } else { "added" }
+                )
+            },
+        );
         diff_objc_methods(
             &label,
             '-',

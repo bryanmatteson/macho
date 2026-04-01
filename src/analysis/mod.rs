@@ -382,6 +382,7 @@ fn extract_objc(
                 class_name: c.class_name.clone(),
                 instance_methods: c.instance_methods.iter().map(snap_method).collect(),
                 class_methods: c.class_methods.iter().map(snap_method).collect(),
+                properties: c.properties.iter().map(|p| p.name.clone()).collect(),
                 protocols: c.protocols.clone(),
             })
             .collect(),

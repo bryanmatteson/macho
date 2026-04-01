@@ -1,4 +1,5 @@
-use crate::objc::types::{ObjCCategory, ObjCClass, ObjCProtocol};
+use crate::objc::encoding::{ObjCMethodArg, ObjCPropertyAttributes, ObjCQualifiedType};
+use crate::objc::types::{ObjCCategory, ObjCClass, ObjCMethod, ObjCProperty, ObjCProtocol};
 
 /// Render a class-dump-style header for a class.
 pub fn render_class_header(class: &ObjCClass) -> String {
@@ -10,20 +11,18 @@ pub fn render_class_header(class: &ObjCClass) -> String {
         out.push_str(" : ");
         out.push_str(super_name);
     }
-    if !class.protocols.is_empty() {
-        out.push_str(" <");
-        out.push_str(&class.protocols.join(", "));
-        out.push('>');
-    }
+    append_protocol_list(&mut out, &class.protocols);
     out.push('\n');
 
     if !class.ivars.is_empty() {
         out.push_str("{\n");
         for ivar in &class.ivars {
-            let ty = decode_type(&ivar.type_encoding);
+            let ty = ivar
+                .parsed_type()
+                .map(|ty| ty.render_named(&ivar.name))
+                .unwrap_or_else(|| format!("id {}", ivar.name));
             out.push_str(&format!(
-                "    {ty} {name}; // +{off}, {sz} bytes\n",
-                name = ivar.name,
+                "    {ty}; // +{off}, {sz} bytes\n",
                 off = ivar.offset,
                 sz = ivar.size
             ));
@@ -31,25 +30,9 @@ pub fn render_class_header(class: &ObjCClass) -> String {
         out.push_str("}\n");
     }
 
-    out.push('\n');
-
-    for prop in &class.properties {
-        let (ty, attrs) = format_property(&prop.attributes);
-        out.push_str(&format!("@property {attrs}{ty}{name};\n", name = prop.name));
-    }
-    if !class.properties.is_empty() {
-        out.push('\n');
-    }
-
-    for method in &class.instance_methods {
-        let ret = decode_return_type(&method.type_encoding);
-        out.push_str(&format!("- ({ret}) {};\n", method.name));
-    }
-
-    for method in &class.class_methods {
-        let ret = decode_return_type(&method.type_encoding);
-        out.push_str(&format!("+ ({ret}) {};\n", method.name));
-    }
+    append_property_section(&mut out, &class.properties);
+    append_method_section(&mut out, &class.instance_methods, '-');
+    append_method_section(&mut out, &class.class_methods, '+');
 
     out.push_str("@end\n");
     out
@@ -61,42 +44,20 @@ pub fn render_protocol_header(proto: &ObjCProtocol) -> String {
 
     out.push_str("@protocol ");
     out.push_str(&proto.name);
-    if !proto.adopted_protocols.is_empty() {
-        out.push_str(" <");
-        out.push_str(&proto.adopted_protocols.join(", "));
-        out.push('>');
-    }
+    append_protocol_list(&mut out, &proto.adopted_protocols);
     out.push('\n');
 
-    for prop in &proto.properties {
-        let (ty, attrs) = format_property(&prop.attributes);
-        out.push_str(&format!("@property {attrs}{ty}{name};\n", name = prop.name));
-    }
-
-    if !proto.instance_methods.is_empty() {
-        for method in &proto.instance_methods {
-            let ret = decode_return_type(&method.type_encoding);
-            out.push_str(&format!("- ({ret}) {};\n", method.name));
-        }
-    }
-
-    if !proto.class_methods.is_empty() {
-        for method in &proto.class_methods {
-            let ret = decode_return_type(&method.type_encoding);
-            out.push_str(&format!("+ ({ret}) {};\n", method.name));
-        }
-    }
+    append_property_section(&mut out, &proto.properties);
+    append_method_section(&mut out, &proto.instance_methods, '-');
+    append_method_section(&mut out, &proto.class_methods, '+');
 
     if !proto.optional_instance_methods.is_empty() || !proto.optional_class_methods.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
         out.push_str("@optional\n");
-        for method in &proto.optional_instance_methods {
-            let ret = decode_return_type(&method.type_encoding);
-            out.push_str(&format!("- ({ret}) {};\n", method.name));
-        }
-        for method in &proto.optional_class_methods {
-            let ret = decode_return_type(&method.type_encoding);
-            out.push_str(&format!("+ ({ret}) {};\n", method.name));
-        }
+        append_method_section(&mut out, &proto.optional_instance_methods, '-');
+        append_method_section(&mut out, &proto.optional_class_methods, '+');
     }
 
     out.push_str("@end\n");
@@ -107,130 +68,294 @@ pub fn render_protocol_header(proto: &ObjCProtocol) -> String {
 pub fn render_category_header(cat: &ObjCCategory) -> String {
     let mut out = String::new();
 
-    out.push_str(&format!("@interface {} ({})\n", cat.class_name, cat.name));
+    out.push_str(&format!("@interface {} ({})", cat.class_name, cat.name));
+    append_protocol_list(&mut out, &cat.protocols);
+    out.push('\n');
 
-    for method in &cat.instance_methods {
-        let ret = decode_return_type(&method.type_encoding);
-        out.push_str(&format!("- ({ret}) {};\n", method.name));
-    }
-    for method in &cat.class_methods {
-        let ret = decode_return_type(&method.type_encoding);
-        out.push_str(&format!("+ ({ret}) {};\n", method.name));
-    }
+    append_property_section(&mut out, &cat.properties);
+    append_method_section(&mut out, &cat.instance_methods, '-');
+    append_method_section(&mut out, &cat.class_methods, '+');
 
     out.push_str("@end\n");
     out
 }
 
-/// Decode a full ObjC type encoding to a human-readable type string.
-fn decode_type(encoding: &str) -> String {
-    if encoding.is_empty() {
-        return "id".to_string();
+fn append_protocol_list(out: &mut String, protocols: &[String]) {
+    if protocols.is_empty() {
+        return;
     }
-    let bytes = encoding.as_bytes();
-    let mut i = 0;
+    out.push_str(" <");
+    out.push_str(&protocols.join(", "));
+    out.push('>');
+}
 
-    // Skip qualifiers
-    while i < bytes.len() && matches!(bytes[i], b'r' | b'n' | b'N' | b'o' | b'O' | b'R' | b'V') {
-        i += 1;
+fn append_property_section(out: &mut String, properties: &[ObjCProperty]) {
+    if properties.is_empty() {
+        return;
     }
-    if i >= bytes.len() {
-        return "id".to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
-
-    match bytes[i] {
-        b'v' => "void".to_string(),
-        b'@' => {
-            // Check for @"ClassName"
-            if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
-                let start = i + 2;
-                if let Some(end) = encoding[start..].find('"') {
-                    return format!("{} *", &encoding[start..start + end]);
-                }
-            }
-            "id".to_string()
-        }
-        b'#' => "Class".to_string(),
-        b':' => "SEL".to_string(),
-        b'c' => "char".to_string(),
-        b'C' => "unsigned char".to_string(),
-        b'i' => "int".to_string(),
-        b'I' => "unsigned int".to_string(),
-        b's' => "short".to_string(),
-        b'S' => "unsigned short".to_string(),
-        b'l' => "long".to_string(),
-        b'L' => "unsigned long".to_string(),
-        b'q' => "long long".to_string(),
-        b'Q' => "unsigned long long".to_string(),
-        b'f' => "float".to_string(),
-        b'd' => "double".to_string(),
-        b'B' => "BOOL".to_string(),
-        b'*' => "char *".to_string(),
-        b'^' => {
-            let inner = if i + 1 < bytes.len() {
-                decode_type(&encoding[i + 1..])
-            } else {
-                "void".to_string()
-            };
-            format!("{inner} *")
-        }
-        b'{' => {
-            // Struct: {Name=fields}
-            if let Some(eq) = encoding[i..].find('=') {
-                let name = &encoding[i + 1..i + eq];
-                format!("struct {name}")
-            } else if let Some(close) = encoding[i..].find('}') {
-                let name = &encoding[i + 1..i + close];
-                format!("struct {name}")
-            } else {
-                "struct ?".to_string()
-            }
-        }
-        _ => "id".to_string(),
+    out.push('\n');
+    for prop in properties {
+        out.push_str(&render_property(prop));
+        out.push('\n');
     }
 }
 
-/// Extract just the return type from a method type encoding.
-fn decode_return_type(type_encoding: &str) -> String {
-    if type_encoding.is_empty() {
-        return "void".to_string();
+fn append_method_section(out: &mut String, methods: &[ObjCMethod], prefix: char) {
+    if methods.is_empty() {
+        return;
     }
-    decode_type(type_encoding)
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push('\n');
+    for method in methods {
+        out.push_str(&render_method(method, prefix));
+        out.push('\n');
+    }
 }
 
-/// Parse property attributes and return (type_string, attribute_string).
-fn format_property(attrs: &str) -> (String, String) {
-    if attrs.is_empty() {
-        return ("id ".to_string(), String::new());
+fn render_property(prop: &ObjCProperty) -> String {
+    let attrs = prop.parsed_attributes();
+    let mut attr_parts = Vec::new();
+    if attrs.readonly {
+        attr_parts.push("readonly".to_string());
+    }
+    if attrs.copy {
+        attr_parts.push("copy".to_string());
+    } else if attrs.strong {
+        attr_parts.push("strong".to_string());
+    } else if attrs.weak {
+        attr_parts.push("weak".to_string());
+    }
+    if attrs.nonatomic {
+        attr_parts.push("nonatomic".to_string());
+    }
+    if let Some(getter) = &attrs.getter {
+        attr_parts.push(format!("getter={getter}"));
+    }
+    if let Some(setter) = &attrs.setter {
+        attr_parts.push(format!("setter={setter}"));
     }
 
-    let mut prop_type = "id".to_string();
-    let mut parts = Vec::new();
-
-    for component in attrs.split(',') {
-        if component.is_empty() {
-            continue;
-        }
-        match component.as_bytes()[0] {
-            b'T' => {
-                let type_enc = &component[1..];
-                prop_type = decode_type(type_enc);
-            }
-            b'N' => parts.push("nonatomic"),
-            b'R' => parts.push("readonly"),
-            b'C' => parts.push("copy"),
-            b'&' => parts.push("retain"),
-            b'W' => parts.push("weak"),
-            b'D' => parts.push("dynamic"),
-            _ => {}
-        }
-    }
-
-    let attrs_str = if parts.is_empty() {
+    let attr_prefix = if attr_parts.is_empty() {
         String::new()
     } else {
-        format!("({}) ", parts.join(", "))
+        format!("({}) ", attr_parts.join(", "))
     };
 
-    (format!("{prop_type} "), attrs_str)
+    let ty = attrs
+        .ty
+        .as_ref()
+        .map(|ty| ty.render_named(&prop.name))
+        .unwrap_or_else(|| format!("id {}", prop.name));
+
+    let mut line = format!("@property {attr_prefix}{ty};");
+    let comment = render_property_comment(&attrs);
+    if !comment.is_empty() {
+        line.push(' ');
+        line.push_str("// ");
+        line.push_str(&comment);
+    }
+    line
+}
+
+fn render_property_comment(attrs: &ObjCPropertyAttributes) -> String {
+    let mut parts = Vec::new();
+    if attrs.dynamic {
+        parts.push("@dynamic".to_string());
+    }
+    if let Some(ivar) = &attrs.ivar {
+        parts.push(format!("ivar: {ivar}"));
+    }
+    if let Some(old_type) = &attrs.old_type_encoding {
+        parts.push(format!("legacy type: {old_type}"));
+    }
+    if !attrs.unknown_flags.is_empty() {
+        parts.push(format!("raw attrs: {}", attrs.unknown_flags.join(",")));
+    }
+    parts.join(", ")
+}
+
+fn render_method(method: &ObjCMethod, prefix: char) -> String {
+    let signature = method.parsed_signature();
+    let return_type = signature
+        .as_ref()
+        .map(|sig| sig.return_type.to_string())
+        .unwrap_or_else(|| "id".to_string());
+
+    let Some(signature) = signature else {
+        return format!("{prefix} ({return_type}){};", method.name);
+    };
+
+    if signature.arguments.is_empty() {
+        return format!("{prefix} ({return_type}){};", method.name);
+    }
+
+    let pieces: Vec<&str> = method.name.split(':').collect();
+    if pieces.len().saturating_sub(1) != signature.arguments.len() {
+        let fallback_args = signature
+            .arguments
+            .iter()
+            .enumerate()
+            .map(|(idx, arg)| render_method_arg(arg, idx))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!(
+            "{prefix} ({return_type}){}; // args: {fallback_args}",
+            method.name
+        );
+    }
+
+    let mut out = format!("{prefix} ({return_type})");
+    for (idx, arg) in signature.arguments.iter().enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        out.push_str(pieces[idx]);
+        out.push(':');
+        out.push_str(&render_parenthesized_type(&arg.ty));
+        out.push_str(&format!("arg{}", idx + 1));
+    }
+    out.push(';');
+    out
+}
+
+fn render_method_arg(arg: &ObjCMethodArg, idx: usize) -> String {
+    format!("{} arg{}", arg.ty, idx + 1)
+}
+
+fn render_parenthesized_type(ty: &ObjCQualifiedType) -> String {
+    format!("({})", ty.render())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::addr::Va;
+    use crate::objc::types::{
+        ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol,
+    };
+
+    use super::{render_category_header, render_class_header, render_protocol_header};
+
+    #[test]
+    fn class_header_renders_typed_selectors_and_properties() {
+        let header = render_class_header(&ObjCClass {
+            name: "Widget".into(),
+            superclass_name: Some("NSObject".into()),
+            instance_methods: vec![
+                ObjCMethod {
+                    name: "setTitle:forState:".into(),
+                    type_encoding: "v40@0:8@\"NSString\"16q24".into(),
+                    imp: Va(0),
+                },
+                ObjCMethod {
+                    name: "reload".into(),
+                    type_encoding: "v16@0:8".into(),
+                    imp: Va(0),
+                },
+            ],
+            class_methods: Vec::new(),
+            ivars: vec![ObjCIvar {
+                name: "_title".into(),
+                type_encoding: "@\"NSString\"".into(),
+                offset: 8,
+                size: 8,
+                alignment: 3,
+            }],
+            properties: vec![ObjCProperty {
+                name: "title".into(),
+                attributes: "T@\"NSString\",&,N,GcustomTitle,SsetCustomTitle:,V_title".into(),
+            }],
+            protocols: vec!["NSCopying".into()],
+            instance_size: 0,
+            is_meta: false,
+            is_swift: false,
+        });
+
+        assert!(header.contains("@interface Widget : NSObject <NSCopying>"));
+        assert!(header.contains("NSString *_title; // +8, 8 bytes"));
+        assert!(header.contains(
+            "@property (strong, nonatomic, getter=customTitle, setter=setCustomTitle:) NSString *title; // ivar: _title"
+        ));
+        assert!(header.contains("- (void)setTitle:(NSString *)arg1 forState:(long long)arg2;"));
+        assert!(header.contains("- (void)reload;"));
+    }
+
+    #[test]
+    fn category_header_renders_protocols_and_properties() {
+        let header = render_category_header(&ObjCCategory {
+            name: "Debug".into(),
+            class_name: "Widget".into(),
+            instance_methods: vec![ObjCMethod {
+                name: "setHandler:".into(),
+                type_encoding: "v24@0:8@?16".into(),
+                imp: Va(0),
+            }],
+            class_methods: Vec::new(),
+            properties: vec![ObjCProperty {
+                name: "handler".into(),
+                attributes: "T@?,C,N".into(),
+            }],
+            protocols: vec!["Inspectable".into()],
+        });
+
+        assert!(header.contains("@interface Widget (Debug) <Inspectable>"));
+        assert!(header.contains("@property (copy, nonatomic) id /* block */ handler;"));
+        assert!(header.contains("- (void)setHandler:(id /* block */)arg1;"));
+    }
+
+    #[test]
+    fn protocol_header_renders_optional_section() {
+        let header = render_protocol_header(&ObjCProtocol {
+            name: "WidgetProtocol".into(),
+            instance_methods: vec![ObjCMethod {
+                name: "renderWithContext:".into(),
+                type_encoding: "v24@0:8@\"NSString\"16".into(),
+                imp: Va(0),
+            }],
+            class_methods: Vec::new(),
+            optional_instance_methods: vec![ObjCMethod {
+                name: "debugName".into(),
+                type_encoding: "@16@0:8".into(),
+                imp: Va(0),
+            }],
+            optional_class_methods: Vec::new(),
+            properties: vec![ObjCProperty {
+                name: "title".into(),
+                attributes: "T@\"NSString\",R".into(),
+            }],
+            adopted_protocols: vec!["NSObject".into()],
+        });
+
+        assert!(header.contains("@protocol WidgetProtocol <NSObject>"));
+        assert!(header.contains("@property (readonly) NSString *title;"));
+        assert!(header.contains("- (void)renderWithContext:(NSString *)arg1;"));
+        assert!(header.contains("@optional"));
+        assert!(header.contains("- (id)debugName;"));
+    }
+
+    #[test]
+    fn method_rendering_handles_nested_pointer_arguments() {
+        let header = render_class_header(&ObjCClass {
+            name: "Widget".into(),
+            superclass_name: Some("NSObject".into()),
+            instance_methods: vec![ObjCMethod {
+                name: "renderIntoError:".into(),
+                type_encoding: "v24@0:8^@\"NSError\"16".into(),
+                imp: Va(0),
+            }],
+            class_methods: Vec::new(),
+            ivars: Vec::new(),
+            properties: Vec::new(),
+            protocols: Vec::new(),
+            instance_size: 0,
+            is_meta: false,
+            is_swift: false,
+        });
+
+        assert!(header.contains("- (void)renderIntoError:(NSError **)arg1;"));
+    }
 }

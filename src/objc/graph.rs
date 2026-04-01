@@ -189,6 +189,8 @@ impl ObjCGraph {
             if let Some(node) = classes.get_mut(&cat.class_name) {
                 node.categories.push(cat.name.clone());
                 node.protocols.extend(cat.protocols.iter().cloned());
+                node.properties
+                    .extend(cat.properties.iter().map(|prop| prop.name.clone()));
                 fold_category_methods(node, cat, &mut selectors, addr_to_sym);
             }
         }

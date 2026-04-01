@@ -28,7 +28,7 @@ The project is aimed at people who need more than `otool`-style field dumps:
 - headers, load commands, segments, sections, UUIDs, and platform/build metadata
 - `LC_SYMTAB` symbols and per-section relocations
 - dyld exports tries, chained fixups, bind/rebase views, and import tables
-- Objective-C classes, categories, protocols, selectors, graphs, and cross-references
+- Objective-C classes, categories, protocols, selectors, graphs, cross-references, and high-fidelity header reconstruction via `macho objc --headers`
 - Swift type discovery from demangled symbols plus Swift-marked ObjC metadata
 - `LC_CODE_SIGNATURE`, CodeDirectories, entitlements, CMS presence, and code-sign audit rules
 - JSON snapshots for downstream tooling
@@ -96,6 +96,7 @@ macho fixups --binds-only /usr/bin/tar
 
 ```bash
 macho objc /usr/bin/plutil --class PLUContext
+macho objc /usr/bin/plutil --headers --class PLUContext
 macho objc graph /usr/bin/plutil --class PLUContext
 macho objc selectors /usr/bin/plutil --name execute
 macho objc xrefs /usr/bin/plutil --class PLUContext
@@ -179,7 +180,7 @@ macho patch patch-bytes fat.bin --arch arm64e --offset 0x100 --hex 90909090 --ou
 | `exports` | Decode the dyld exports trie. | `--arch`, `--demangle` |
 | `imports` | List chained-fixup imports. | `--arch`, `--demangle` |
 | `fixups` | Walk chained fixups and split them into binds/rebases. | `--arch`, `--binds-only`, `--rebases-only`, `--demangle` |
-| `objc` | Print ObjC classes/categories/protocols, or drill into graphs/selectors/xrefs. | `--arch`, `--headers`, `--class` |
+| `objc` | Print ObjC classes/categories/protocols, recover high-fidelity headers, or drill into graphs/selectors/xrefs. | `--arch`, `--headers`, `--class` |
 | `codesign` | Inspect `LC_CODE_SIGNATURE`, entitlements, CodeDirectory data, and CMS presence. | `--arch`, `--entitlements` |
 | `snapshot` | Emit a structured JSON snapshot of the parsed container. | `--arch` |
 | `diff` | Compare two binaries semantically at the snapshot level. | `--arch`, `--json`, `--fail-on`, `--ignore-codesign`, `--ignore-objc`, `--ignore-symbols` |

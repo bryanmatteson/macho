@@ -5,7 +5,9 @@ pub use crate::addr::{AddressMap, FatFileOffset, MappingEntry, Rva, ThinFileOffs
 pub use crate::error::{Error, Result};
 
 // Demangling helpers
-pub use crate::demangle::{SymbolDemangler, demangle_symbol, format_symbol};
+pub use crate::demangle::{
+    SymbolDemangler, demangle_cpp_symbol_with_options, demangle_symbol, format_symbol,
+};
 
 // Extension traits
 pub use crate::ext::{MachAnalysis, MachExt};
@@ -47,6 +49,15 @@ pub use crate::objc::{
 
 // Swift types
 pub use crate::swift::SwiftTypeIndex;
+
+// C++ reconstruction
+pub use crate::cpp::{
+    CppBodyAnalysis, CppClass, CppConfidence, CppEvidence, CppFunctionDecl, CppHeaderMatch,
+    CppHeaderUnit, CppImageIndex, CppSpecialSymbol, CppSymbolKind, CppSymbolRecord, CppType,
+    CppTypeInfoNode, CppUnifiedIndex, ExternalHeaderIndex, HeaderCandidate, QualifiedName,
+    build_headers_for_mach, build_image_index, correlate_functions, default_header_unit,
+    render_header, unify_images,
+};
 
 // Code signature types
 pub use crate::codesign::{

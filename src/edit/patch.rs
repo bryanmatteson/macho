@@ -303,6 +303,24 @@ impl MachoPatcher {
         None
     }
 
+    /// Translate a file offset to a virtual address.
+    ///
+    /// Walks segments to find one whose `[fileoff, fileoff+filesize)` range
+    /// contains `offset`, then computes `vmaddr + (offset - fileoff)`.
+    pub fn offset_to_va(&self, offset: usize) -> Option<u64> {
+        let offset = offset as u64;
+        for seg in &self.segments {
+            let Some(seg_end) = seg.fileoff.checked_add(seg.filesize) else {
+                continue;
+            };
+            if offset >= seg.fileoff && offset < seg_end {
+                let delta = offset - seg.fileoff;
+                return seg.vmaddr.checked_add(delta);
+            }
+        }
+        None
+    }
+
     /// Translate a relative virtual address (offset from image base) to a
     /// file offset. The image base is taken from the first `__TEXT` segment
     /// (or the first segment if no `__TEXT` exists).

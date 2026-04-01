@@ -105,6 +105,15 @@ fn header_rendering() {
                 assert!(header.contains("@interface"));
                 assert!(header.contains("@end"));
                 assert!(header.contains(&class.name));
+                if class.name == "PLUContext" {
+                    assert!(
+                        header.contains("@property (strong) NSString *format; // ivar: _format")
+                    );
+                    assert!(header.contains(
+                        "- (id)initWithArguments:(id)arg1 outputFileHandle:(id)arg2 errorFileHandle:(id)arg3;"
+                    ));
+                    return;
+                }
             }
         }
     }

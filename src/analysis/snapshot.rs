@@ -234,6 +234,7 @@ pub struct ObjCCategorySnapshot {
     pub class_name: String,
     pub instance_methods: Vec<ObjCMethodSnapshot>,
     pub class_methods: Vec<ObjCMethodSnapshot>,
+    pub properties: Vec<String>,
     pub protocols: Vec<String>,
 }
 

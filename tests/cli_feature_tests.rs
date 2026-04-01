@@ -545,6 +545,41 @@ fn objc_xrefs_json_reports_symbol_links() {
 }
 
 #[test]
+fn objc_headers_render_typed_selectors_and_property_comments() {
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-headers-plutil");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
+    let arch = ImageInspector::new(container.first_mach())
+        .info()
+        .arch
+        .clone();
+
+    let output = run_cli([
+        "objc",
+        fixture_path,
+        "--arch",
+        &arch,
+        "--headers",
+        "--class",
+        "PLUContext",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "objc headers command failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("@interface PLUContext : NSObject"));
+    assert!(stdout.contains(
+        "- (id)initWithArguments:(id)arg1 outputFileHandle:(id)arg2 errorFileHandle:(id)arg3;"
+    ));
+    assert!(stdout.contains("@property (strong) NSString *format; // ivar: _format"));
+}
+
+#[test]
 #[cfg(unix)]
 fn patch_preserves_execute_bit() {
     let fixture = copy_macho_fixture("/usr/bin/true", "preserve-mode-true");
