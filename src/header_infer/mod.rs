@@ -203,13 +203,15 @@ impl HeaderInferenceSession {
         self.validate_bundle()?;
         let max_attempts = options.max_attempts.max(1);
         let mut attempts = Vec::new();
+        let mut latest_sidecar = None;
         let mut prompt = self.prompt()?;
 
         for _ in 0..max_attempts {
             let raw_response = model.infer(&prompt)?;
             match self.parse_model_output(&raw_response) {
                 Ok(parsed) => {
-                    let validation = self.validate(&parsed, validators)?;
+                    let sidecar = self.apply(parsed.clone(), validators)?;
+                    let validation = sidecar.validation.clone();
                     let attempt = InferenceAttempt {
                         prompt: prompt.clone(),
                         raw_response,
@@ -219,8 +221,9 @@ impl HeaderInferenceSession {
                     };
                     attempts.push(attempt);
 
+                    latest_sidecar = Some(sidecar.clone());
+
                     if validation.valid {
-                        let sidecar = self.apply(parsed, validators)?;
                         return Ok(InferenceRun {
                             success: true,
                             attempts,
@@ -228,13 +231,11 @@ impl HeaderInferenceSession {
                         });
                     }
 
-                    prompt = build_repair_prompt(
-                        &self.bundle,
-                        &serde_json::to_string_pretty(&parsed).map_err(|err| {
-                            crate::Error::Validation(format!("serialize model output: {err}"))
-                        })?,
-                        &validation.issues,
-                    )?;
+                    prompt = sidecar.repair_prompt.clone().ok_or_else(|| {
+                        crate::Error::Validation(
+                            "invalid inference sidecar missing repair prompt".into(),
+                        )
+                    })?;
                 }
                 Err(err) => {
                     let parse_error = err.to_string();
@@ -253,7 +254,7 @@ impl HeaderInferenceSession {
         Ok(InferenceRun {
             success: false,
             attempts,
-            sidecar: None,
+            sidecar: latest_sidecar,
         })
     }
 }

@@ -229,6 +229,34 @@ fn repair_loop_recovers_from_invalid_json() {
 }
 
 #[test]
+fn failed_repair_loop_keeps_latest_invalid_sidecar() {
+    let session = HeaderInferenceSession::new(sample_bundle(HeaderLanguage::C));
+    let clang = ClangSyntaxValidator;
+    let mut invalid = valid_output(HeaderLanguage::C);
+    invalid.declarations[0].entity_id = Some("entity.missing".into());
+    let model = SequenceModel::new(vec![
+        serde_json::to_string_pretty(&invalid).expect("response json"),
+    ]);
+
+    let run = session
+        .run_with_model(&model, &[&clang], InferenceOptions { max_attempts: 1 })
+        .expect("run");
+
+    assert!(!run.success);
+    let sidecar = run
+        .sidecar
+        .expect("latest invalid sidecar should be preserved");
+    assert!(!sidecar.valid);
+    assert!(
+        sidecar
+            .validation
+            .issues
+            .iter()
+            .any(|issue| issue.code == "HI001")
+    );
+}
+
+#[test]
 fn cli_prompt_and_apply_flow() {
     let bundle_path = temp_file_path("header-infer-bundle");
     let response_path = temp_file_path("header-infer-response");

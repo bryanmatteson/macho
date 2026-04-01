@@ -1,9 +1,11 @@
 use crate::cpp::types::{
     CppClass, CppFunctionDecl, CppHeaderUnit, CppRefQualifier, CppUnifiedIndex,
 };
+use std::collections::BTreeMap;
 
 pub fn render_header(unit: &CppHeaderUnit) -> String {
     let mut out = String::new();
+    let ordered_classes = order_classes(&unit.classes);
     out.push_str("#pragma once\n\n");
     out.push_str("namespace __macho {\n");
     out.push_str("using unknown_return = void*;\n");
@@ -24,17 +26,55 @@ pub fn render_header(unit: &CppHeaderUnit) -> String {
         out.push('\n');
     }
 
-    for class in &unit.classes {
+    if !ordered_classes.is_empty() {
+        for class in &ordered_classes {
+            out.push_str(&format!("class {};\n", class.name));
+        }
+        out.push('\n');
+    }
+
+    for class in &ordered_classes {
         out.push_str(&render_class(class));
         out.push('\n');
     }
 
-    for function in &unit.free_functions {
+    for function in dedup_functions(&unit.free_functions)
+        .into_iter()
+        .filter(|function| !is_runtime_operator(function))
+    {
         out.push_str(&render_function(function, true));
         out.push('\n');
     }
 
     out
+}
+
+fn order_classes<'a>(classes: &'a [CppClass]) -> Vec<&'a CppClass> {
+    let mut remaining: BTreeMap<String, &CppClass> = classes
+        .iter()
+        .map(|class| (class.name.clone(), class))
+        .collect();
+    let mut ordered = Vec::new();
+
+    while !remaining.is_empty() {
+        let ready = remaining
+            .iter()
+            .find(|(_, class)| {
+                class
+                    .bases
+                    .iter()
+                    .all(|base| !remaining.contains_key(&base.name))
+            })
+            .map(|(name, _)| name.clone());
+
+        let Some(next_name) = ready.or_else(|| remaining.keys().next().cloned()) else {
+            break;
+        };
+        let class = remaining.remove(&next_name).expect("class should exist");
+        ordered.push(class);
+    }
+
+    ordered
 }
 
 pub fn default_header_unit(index: &CppUnifiedIndex) -> CppHeaderUnit {
@@ -71,15 +111,44 @@ fn render_class(class: &CppClass) -> String {
     }
     out.push_str(" {\npublic:\n");
 
-    let mut methods = class.methods.clone();
-    methods.sort_by(|left, right| left.name.as_string().cmp(&right.name.as_string()));
-    for method in &methods {
+    for method in dedup_functions(&class.methods) {
         out.push_str("    ");
         out.push_str(&render_function(method, false));
         out.push('\n');
     }
     out.push_str("};\n");
     out
+}
+
+fn dedup_functions<'a>(functions: &'a [CppFunctionDecl]) -> Vec<&'a CppFunctionDecl> {
+    let mut ordered: BTreeMap<String, &CppFunctionDecl> = BTreeMap::new();
+    for function in functions {
+        let key = format!(
+            "{}|{}|{}|{}",
+            function.name.leaf().unwrap_or_default(),
+            function
+                .signature
+                .params
+                .iter()
+                .map(|param| param.ty.render())
+                .collect::<Vec<_>>()
+                .join(","),
+            function.is_constructor,
+            function.is_destructor
+        );
+        ordered.entry(key).or_insert(function);
+    }
+    ordered.into_values().collect()
+}
+
+fn is_runtime_operator(function: &CppFunctionDecl) -> bool {
+    matches!(
+        function.name.leaf(),
+        Some("operator new")
+            | Some("operator new[]")
+            | Some("operator delete")
+            | Some("operator delete[]")
+    )
 }
 
 fn render_function(function: &CppFunctionDecl, terminate: bool) -> String {

@@ -2,6 +2,15 @@ mod support;
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unique_path(stem: &str, ext: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_nanos();
+    std::env::temp_dir().join(format!("macho-{stem}-{nanos}.{ext}"))
+}
 
 fn compile_cpp_fixture(name: &str) -> Option<PathBuf> {
     let compiler_available = Command::new("xcrun")
@@ -15,8 +24,8 @@ fn compile_cpp_fixture(name: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let source_path = support::temp_file_path(&format!("{name}.cpp"));
-    let binary_path = support::temp_file_path(name);
+    let source_path = unique_path(name, "cpp");
+    let binary_path = unique_path(name, "bin");
     std::fs::write(
         &source_path,
         r#"

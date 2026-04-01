@@ -36,10 +36,18 @@ fn load_section_bytes(mach: &MachFile<'_>, id: SectionId) -> Result<Vec<u8>> {
 }
 
 fn macho_section_name(id: SectionId) -> String {
-    let raw = id.name();
-    if let Some(stripped) = raw.strip_prefix('.') {
-        format!("__{stripped}")
-    } else {
-        raw.replace('.', "__")
+    match id.name() {
+        ".debug_str_offsets" => "__debug_str_offs".to_string(),
+        ".debug_loclists" => "__debug_loclists".to_string(),
+        ".debug_rnglists" => "__debug_rnglists".to_string(),
+        ".debug_line_str" => "__debug_line_str".to_string(),
+        ".debug_names" => "__debug_names".to_string(),
+        raw => {
+            if let Some(stripped) = raw.strip_prefix('.') {
+                format!("__{stripped}")
+            } else {
+                raw.replace('.', "__")
+            }
+        }
     }
 }

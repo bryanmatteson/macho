@@ -1,9 +1,17 @@
 mod support;
 
 use macho::cpp::{build_headers_for_mach, build_image_index, unify_images, validate_header_syntax};
-use macho::model::container::MachContainer;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn unique_path(stem: &str, ext: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time went backwards")
+        .as_nanos();
+    std::env::temp_dir().join(format!("macho-{stem}-{nanos}.{ext}"))
+}
 
 fn compile_cpp_fixture(name: &str) -> Option<PathBuf> {
     let compiler_available = Command::new("xcrun")
@@ -17,8 +25,8 @@ fn compile_cpp_fixture(name: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let source_path = support::temp_file_path(&format!("{name}.cpp"));
-    let binary_path = support::temp_file_path(name);
+    let source_path = unique_path(name, "cpp");
+    let binary_path = unique_path(name, "bin");
     let source = r#"
 struct Base {
     virtual ~Base();
@@ -97,21 +105,14 @@ int main() {
     Some(binary_path)
 }
 
-fn first_mach(data: &[u8]) -> &macho::model::mach::MachFile<'_> {
-    let container = macho::parse(data).expect("parse");
-    match container {
-        MachContainer::Thin(ref mach) => mach,
-        MachContainer::Fat(ref fat) => &fat.arches()[0].mach,
-    }
-}
-
 #[test]
 fn cpp_index_recovers_classes_bases_and_functions() {
     let Some(path) = compile_cpp_fixture("cpp-recovery") else {
         return;
     };
     let bytes = std::fs::read(&path).expect("read fixture");
-    let mach = first_mach(&bytes);
+    let container = macho::parse(&bytes).expect("parse");
+    let mach = container.first_mach();
 
     let index = build_image_index(mach).expect("build C++ image index");
     assert!(index.classes.contains_key("Base"));
@@ -156,7 +157,8 @@ fn cpp_header_renders_and_validates() {
         return;
     };
     let bytes = std::fs::read(&path).expect("read fixture");
-    let mach = first_mach(&bytes);
+    let container = macho::parse(&bytes).expect("parse");
+    let mach = container.first_mach();
 
     let header = build_headers_for_mach(mach).expect("render header");
     assert!(header.contains("class Derived"));
@@ -173,7 +175,8 @@ fn cpp_unification_merges_duplicate_images() {
         return;
     };
     let bytes = std::fs::read(&path).expect("read fixture");
-    let mach = first_mach(&bytes);
+    let container = macho::parse(&bytes).expect("parse");
+    let mach = container.first_mach();
 
     let index = build_image_index(mach).expect("build image index");
     let unified = unify_images(&[index.clone(), index]);

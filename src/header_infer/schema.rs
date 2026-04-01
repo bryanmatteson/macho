@@ -84,7 +84,7 @@ pub enum EntityKind {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationTargetKind {
     Syntax,
@@ -274,6 +274,7 @@ pub fn validate_bundle(bundle: &EvidenceBundle) -> BundleValidationReport {
     let mut seen_entities = BTreeSet::new();
     let mut seen_facts = BTreeSet::new();
     let mut seen_gaps = BTreeSet::new();
+    let mut seen_validation_targets = BTreeSet::new();
     for entity in &bundle.entities {
         if entity.id.trim().is_empty() {
             issues.push(BundleValidationIssue {
@@ -371,6 +372,25 @@ pub fn validate_bundle(bundle: &EvidenceBundle) -> BundleValidationReport {
                 message: format!(
                     "unresolved gap '{}' references unknown entity '{}'",
                     gap.id, gap.entity_id
+                ),
+            });
+        }
+    }
+
+    for target in &bundle.validation_targets {
+        if target.label.trim().is_empty() {
+            issues.push(BundleValidationIssue {
+                code: "HB017".into(),
+                message: "validation target label must not be empty".into(),
+            });
+        }
+        let key = (target.kind, target.label.as_str());
+        if !seen_validation_targets.insert(key) {
+            issues.push(BundleValidationIssue {
+                code: "HB018".into(),
+                message: format!(
+                    "duplicate validation target '{:?}:{}'",
+                    target.kind, target.label
                 ),
             });
         }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::header_infer::schema::EvidenceBundle;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidationSeverity {
     Error,
@@ -267,7 +267,7 @@ pub fn validate_output(
     let mut issues = Vec::new();
     let mut seen_issues = BTreeSet::new();
     let mut syntax_checked = false;
-    let mut syntax_ok = true;
+    let mut syntax_ok = false;
 
     let contract = OutputContractValidator;
     let coverage = EntityCoverageValidator;
@@ -276,6 +276,7 @@ pub fn validate_output(
     for validator in builtins.into_iter().chain(validators.iter().copied()) {
         if validator.is_syntax_validator() {
             syntax_checked = true;
+            syntax_ok = true;
         }
         let mut validator_issues = validator.validate(bundle, output, &header_text)?;
         if validator.is_syntax_validator() && !validator_issues.is_empty() {

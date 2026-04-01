@@ -140,13 +140,14 @@ fn parse_vmi_bases(
             resolver.read_u32(flags_offset).unwrap_or(0) as u64
         };
         if let Some((name, _)) = resolve_base_name(target, va_to_symbol) {
-            let offset = ((offset_flags as i64) >> 8).then_some((offset_flags as i64) >> 8);
+            let signed_offset = (offset_flags as i64) >> 8;
+            let offset = (signed_offset != 0).then_some(signed_offset);
             bases.push(CppBaseClass {
                 name,
                 offset,
                 flags: offset_flags,
                 is_virtual: offset_flags & 0x1 != 0,
-                is_public: offset_flags & 0x2 == 0,
+                is_public: offset_flags & 0x2 != 0,
                 evidence: vec![CppEvidence {
                     kind: CppEvidenceKind::TypeInfo,
                     confidence: CppConfidence::High,
@@ -213,7 +214,10 @@ impl<'a> PointerResolver<'a> {
                             file_offset,
                             ResolvedTarget::Import {
                                 name: bind.symbol_name.to_string(),
-                                lib_ordinal: bind.lib_ordinal,
+                                lib_ordinal: bind
+                                    .lib_ordinal
+                                    .clamp(i32::MIN as i64, i32::MAX as i64)
+                                    as i32,
                             },
                         );
                     }
