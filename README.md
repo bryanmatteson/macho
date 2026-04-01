@@ -1,6 +1,6 @@
 # macho
 
-`macho` is a Rust library and CLI for parsing, inspecting, comparing, auditing, and structurally editing Mach-O binaries.
+`macho` is a Rust library and CLI for parsing, inspecting, comparing, extracting from, auditing, and structurally editing Mach-O binaries.
 
 It understands both thin Mach-O files and fat/universal containers, then lifts raw binary records into higher-level views over headers, load commands, segments, sections, symbol tables, dyld metadata, Objective-C metadata, Swift type discovery, code signatures, JSON snapshots, semantic diffs, and edit transactions.
 
@@ -17,7 +17,7 @@ The project is aimed at people who need more than `otool`-style field dumps:
 - One parser, two interfaces. Use the CLI for investigation and the library when you need direct Rust integration.
 - Fat-binary aware by default. Inspect the full container or filter to a single slice with `--arch`.
 - Higher-level analyses are built in. ObjC graphs, Swift type discovery, code-signature parsing, semantic diffing, audit rules, and container parity all sit on top of the same parser.
-- JSON-first where it matters. `snapshot`, `diff`, `audit`, `container`, `swift`, and `objc graph` all support machine-consumable output paths.
+- JSON-first where it matters. `compare`, `audit`, `extract swift`, `extract objc graph`, and container/fileset reporting all support machine-consumable output paths.
 - Editing is guarded by preview and validation. Patch flows can show what will change, warn when signatures are invalidated, and fail closed on validation errors unless you opt into `--force`.
 
 ## What It Covers Today
@@ -28,7 +28,7 @@ The project is aimed at people who need more than `otool`-style field dumps:
 - headers, load commands, segments, sections, UUIDs, and platform/build metadata
 - `LC_SYMTAB` symbols and per-section relocations
 - dyld exports tries, chained fixups, bind/rebase views, and import tables
-- Objective-C classes, categories, protocols, selectors, graphs, cross-references, and high-fidelity header reconstruction via `macho objc --headers`
+- Objective-C classes, categories, protocols, selectors, graphs, cross-references, and high-fidelity header reconstruction via `macho extract objc --headers`
 - Swift type discovery from demangled symbols plus Swift-marked ObjC metadata
 - `LC_CODE_SIGNATURE`, CodeDirectories, entitlements, CMS presence, and code-sign audit rules
 - JSON snapshots for downstream tooling
@@ -39,10 +39,10 @@ The project is aimed at people who need more than `otool`-style field dumps:
 
 ## Install
 
-The crate currently installs from source.
+The CLI currently installs from source from the workspace.
 
 ```bash
-cargo install --path .
+cargo install --path crates/macho-cli
 ```
 
 For local development:
@@ -60,11 +60,14 @@ Project requirements:
 
 ## Quick Start
 
-### Inspect a binary
+### View binary structure
 
 ```bash
-macho inspect /usr/bin/true
-macho inspect --validate /usr/bin/true
+macho view header /usr/bin/true
+macho view load-commands /usr/bin/true
+macho view segments /usr/bin/true
+macho view sections /usr/bin/true
+macho view header /usr/bin/true --validate
 ```
 
 Real output starts like this:
@@ -82,31 +85,33 @@ Header:
   Commands:  16
 ```
 
-### Explore symbols, exports, imports, fixups, and relocations
+### View symbols, exports, imports, fixups, and relocations
 
 ```bash
-macho symbols --defined-only --demangle /usr/bin/true
-macho relocations --section __DATA,__la_symbol_ptr /usr/bin/tar
-macho exports --demangle /usr/bin/tar
-macho imports --demangle /usr/bin/tar
-macho fixups --binds-only /usr/bin/tar
+macho view symbols /usr/bin/true --defined-only --demangle
+macho view relocations /usr/bin/tar --section __DATA,__la_symbol_ptr
+macho view exports /usr/bin/tar --demangle
+macho view imports /usr/bin/tar --demangle
+macho view fixups /usr/bin/tar --binds-only
 ```
 
-### Recover Objective-C and Swift surface area
+### Extract Objective-C, Swift, RTTI, and DWARF artifacts
 
 ```bash
-macho objc /usr/bin/plutil --class PLUContext
-macho objc /usr/bin/plutil --headers --class PLUContext
-macho objc graph /usr/bin/plutil --class PLUContext
-macho objc selectors /usr/bin/plutil --name execute
-macho objc xrefs /usr/bin/plutil --class PLUContext
-macho swift /usr/bin/plutil --kind class
+macho extract objc /usr/bin/plutil --class PLUContext
+macho extract objc /usr/bin/plutil --headers --class PLUContext
+macho extract objc graph /usr/bin/plutil --class PLUContext
+macho extract objc selectors /usr/bin/plutil --name execute
+macho extract objc xrefs /usr/bin/plutil --class PLUContext
+macho extract swift /usr/bin/plutil --kind class
+macho extract rtti some_binary --headers
+macho extract dwarf some_binary --output-dir /tmp/dwarf
 ```
 
 ### Inspect code signing and run policy checks
 
 ```bash
-macho codesign --entitlements /usr/bin/true
+macho view code-signature /usr/bin/true --entitlements
 macho audit /usr/bin/true --min-severity warning
 macho audit /usr/bin/true --sarif > audit.sarif
 ```
@@ -120,21 +125,21 @@ Example audit output:
 [info] [x86_64] CS002: signed binary has no entitlements
 ```
 
-### Snapshot or diff a build
+### Compare two builds
 
 ```bash
-macho snapshot /usr/bin/true > true.snapshot.json
-macho diff old.bin new.bin --fail-on breaking
-macho diff old.bin new.bin --json --ignore-codesign
+macho compare old.bin new.bin --fail-on breaking
+macho compare old.bin new.bin --json --ignore-codesign
+macho compare old.bin new.bin --mode container
 ```
 
-### Analyze fat-container parity or filesets
+### Inspect filesets or dyld caches
 
 ```bash
-macho container /usr/bin/true
-macho container --resolve /usr/bin/true
 macho fileset list some_fileset.bin
 macho fileset inspect some_fileset.bin com.example.member
+macho dyld-cache info /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e
+macho dyld-cache list /System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e
 ```
 
 ### Patch a binary
@@ -144,8 +149,8 @@ Patching works on both thin and fat binaries. Structural edits apply to every sl
 the offset is interpreted relative to the selected slice.
 
 ```bash
-macho patch add-rpath /usr/bin/true @executable_path/../Frameworks --dry-run
-macho patch add-rpath /usr/bin/true @executable_path/../Frameworks --arch arm64e --output /tmp/true.arm64e
+macho patch /usr/bin/true --add-rpath @executable_path/../Frameworks --dry-run
+macho patch /usr/bin/true --add-rpath @executable_path/../Frameworks --arch arm64e --output /tmp/true.arm64e
 ```
 
 Output in this shape:
@@ -165,44 +170,41 @@ Re-sign assistance:
 Apply a patch to a new file or in place:
 
 ```bash
-macho patch add-rpath input.bin @executable_path/../Frameworks --output patched.bin
-macho patch strip-signature input.bin --in-place --backup
-macho patch patch-bytes fat.bin --arch arm64e --offset 0x100 --hex 90909090 --output patched.bin
+macho patch input.bin --add-rpath @executable_path/../Frameworks --output patched.bin
+macho patch input.bin --strip-signature --in-place --backup
+macho patch fat.bin --arch arm64e --patch-bytes 0x100:90909090 --output patched.bin
+macho patch input.bin \
+  --remove-rpath /old/path \
+  --add-rpath @executable_path/../Frameworks \
+  --add-dylib /usr/lib/libfoo.dylib \
+  --output patched.bin
 ```
 
 ## Command Guide
 
 | Command | What it does | Notable options |
 | --- | --- | --- |
-| `inspect` | Print headers, segments, sections, load commands, and summary information. | `--arch`, `--validate` |
-| `symbols` | List symbols from `LC_SYMTAB`. | `--arch`, `--external`, `--undefined-only`, `--defined-only`, `--sort-address`, `--demangle` |
-| `relocations` | Show relocations for each section or a selected section. | `--arch`, `--section` |
-| `exports` | Decode the dyld exports trie. | `--arch`, `--demangle` |
-| `imports` | List chained-fixup imports. | `--arch`, `--demangle` |
-| `fixups` | Walk chained fixups and split them into binds/rebases. | `--arch`, `--binds-only`, `--rebases-only`, `--demangle` |
-| `objc` | Print ObjC classes/categories/protocols, recover high-fidelity headers, or drill into graphs/selectors/xrefs. | `--arch`, `--headers`, `--class` |
-| `codesign` | Inspect `LC_CODE_SIGNATURE`, entitlements, CodeDirectory data, and CMS presence. | `--arch`, `--entitlements` |
-| `snapshot` | Emit a structured JSON snapshot of the parsed container. | `--arch` |
-| `diff` | Compare two binaries semantically at the snapshot level. | `--arch`, `--json`, `--fail-on`, `--ignore-codesign`, `--ignore-objc`, `--ignore-symbols` |
+| `view` | Inspect headers, load commands, segments, sections, symbols, relocations, imports, exports, fixups, strings, xrefs, code signatures, DWARF sections, or dependency summaries. | subcommands such as `header`, `symbols`, `imports`, `code-signature`, `dwarf`, `dependencies`; most accept `--arch` |
+| `patch` | Apply one or more structural or raw binary edits in a single transaction. | `--add-rpath`, `--remove-rpath`, `--add-dylib`, `--strip-signature`, `--patch-bytes`, `--arch`, `--dry-run`, `--output`, `--in-place`, `--backup`, `--force` |
+| `compare` | Compare two binaries semantically and optionally fail on severity. | `--mode`, `--arch`, `--json`, `--fail-on`, `--ignore-codesign`, `--ignore-objc`, `--ignore-symbols` |
+| `extract` | Recover higher-level artifacts such as ObjC metadata, Swift types, C++ RTTI, DWARF payloads, raw sections, or code-signature material. | subcommands `objc`, `swift`, `rtti`, `dwarf`, `section`, `code-signature` |
+| `fileset` | List or inspect `MH_FILESET` entries. | `list`, `inspect` |
+| `dyld-cache` | Inspect or extract from dyld shared caches. | `info`, `list`, `extract` |
 | `audit` | Run bundled audit rules and print text, JSON, or SARIF. | `--arch`, `--json`, `--sarif`, `--min-severity`, `--fail-on` |
-| `patch` | Add/remove load commands, strip signatures, or patch raw bytes. | `--arch`, `--dry-run`, `--output`, `--in-place`, `--backup`, `--force` |
-| `swift` | Discover Swift type names and kinds from metadata/symbols. | `--arch`, `--json`, `--kind` |
-| `container` | Report fat-container parity, fileset entries, and optional cross-image resolution. | `--arch`, `--json`, `--resolve` |
-| `fileset` | List or inspect `MH_FILESET` entries. | `list`, `inspect` subcommands |
 
-### `objc` subcommands
+### `extract objc` subcommands
 
-- `macho objc graph`: build a class/category/protocol graph, optionally as JSON
-- `macho objc selectors`: find selector owners across classes
-- `macho objc xrefs`: show method-to-symbol cross-references
+- `macho extract objc graph`: build a class/category/protocol graph, optionally as JSON
+- `macho extract objc selectors`: find selector owners across classes
+- `macho extract objc xrefs`: show method-to-symbol cross-references
 
-### `patch` subcommands
+### `patch` operation flags
 
-- `add-rpath`
-- `remove-rpath`
-- `add-dylib`
-- `strip-signature`
-- `patch-bytes`
+- `--add-rpath`
+- `--remove-rpath`
+- `--add-dylib`
+- `--strip-signature`
+- `--patch-bytes`
 
 ## Library Usage
 
@@ -231,10 +233,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Preview and commit an edit transaction
+### Preview and commit a mutation transaction
 
 ```rust
-use macho::edit::transaction::PatchTransaction;
+use macho::mutate::transaction::PatchTransaction;
 
 fn rewrite(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
@@ -252,12 +254,12 @@ fn rewrite(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 }
 ```
 
-### Rebuild a fat container after editing one slice
+### Rebuild a fat container after mutating one slice
 
 ```rust
-use macho::edit::transaction::PatchTransaction;
+use macho::mutate::owned::OwnedFatBinary;
+use macho::mutate::transaction::PatchTransaction;
 use macho::model::container::MachoContainer;
-use macho::model::owned::OwnedFatBinary;
 
 fn rewrite_arm64(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
@@ -288,12 +290,12 @@ fn rewrite_arm64(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 - `macho::parse(&[u8]) -> Result<MachoContainer>`
 - `MachoContainer::{is_thin, is_fat, macho_files, first_mach, find_arch}`
 - `MachoFile::{header, load_commands, segments, all_sections, address_map, section_bytes, read_bytes_at_va, read_bytes_at_rva, ext}`
-- `OwnedFatBinary::{from_fat, replace_arch, try_into_bytes}` for rebuilding universal containers after per-slice edits
-- `macho::validate::validate(&MachoFile)` for structural diagnostics
+- `macho::mutate::owned::OwnedFatBinary::{from_fat, replace_arch, try_into_bytes}` for rebuilding universal containers after per-slice edits
+- `macho::model::validate::validate(&MachoFile)` for structural diagnostics
 - `macho::analysis::snapshot::ContainerSnapshot::from_container(&container)` for structured analysis output
-- `macho::diff::diff_containers(&old, &new)` for semantic comparison
-- `macho::audit::audit_slice(&slice)` for rule-based findings
-- `macho::edit::MachoEditor` and `macho::edit::transaction::PatchTransaction` for structural rewriting
+- `macho::analysis::diff::diff_containers(&old, &new)` for semantic comparison
+- `macho::analysis::audit::audit_slice(&slice)` for rule-based findings
+- `macho::mutate::MachoEditor` and `macho::mutate::transaction::PatchTransaction` for structural rewriting
 
 ## Audit Rules Included
 
@@ -336,12 +338,13 @@ cargo clippy --all-targets --all-features
 
 Useful places to start:
 
-- [`src/lib.rs`](src/lib.rs): public crate surface
-- [`src/main.rs`](src/main.rs): CLI entrypoint
-- [`src/commands`](src/commands): command implementations
-- [`src/analysis`](src/analysis): snapshots and derived views
-- [`src/edit`](src/edit): rebuilding and transactional patching
-- [`tests`](tests): integration and feature coverage
+- [`crates/macho/src/lib.rs`](crates/macho/src/lib.rs): public library surface
+- [`crates/macho-cli/src/main.rs`](crates/macho-cli/src/main.rs): thin CLI entrypoint
+- [`crates/macho/src/commands`](crates/macho/src/commands): command implementations
+- [`crates/macho-analysis/src`](crates/macho-analysis/src): snapshots, diffing, audit, and derived views
+- [`crates/macho-metadata/src`](crates/macho-metadata/src): dyld, codesign, ObjC, Swift, and image metadata recovery
+- [`crates/macho-mutate/src`](crates/macho-mutate/src): rebuilding and transactional mutation
+- [`tests`](crates/macho/tests): integration and feature coverage
 - [`plans/README.md`](plans/README.md): implementation plans and roadmap notes
 
 ## License

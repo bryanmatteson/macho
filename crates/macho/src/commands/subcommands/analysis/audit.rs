@@ -4,8 +4,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
-use crate::commands::subcommands::common::filter_snapshot_by_arch;
 use crate::commands::output::sarif;
+use crate::commands::subcommands::common::filter_snapshot_by_arch;
 
 macro_rules! println {
     ($($arg:tt)*) => {

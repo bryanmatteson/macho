@@ -69,7 +69,7 @@ fn cpp_cli_json_emits_recovered_classes() {
     let Some(path) = compile_cpp_fixture("cpp-cli-json") else {
         return;
     };
-    let output = support::run_cli(["cpp", path.to_str().unwrap(), "--json"]);
+    let output = support::run_cli(["extract", "rtti", path.to_str().unwrap(), "--json"]);
     assert!(output.status.success(), "cpp CLI failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"classes\""));
@@ -81,7 +81,7 @@ fn cpp_cli_headers_emit_class_declaration() {
     let Some(path) = compile_cpp_fixture("cpp-cli-headers") else {
         return;
     };
-    let output = support::run_cli(["cpp", path.to_str().unwrap(), "--headers"]);
+    let output = support::run_cli(["extract", "rtti", path.to_str().unwrap(), "--headers"]);
     assert!(output.status.success(), "cpp CLI failed");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("class Demo"));

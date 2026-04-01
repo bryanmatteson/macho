@@ -11,8 +11,8 @@ pub use macho_core::format;
 pub use macho_core::model;
 pub use macho_core::{Error, Result, parse};
 pub use macho_extract as extract;
-pub use macho_mutate as mutate;
 pub use macho_metadata::metadata;
+pub use macho_mutate as mutate;
 
 pub mod resolve {
     pub use macho_core::resolve::{ResolutionContext, ResolvedTarget};

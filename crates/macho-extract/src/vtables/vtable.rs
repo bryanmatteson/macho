@@ -250,7 +250,8 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
                 }
             }
 
-            if let Ok(rebases) = macho_metadata::metadata::dyld::rebase::parse_rebase_entries(macho) {
+            if let Ok(rebases) = macho_metadata::metadata::dyld::rebase::parse_rebase_entries(macho)
+            {
                 for entry in &rebases {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset.0 + entry.segment_offset;

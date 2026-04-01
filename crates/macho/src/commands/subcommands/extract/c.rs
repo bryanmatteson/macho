@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 use crate::commands::subcommands::common::for_each_selected_mach;
-use crate::extract::c::{
-    CAnalysisOptions, analyze_headers, render_header, validate_header_syntax,
-};
+use crate::extract::c::{CAnalysisOptions, analyze_headers, render_header, validate_header_syntax};
 
 #[derive(clap::Args)]
 pub struct CArgs {

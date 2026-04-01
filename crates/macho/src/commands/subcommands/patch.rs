@@ -6,6 +6,7 @@ use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::SignatureOutcome;
 use crate::mutate::transaction::{PatchTransaction, PreparedPatch};
 use anyhow::{Context, Result};
+use clap::ArgAction;
 use std::fs::Permissions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -33,71 +34,27 @@ macro_rules! eprintln {
 
 #[derive(clap::Args)]
 pub struct PatchArgs {
-    #[command(subcommand)]
-    action: PatchAction,
-}
-
-#[derive(clap::Subcommand)]
-enum PatchAction {
-    /// Add an LC_RPATH to the binary
-    AddRpath {
-        path: PathBuf,
-        /// The rpath value to add
-        rpath: String,
-        #[command(flatten)]
-        target: TargetOpts,
-        #[command(flatten)]
-        output: OutputOpts,
-    },
-    /// Remove an LC_RPATH from the binary
-    RemoveRpath {
-        path: PathBuf,
-        /// The rpath value to remove
-        rpath: String,
-        #[command(flatten)]
-        target: TargetOpts,
-        #[command(flatten)]
-        output: OutputOpts,
-    },
-    /// Add an LC_LOAD_DYLIB to the binary
-    AddDylib {
-        path: PathBuf,
-        /// The dylib install name
-        dylib: String,
-        #[command(flatten)]
-        target: TargetOpts,
-        #[command(flatten)]
-        output: OutputOpts,
-    },
-    /// Remove LC_CODE_SIGNATURE from the binary
-    StripSignature {
-        path: PathBuf,
-        #[command(flatten)]
-        target: TargetOpts,
-        #[command(flatten)]
-        output: OutputOpts,
-    },
-    /// Overwrite raw bytes at a file offset
-    PatchBytes {
-        path: PathBuf,
-        /// File offset to patch (for fat binaries, use --arch and provide a slice-relative offset)
-        #[arg(long)]
-        offset: String,
-        /// Hex-encoded bytes to write (e.g., "90909090" for NOP sled)
-        #[arg(long)]
-        hex: String,
-        #[command(flatten)]
-        target: TargetOpts,
-        #[command(flatten)]
-        output: OutputOpts,
-    },
-}
-
-#[derive(clap::Args)]
-struct TargetOpts {
+    path: PathBuf,
     /// Filter to a specific architecture (e.g., arm64, x86_64, arm64e)
     #[arg(long)]
     arch: Option<String>,
+    /// Add an LC_RPATH to the binary
+    #[arg(long = "add-rpath", action = ArgAction::Append)]
+    add_rpath: Vec<String>,
+    /// Remove an LC_RPATH from the binary
+    #[arg(long = "remove-rpath", action = ArgAction::Append)]
+    remove_rpath: Vec<String>,
+    /// Add an LC_LOAD_DYLIB to the binary
+    #[arg(long = "add-dylib", action = ArgAction::Append)]
+    add_dylib: Vec<String>,
+    /// Remove LC_CODE_SIGNATURE from the binary
+    #[arg(long = "strip-signature")]
+    strip_signature: bool,
+    /// Overwrite raw bytes at a file offset using OFFSET:HEX
+    #[arg(long = "bytes", action = ArgAction::Append)]
+    patch_bytes: Vec<String>,
+    #[command(flatten)]
+    output: OutputOpts,
 }
 
 #[derive(clap::Args)]
@@ -120,73 +77,32 @@ struct OutputOpts {
 }
 
 pub fn run(args: PatchArgs) -> Result<()> {
-    match args.action {
-        PatchAction::AddRpath {
-            path,
-            rpath,
-            target,
-            output,
-        } => run_patch(
-            &path,
-            target.arch.as_deref(),
-            &output,
-            vec![PatchOp::AddRpath(rpath)],
-        ),
-        PatchAction::RemoveRpath {
-            path,
-            rpath,
-            target,
-            output,
-        } => run_patch(
-            &path,
-            target.arch.as_deref(),
-            &output,
-            vec![PatchOp::RemoveRpath(rpath)],
-        ),
-        PatchAction::AddDylib {
-            path,
-            dylib,
-            target,
-            output,
-        } => {
-            run_patch(
-                &path,
-                target.arch.as_deref(),
-                &output,
-                vec![PatchOp::AddDylib {
-                    name: dylib,
-                    compat_version: 0x10000, // 1.0.0
-                    current_version: 0x10000,
-                }],
-            )
-        }
-        PatchAction::StripSignature {
-            path,
-            target,
-            output,
-        } => run_patch(
-            &path,
-            target.arch.as_deref(),
-            &output,
-            vec![PatchOp::RemoveCodeSignature],
-        ),
-        PatchAction::PatchBytes {
-            path,
-            offset,
-            hex,
-            target,
-            output,
-        } => {
-            let offset = parse_offset(&offset)?;
-            let bytes = parse_hex_bytes(&hex)?;
-            run_patch(
-                &path,
-                target.arch.as_deref(),
-                &output,
-                vec![PatchOp::PatchBytes { offset, bytes }],
-            )
-        }
+    let mut ops = Vec::new();
+    for rpath in args.add_rpath {
+        ops.push(PatchOp::AddRpath(rpath));
     }
+    for rpath in args.remove_rpath {
+        ops.push(PatchOp::RemoveRpath(rpath));
+    }
+    for dylib in args.add_dylib {
+        ops.push(PatchOp::AddDylib {
+            name: dylib,
+            compat_version: 0x10000,
+            current_version: 0x10000,
+        });
+    }
+    if args.strip_signature {
+        ops.push(PatchOp::RemoveCodeSignature);
+    }
+    for spec in args.patch_bytes {
+        let (offset, bytes) = parse_patch_bytes_spec(&spec)?;
+        ops.push(PatchOp::PatchBytes { offset, bytes });
+    }
+    if ops.is_empty() {
+        anyhow::bail!("no patch operations specified");
+    }
+
+    run_patch(&args.path, args.arch.as_deref(), &args.output, ops)
 }
 
 fn run_patch(
@@ -355,6 +271,13 @@ fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>> {
                 .with_context(|| format!("invalid hex byte at position {i}: {:?}", &hex[i..i + 2]))
         })
         .collect()
+}
+
+fn parse_patch_bytes_spec(spec: &str) -> Result<(u64, Vec<u8>)> {
+    let Some((offset, hex)) = spec.split_once(':') else {
+        anyhow::bail!("invalid patch-bytes spec '{spec}', expected OFFSET:HEX");
+    };
+    Ok((parse_offset(offset)?, parse_hex_bytes(hex)?))
 }
 
 fn atomic_write(path: &Path, bytes: &[u8], permissions: Permissions) -> Result<()> {

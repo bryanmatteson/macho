@@ -1,5 +1,5 @@
-use crate::analysis::container::parity::ParityDomain;
 use crate::analysis::container::ext::MachoContainerExt;
+use crate::analysis::container::parity::ParityDomain;
 use crate::analysis::container::{ContainerReport, resolve};
 use anyhow::{Context, Result};
 use std::path::PathBuf;

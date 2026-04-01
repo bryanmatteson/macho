@@ -1,10 +1,10 @@
 use crate::analysis::strings::StringRegions;
 use crate::analysis::xref::ranges::{CodeEntity, SymbolRangeIndex};
 use crate::analysis::xref::refs::{XrefIndex, XrefKind, XrefTarget};
-use crate::model::addr::Va;
-use crate::model::macho_file::MachoFile;
 use crate::extract::vtables::SlotTarget;
 use crate::extract::vtables::VtableIndex;
+use crate::model::addr::Va;
+use crate::model::macho_file::MachoFile;
 use crate::symbols::demangle::demangle_symbol;
 use anyhow::{Context, Result};
 use std::path::PathBuf;

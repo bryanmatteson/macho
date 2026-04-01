@@ -8,6 +8,15 @@ use std::path::PathBuf;
 
 use crate::commands::subcommands::common::arch_name_for_mach;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InspectScope {
+    Full,
+    Header,
+    LoadCommands,
+    Segments,
+    Sections,
+}
+
 #[derive(clap::Args)]
 pub struct InspectArgs {
     /// Path to Mach-O binary
@@ -23,6 +32,10 @@ pub struct InspectArgs {
 }
 
 pub fn run(args: InspectArgs) -> Result<()> {
+    run_scoped(args, InspectScope::Full)
+}
+
+pub fn run_scoped(args: InspectArgs, scope: InspectScope) -> Result<()> {
     let file = std::fs::File::open(&args.path)
         .with_context(|| format!("failed to open {}", args.path.display()))?;
     let mmap = unsafe { memmap2::Mmap::map(&file)? };
@@ -38,18 +51,22 @@ pub fn run(args: InspectArgs) -> Result<()> {
                     bail!("no architecture matching '{filter}' found (available: {arch_name})");
                 }
             }
-            println!("Thin Mach-O binary ({} bytes)", mmap.len());
-            println!();
-            print_mach(macho, args.validate);
+            if scope == InspectScope::Full {
+                println!("Thin Mach-O binary ({} bytes)", mmap.len());
+                println!();
+            }
+            print_mach(macho, args.validate, scope);
         }
         MachoContainer::Fat(fat) => {
-            println!(
-                "Fat binary ({} architecture{}, {} bytes)",
-                fat.arches().len(),
-                if fat.arches().len() == 1 { "" } else { "s" },
-                mmap.len(),
-            );
-            println!();
+            if scope == InspectScope::Full {
+                println!(
+                    "Fat binary ({} architecture{}, {} bytes)",
+                    fat.arches().len(),
+                    if fat.arches().len() == 1 { "" } else { "s" },
+                    mmap.len(),
+                );
+                println!();
+            }
 
             let mut matched = false;
             for (i, arch) in fat.arches().iter().enumerate() {
@@ -62,12 +79,16 @@ pub fn run(args: InspectArgs) -> Result<()> {
                 }
 
                 matched = true;
-                println!(
-                    "=== Architecture {i}: {} (offset={:#x}, size={:#x}, align=2^{}) ===",
-                    arch_name, arch.fat_offset.0, arch.size, arch.align
-                );
-                println!();
-                print_mach(&arch.macho, args.validate);
+                if scope == InspectScope::Full {
+                    println!(
+                        "=== Architecture {i}: {} (offset={:#x}, size={:#x}, align=2^{}) ===",
+                        arch_name, arch.fat_offset.0, arch.size, arch.align
+                    );
+                    println!();
+                } else {
+                    println!("=== {arch_name} ===");
+                }
+                print_mach(&arch.macho, args.validate, scope);
                 println!();
             }
 
@@ -87,7 +108,42 @@ pub fn run(args: InspectArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
+impl InspectArgs {
+    pub(crate) fn new(path: PathBuf, arch: Option<String>, validate: bool) -> Self {
+        Self {
+            path,
+            arch,
+            validate,
+        }
+    }
+}
+
+fn print_mach(macho: &MachoFile<'_>, do_validate: bool, scope: InspectScope) {
+    match scope {
+        InspectScope::Full => {
+            print_header(macho);
+            println!();
+            print_segments(macho, true);
+            println!();
+            print_load_commands(macho);
+            print_summary(macho);
+            if do_validate {
+                print_validation(macho);
+            }
+        }
+        InspectScope::Header => {
+            print_header(macho);
+            if do_validate {
+                print_validation(macho);
+            }
+        }
+        InspectScope::LoadCommands => print_load_commands(macho),
+        InspectScope::Segments => print_segments(macho, false),
+        InspectScope::Sections => print_sections(macho),
+    }
+}
+
+fn print_header(macho: &MachoFile<'_>) {
     let h = macho.header();
 
     println!("Header:");
@@ -106,8 +162,9 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
     if let Some(uuid) = macho.uuid() {
         println!("  UUID:      {}", format_uuid(uuid));
     }
+}
 
-    println!();
+fn print_segments(macho: &MachoFile<'_>, include_sections: bool) {
     println!("Segments:");
     for seg in macho.segments() {
         let flags_str = if seg.flags.is_empty() {
@@ -127,10 +184,32 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
             flags_str,
         );
 
+        if include_sections {
+            for sect in &seg.sections {
+                let extras = format_section_extras(sect);
+                println!(
+                    "    {:<20} {:#018x} ({:#x})  off={:#010x}  align=2^{}  {}{}",
+                    sect.section_name,
+                    sect.addr.0,
+                    sect.size,
+                    sect.offset.0,
+                    sect.align,
+                    sect.section_type.name(),
+                    extras,
+                );
+            }
+        }
+    }
+}
+
+fn print_sections(macho: &MachoFile<'_>) {
+    println!("Sections:");
+    for seg in macho.segments() {
         for sect in &seg.sections {
             let extras = format_section_extras(sect);
             println!(
-                "    {:<20} {:#018x} ({:#x})  off={:#010x}  align=2^{}  {}{}",
+                "  {},{}  {:#018x} ({:#x})  off={:#010x}  align=2^{}  {}{}",
+                seg.name,
                 sect.section_name,
                 sect.addr.0,
                 sect.size,
@@ -141,8 +220,9 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
             );
         }
     }
+}
 
-    println!();
+fn print_load_commands(macho: &MachoFile<'_>) {
     println!("Load Commands:");
     for (i, lc) in macho.load_commands().iter().enumerate() {
         let summary = lc.kind.summary();
@@ -165,8 +245,9 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
             );
         }
     }
+}
 
-    // Summary: symbol table and relocations
+fn print_summary(macho: &MachoFile<'_>) {
     if let Some(st) = macho
         .find_load_command(|lc| lc.as_symtab().is_some())
         .and_then(|lc| lc.kind.as_symtab())
@@ -184,7 +265,6 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
         println!("Relocations: {reloc_total} entries across {reloc_sections} sections");
     }
 
-    // Dyld summary
     if let Ok(fixups) = crate::metadata::dyld::parse_chained_fixups(macho) {
         println!(
             "Chained Fixups: {} imports, {} fixups",
@@ -197,22 +277,22 @@ fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
             println!("Exports Trie: {} exports", exports.len());
         }
     }
+}
 
-    if do_validate {
-        let diags = validate::validate(macho);
-        if diags.is_empty() {
-            println!();
-            println!("Validation: OK (no issues)");
-        } else {
-            println!();
-            println!(
-                "Validation ({} issue{}):",
-                diags.len(),
-                if diags.len() == 1 { "" } else { "s" }
-            );
-            for d in &diags {
-                println!("  [{:?}] {} - {}", d.severity, d.code.0, d.message);
-            }
+fn print_validation(macho: &MachoFile<'_>) {
+    let diags = validate::validate(macho);
+    if diags.is_empty() {
+        println!();
+        println!("Validation: OK (no issues)");
+    } else {
+        println!();
+        println!(
+            "Validation ({} issue{}):",
+            diags.len(),
+            if diags.len() == 1 { "" } else { "s" }
+        );
+        for d in &diags {
+            println!("  [{:?}] {} - {}", d.severity, d.code.0, d.message);
         }
     }
 }

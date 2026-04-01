@@ -1,5 +1,5 @@
-use crate::analysis::container::ext::MachoContainerExt;
 use crate::analysis::container::ContainerReport;
+use crate::analysis::container::ext::MachoContainerExt;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

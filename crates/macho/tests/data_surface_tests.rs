@@ -1,7 +1,7 @@
 use macho::analysis::strings::{StringRegionKind, StringRegions};
+use macho::extract::vtables::VtableIndex;
 use macho::model::container::MachoContainer;
 use macho::model::macho_file::MachoFile;
-use macho::extract::vtables::VtableIndex;
 
 fn first_mach(data: &[u8]) -> MachoContainer<'_> {
     macho::parse(data).expect("parse")

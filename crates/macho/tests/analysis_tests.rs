@@ -1,5 +1,5 @@
-use macho::analysis::snapshot::{ContainerFormat, ContainerSnapshot};
 use macho::analysis::container::ext::MachoContainerExt;
+use macho::analysis::snapshot::{ContainerFormat, ContainerSnapshot};
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
     let data = std::fs::read(path).expect("read binary");
