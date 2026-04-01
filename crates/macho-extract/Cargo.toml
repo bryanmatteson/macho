@@ -10,6 +10,7 @@ description = "Mach-O extraction and recovery helpers"
 
 [dependencies]
 macho-core.workspace = true
+macho-metadata.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 cpp_demangle.workspace = true

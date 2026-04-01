@@ -197,8 +197,9 @@ dependencies = [
  "clap",
  "macho-analysis",
  "macho-core",
- "macho-edit",
  "macho-extract",
+ "macho-metadata",
+ "macho-mutate",
  "memmap2",
  "serde",
  "serde_json",
@@ -209,6 +210,7 @@ name = "macho-analysis"
 version = "0.1.0"
 dependencies = [
  "macho-core",
+ "macho-metadata",
  "serde",
 ]
 
@@ -232,24 +234,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "macho-edit"
-version = "0.1.0"
-dependencies = [
- "macho-analysis",
- "macho-core",
- "serde",
- "zerocopy",
-]
-
-[[package]]
 name = "macho-extract"
 version = "0.1.0"
 dependencies = [
  "cpp_demangle",
  "gimli",
  "macho-core",
+ "macho-metadata",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "macho-metadata"
+version = "0.1.0"
+dependencies = [
+ "cpp_demangle",
+ "macho-core",
+ "rustc-demangle",
+ "serde",
+]
+
+[[package]]
+name = "macho-mutate"
+version = "0.1.0"
+dependencies = [
+ "macho-analysis",
+ "macho-core",
+ "macho-metadata",
+ "serde",
+ "zerocopy",
 ]
 
 [[package]]

@@ -1,15 +1,16 @@
 [package]
-    name                   = "macho-edit"
+    name                   = "macho-mutate"
     version.workspace      = true
     edition.workspace      = true
     rust-version.workspace = true
     license.workspace      = true
     homepage.workspace     = true
     repository.workspace   = true
-    description            = "Mach-O editing and patching"
+    description            = "Mach-O mutation and patching"
 
 [dependencies]
     macho-core.workspace     = true
+    macho-metadata.workspace = true
     macho-analysis.workspace = true
     serde.workspace          = true
     zerocopy.workspace       = true

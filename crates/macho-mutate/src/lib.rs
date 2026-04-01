@@ -1,3 +1,8 @@
+pub use macho_analysis as analysis;
+pub use macho_core::{Error, Result};
+pub use macho_core::{format, model};
+pub use macho_metadata::metadata;
+
 pub mod layout;
 pub mod owned;
 pub mod patch;
@@ -14,7 +19,6 @@ pub use patch::{
 use crate::model::load_command::*;
 use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
-use crate::{Error, Result};
 
 /// A structural editor for Mach-O binaries.
 ///
@@ -118,7 +122,6 @@ impl<'data> MachoEditor<'data> {
         let endian = self.original.endian();
         let bitness = self.original.bitness();
 
-        // Encode all commands
         let encoded: Vec<(LoadCommand, Vec<u8>)> = self
             .commands
             .iter()
@@ -138,14 +141,12 @@ pub trait LoadCommandEditExt {
 }
 
 impl LoadCommandEditExt for macho_core::model::load_command::LoadCommand {
-    /// Create a new LC_RPATH command.
     fn new_rpath(path: &str) -> Self {
         Self::Rpath(StringData {
             value: path.to_string(),
         })
     }
 
-    /// Create a new LC_LOAD_DYLIB command.
     fn new_load_dylib(name: &str, current_version: u32, compat_version: u32) -> Self {
         Self::LoadDylib(DylibData {
             name: name.to_string(),
@@ -154,4 +155,19 @@ impl LoadCommandEditExt for macho_core::model::load_command::LoadCommand {
             compatibility_version: PackedVersion(compat_version),
         })
     }
+}
+
+pub mod mutate {
+    pub use crate::layout;
+    pub use crate::owned;
+    pub use crate::patch;
+    pub use crate::preview;
+    pub use crate::resign;
+    pub use crate::transaction;
+    pub use crate::{
+        FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding,
+        LoadCommandEditExt, MachoEditor, MachoPatcher, PatchArch, PatchOp, PatchSectionInfo,
+        PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable, TrampolinePlan, nop_bytes_for_arch,
+        vtable_mangled_prefix,
+    };
 }

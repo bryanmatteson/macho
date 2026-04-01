@@ -8,7 +8,7 @@ use crate::metadata::dyld::types::FixupKind;
 use crate::model::addr::Va;
 use crate::model::macho_file::MachoFile;
 
-use super::pointers::{ResolutionContext, ResolvedTarget};
+use super::{ResolutionContext, ResolvedTarget};
 
 pub fn collect_resolved_targets(macho: &MachoFile<'_>) -> BTreeMap<u64, ResolvedTarget> {
     let mut fixups = BTreeMap::new();

@@ -4,11 +4,11 @@ use crate::Result;
 use crate::core::model::addr::Va;
 use crate::core::model::macho_file::MachoFile;
 use crate::core::model::symbol::SymbolTable;
-use crate::core::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
 use crate::core::resolve::{ResolutionContext, ResolvedTarget};
 use crate::cpp::types::{
     CppBaseClass, CppConfidence, CppEvidence, CppEvidenceKind, CppTypeInfoKind, CppTypeInfoNode,
 };
+use macho_metadata::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
 
 pub fn build_typeinfo_index(macho: &MachoFile<'_>) -> Result<BTreeMap<String, CppTypeInfoNode>> {
     let symtab = macho.ext::<SymbolTable<'_>>()?;
