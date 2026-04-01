@@ -1,7 +1,7 @@
 use gimli::{DwarfSections, SectionId};
 
-use crate::error::{Error, Result};
-use crate::model::macho_file::MachoFile;
+use crate::core::MachoFile;
+use crate::{Error, Result};
 
 pub fn has_dwarf_sections(macho: &MachoFile<'_>) -> bool {
     macho

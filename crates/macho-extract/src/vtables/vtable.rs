@@ -1,9 +1,9 @@
 use serde::Serialize;
 
-use crate::model::addr::Va;
-use crate::model::macho_file::MachoFile;
-use crate::model::symbol::SymbolTable;
-use crate::symbols::demangle::demangle_symbol;
+use crate::core::model::addr::Va;
+use crate::core::model::macho_file::MachoFile;
+use crate::core::model::symbol::SymbolTable;
+use crate::core::symbols::demangle::demangle_symbol;
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Serialize)]
@@ -202,8 +202,8 @@ enum VtableFixup {
 /// Build a map from file_offset -> resolved fixup, using chained fixups
 /// if available, otherwise legacy bind/rebase opcodes.
 fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u64, VtableFixup> {
-    use crate::metadata::dyld::chained::parse_chained_fixups;
-    use crate::metadata::dyld::types::FixupKind;
+    use crate::core::metadata::dyld::chained::parse_chained_fixups;
+    use crate::core::metadata::dyld::types::FixupKind;
 
     let mut map = std::collections::HashMap::new();
 
@@ -235,7 +235,7 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
         Err(_) => {
             // Try legacy bind/rebase opcodes
             if let Ok((regular, weak, lazy)) =
-                crate::metadata::dyld::bind::parse_bind_entries(macho)
+                crate::core::metadata::dyld::bind::parse_bind_entries(macho)
             {
                 for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
@@ -250,7 +250,7 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
                 }
             }
 
-            if let Ok(rebases) = crate::metadata::dyld::rebase::parse_rebase_entries(macho) {
+            if let Ok(rebases) = crate::core::metadata::dyld::rebase::parse_rebase_entries(macho) {
                 for entry in &rebases {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset.0 + entry.segment_offset;
@@ -271,7 +271,7 @@ fn resolve_slot_value(
     image_base: u64,
     fixup_map: &std::collections::HashMap<u64, VtableFixup>,
     macho: &MachoFile<'_>,
-    endian: crate::format::io::endian::Endian,
+    endian: crate::core::format::io::endian::Endian,
 ) -> ResolvedSlotValue {
     if let Some(fixup) = fixup_map.get(&file_offset) {
         match fixup {
@@ -281,10 +281,12 @@ fn resolve_slot_value(
             VtableFixup::Rebase(_) => {
                 // Legacy rebase sentinel -- read the raw pointer directly
                 // (the linker wrote the correct un-slid VA)
-                let raw =
-                    crate::format::io::pod::read_pod::<u64>(macho.bytes(), file_offset as usize)
-                        .map(|v| endian.interpret_u64(v))
-                        .unwrap_or(raw_value);
+                let raw = crate::core::format::io::pod::read_pod::<u64>(
+                    macho.bytes(),
+                    file_offset as usize,
+                )
+                .map(|v| endian.interpret_u64(v))
+                .unwrap_or(raw_value);
                 ResolvedSlotValue::Address(raw)
             }
             VtableFixup::Bind { import_name } => ResolvedSlotValue::Import {

@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
 use crate::Result;
-use crate::model::addr::Va;
-use crate::model::macho_file::MachoFile;
-use crate::model::symbol::SymbolTable;
-use crate::extract::cpp::types::{
+use crate::core::model::addr::Va;
+use crate::core::model::macho_file::MachoFile;
+use crate::core::model::symbol::SymbolTable;
+use crate::core::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
+use crate::core::resolve::{ResolutionContext, ResolvedTarget};
+use crate::cpp::types::{
     CppBaseClass, CppConfidence, CppEvidence, CppEvidenceKind, CppTypeInfoKind, CppTypeInfoNode,
 };
-use crate::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
-use crate::resolve::{ResolutionContext, ResolvedTarget};
 
 pub fn build_typeinfo_index(macho: &MachoFile<'_>) -> Result<BTreeMap<String, CppTypeInfoNode>> {
     let symtab = macho.ext::<SymbolTable<'_>>()?;
@@ -73,7 +73,7 @@ fn is_typeinfo_symbol(name: &str) -> bool {
 }
 
 fn typeinfo_class_name(name: &str) -> String {
-    crate::symbols::demangle::demangle_symbol(name)
+    crate::core::symbols::demangle::demangle_symbol(name)
         .and_then(|text| text.strip_prefix("typeinfo for ").map(str::to_string))
         .unwrap_or_else(|| name.to_string())
 }

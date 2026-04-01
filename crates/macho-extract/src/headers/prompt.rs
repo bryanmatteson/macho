@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::extract::headers::schema::{EvidenceBundle, HeaderLanguage, validate_bundle};
+use crate::headers::schema::{EvidenceBundle, HeaderLanguage, validate_bundle};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptSet {
@@ -21,7 +21,7 @@ pub fn build_prompt(bundle: &EvidenceBundle) -> crate::Result<PromptSet> {
 pub fn build_repair_prompt(
     bundle: &EvidenceBundle,
     previous_output_json: &str,
-    issues: &[crate::extract::headers::validate::ValidationIssue],
+    issues: &[crate::headers::validate::ValidationIssue],
 ) -> crate::Result<PromptSet> {
     validate_bundle_or_err(bundle)?;
     let issues_json = serde_json::to_string_pretty(issues)

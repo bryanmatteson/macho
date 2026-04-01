@@ -1,6 +1,7 @@
-use crate::model::macho_file::MachoFile;
-use crate::model::symbol::{Symbol, SymbolTable};
-use crate::extract::cpp::types::{
+use crate::core::model::addr::Va;
+use crate::core::model::macho_file::MachoFile;
+use crate::core::model::symbol::{Symbol, SymbolTable};
+use crate::cpp::types::{
     CppBodyAnalysis, CppBodyKind, CppConfidence, CppEvidence, CppEvidenceKind, CppReturnChannel,
 };
 
@@ -50,9 +51,7 @@ fn symbol_bytes<'a>(
         .min()
         .unwrap_or(symbol.value + max_len as u64);
     let len = (next_va - symbol.value).min(max_len as u64) as usize;
-    macho
-        .read_bytes_at_va(crate::model::addr::Va(symbol.value), len.max(1))
-        .ok()
+    macho.read_bytes_at_va(Va(symbol.value), len.max(1)).ok()
 }
 
 fn classify_arm64(bytes: &[u8]) -> (CppBodyKind, CppReturnChannel, bool) {
@@ -89,7 +88,7 @@ fn classify_x86_64(bytes: &[u8]) -> (CppBodyKind, CppReturnChannel, bool) {
 #[cfg(test)]
 mod tests {
     use super::{classify_arm64, classify_x86_64};
-    use crate::extract::cpp::types::{CppBodyKind, CppReturnChannel};
+    use crate::cpp::types::{CppBodyKind, CppReturnChannel};
 
     #[test]
     fn classifies_x86_jmp_thunk() {

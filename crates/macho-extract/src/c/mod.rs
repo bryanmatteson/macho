@@ -9,12 +9,10 @@ use gimli::{
 };
 use serde::Serialize;
 
-use crate::error::{Error, Result};
-use crate::extract::dwarf::load_dwarf;
-use crate::format::io::endian::Endian;
-use crate::model::macho_file::MachoFile;
-use crate::model::section::Section;
-use crate::model::symbol::{Symbol, SymbolTable};
+use crate::core::format::io::endian::Endian;
+use crate::core::{MachoFile, Section, Symbol, SymbolTable};
+use crate::dwarf::load_dwarf;
+use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Ord, PartialOrd)]
 #[serde(rename_all = "snake_case")]

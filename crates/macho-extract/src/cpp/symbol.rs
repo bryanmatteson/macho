@@ -1,11 +1,11 @@
 use cpp_demangle::DemangleOptions;
 
-use crate::extract::cpp::types::{
+use crate::core::symbols::demangle::{demangle_cpp_symbol_with_options, demangle_symbol};
+use crate::cpp::types::{
     CppConfidence, CppEvidence, CppEvidenceKind, CppFunctionDecl, CppFunctionSignature,
     CppParameter, CppRefQualifier, CppSpecialSymbol, CppSymbolKind, CppSymbolRecord, CppThunkKind,
     CppType, QualifiedName,
 };
-use crate::symbols::demangle::{demangle_cpp_symbol_with_options, demangle_symbol};
 
 pub fn parse_symbol(mangled_name: &str, address: Option<u64>) -> Option<CppSymbolRecord> {
     let demangled_name = demangle_symbol(mangled_name)?;
@@ -386,7 +386,7 @@ fn is_identifierish(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{parse_symbol, parse_type};
-    use crate::extract::cpp::types::{CppSymbolKind, CppType};
+    use crate::cpp::types::{CppSymbolKind, CppType};
 
     #[test]
     fn parses_simple_function_symbol() {

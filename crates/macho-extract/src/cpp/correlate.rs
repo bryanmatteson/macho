@@ -1,6 +1,4 @@
-use crate::extract::cpp::types::{
-    CppConfidence, CppFunctionDecl, CppHeaderMatch, CppType, QualifiedName,
-};
+use crate::cpp::types::{CppConfidence, CppFunctionDecl, CppHeaderMatch, CppType, QualifiedName};
 
 pub trait ExternalHeaderIndex {
     fn match_function(

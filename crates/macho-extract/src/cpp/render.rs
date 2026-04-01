@@ -1,4 +1,4 @@
-use crate::extract::cpp::types::{
+use crate::cpp::types::{
     CppClass, CppFunctionDecl, CppHeaderUnit, CppRefQualifier, CppUnifiedIndex, QualifiedName,
 };
 use std::collections::BTreeMap;
@@ -276,7 +276,7 @@ fn is_namespace_owner(parent: &QualifiedName, function: &CppFunctionDecl) -> boo
 #[cfg(test)]
 mod tests {
     use super::{default_header_unit, render_header};
-    use crate::extract::cpp::types::{CppImageInfo, CppUnifiedIndex};
+    use crate::cpp::types::{CppImageInfo, CppUnifiedIndex};
     use std::collections::BTreeMap;
 
     #[test]

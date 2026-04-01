@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::extract::headers::schema::EvidenceBundle;
+use crate::headers::schema::EvidenceBundle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -44,7 +44,7 @@ pub trait ModelOutputValidator {
     fn validate(
         &self,
         bundle: &EvidenceBundle,
-        output: &crate::extract::headers::ModelOutput,
+        output: &crate::headers::ModelOutput,
         header_text: &str,
     ) -> crate::Result<Vec<ValidationIssue>>;
 }
@@ -56,7 +56,7 @@ impl ModelOutputValidator for OutputContractValidator {
     fn validate(
         &self,
         _bundle: &EvidenceBundle,
-        output: &crate::extract::headers::ModelOutput,
+        output: &crate::headers::ModelOutput,
         _header_text: &str,
     ) -> crate::Result<Vec<ValidationIssue>> {
         let mut issues = Vec::new();
@@ -122,7 +122,7 @@ impl ModelOutputValidator for EntityCoverageValidator {
     fn validate(
         &self,
         bundle: &EvidenceBundle,
-        output: &crate::extract::headers::ModelOutput,
+        output: &crate::headers::ModelOutput,
         _header_text: &str,
     ) -> crate::Result<Vec<ValidationIssue>> {
         let known_entities: BTreeSet<&str> = bundle
@@ -222,7 +222,7 @@ impl ModelOutputValidator for ClangSyntaxValidator {
     fn validate(
         &self,
         bundle: &EvidenceBundle,
-        _output: &crate::extract::headers::ModelOutput,
+        _output: &crate::headers::ModelOutput,
         header_text: &str,
     ) -> crate::Result<Vec<ValidationIssue>> {
         let header_path = temp_path("header-infer", "h");
@@ -260,10 +260,10 @@ impl ModelOutputValidator for ClangSyntaxValidator {
 
 pub fn validate_output(
     bundle: &EvidenceBundle,
-    output: &crate::extract::headers::ModelOutput,
+    output: &crate::headers::ModelOutput,
     validators: &[&dyn ModelOutputValidator],
 ) -> crate::Result<ValidationReport> {
-    let header_text = crate::extract::headers::render_header(output);
+    let header_text = crate::headers::render_header(output);
     let mut issues = Vec::new();
     let mut seen_issues = BTreeSet::new();
     let mut syntax_checked = false;

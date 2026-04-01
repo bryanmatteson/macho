@@ -2,4 +2,4 @@
     rust = "latest"
 
 [tasks]
-    link = "cargo install --path ."
+    link = "cargo install --path crates/macho-cli"

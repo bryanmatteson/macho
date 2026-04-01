@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::extract::cpp::mark_virtual_methods;
-use crate::extract::cpp::types::{
+use crate::cpp::mark_virtual_methods;
+use crate::cpp::types::{
     CppClass, CppConfidence, CppFunctionDecl, CppHeaderMatch, CppImageIndex, CppUnifiedIndex,
 };
 

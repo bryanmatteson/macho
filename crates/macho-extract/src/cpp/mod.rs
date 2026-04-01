@@ -8,12 +8,11 @@ pub mod unify;
 
 use std::collections::BTreeMap;
 
-use crate::model::macho_file::MachoFile;
-use crate::model::symbol::SymbolTable;
-use crate::extract::cpp::abi::analyze_symbol_body;
-use crate::extract::cpp::rtti::build_typeinfo_index;
-use crate::extract::cpp::symbol::parse_symbol;
-use crate::extract::vtables::{SlotTarget, VtableIndex};
+use crate::core::{MachoFile, SymbolTable};
+use crate::cpp::abi::analyze_symbol_body;
+use crate::cpp::rtti::build_typeinfo_index;
+use crate::cpp::symbol::parse_symbol;
+use crate::vtables::{SlotTarget, VtableIndex};
 use crate::{Error, Result};
 
 pub use correlate::{ExternalHeaderIndex, HeaderCandidate, correlate_functions};
@@ -114,11 +113,9 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
     Ok(types::CppImageIndex {
         image: types::CppImageInfo {
             arch: macho.header().cpu_type.name().to_string(),
-            uuid: macho.uuid().map(crate::model::load_command::format_uuid),
+            uuid: macho.uuid().map(crate::core::format_uuid),
             install_name: macho.load_commands().iter().find_map(|lc| match &lc.kind {
-                crate::model::load_command::LoadCommand::IdDylib(data) => {
-                    Some(data.name.to_string())
-                }
+                crate::core::LoadCommand::IdDylib(data) => Some(data.name.to_string()),
                 _ => None,
             }),
         },
@@ -142,7 +139,7 @@ fn seed_class(name: &str, typeinfo: Option<&types::CppTypeInfoNode>) -> types::C
     }
 }
 
-fn convert_vtable(vtable: &crate::extract::vtables::VtableEntry) -> types::CppVtableGroup {
+fn convert_vtable(vtable: &crate::vtables::VtableEntry) -> types::CppVtableGroup {
     types::CppVtableGroup {
         name: vtable
             .name
