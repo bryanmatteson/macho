@@ -90,7 +90,7 @@ Work:
 
 - cache symbols, exports, imports, ObjC metadata, codesign, and later
   `ObjCGraph`
-- expose address-map and raw-mach escape hatches
+- expose address-map and raw-macho escape hatches
 - add path-resolution helpers on top of `ImageInfo`
 
 Acceptance:

@@ -1,7 +1,7 @@
 use crate::format::constants::VmProtection;
-use crate::model::container::MachContainer;
+use crate::model::container::MachoContainer;
 use crate::model::load_command::format_uuid;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::validate;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
@@ -31,18 +31,18 @@ pub fn run(args: InspectArgs) -> Result<()> {
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", args.path.display()))?;
 
     match &container {
-        MachContainer::Thin(mach) => {
+        MachoContainer::Thin(macho) => {
             if let Some(ref filter) = args.arch {
-                let arch_name = arch_name_for_mach(mach);
+                let arch_name = arch_name_for_mach(macho);
                 if !arch_name.eq_ignore_ascii_case(filter) {
                     bail!("no architecture matching '{filter}' found (available: {arch_name})");
                 }
             }
             println!("Thin Mach-O binary ({} bytes)", mmap.len());
             println!();
-            print_mach(mach, args.validate);
+            print_mach(macho, args.validate);
         }
-        MachContainer::Fat(fat) => {
+        MachoContainer::Fat(fat) => {
             println!(
                 "Fat binary ({} architecture{}, {} bytes)",
                 fat.arches().len(),
@@ -67,7 +67,7 @@ pub fn run(args: InspectArgs) -> Result<()> {
                     arch_name, arch.fat_offset.0, arch.size, arch.align
                 );
                 println!();
-                print_mach(&arch.mach, args.validate);
+                print_mach(&arch.macho, args.validate);
                 println!();
             }
 
@@ -87,8 +87,8 @@ pub fn run(args: InspectArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
-    let h = mach.header();
+fn print_mach(macho: &MachoFile<'_>, do_validate: bool) {
+    let h = macho.header();
 
     println!("Header:");
     println!(
@@ -97,19 +97,19 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
         h.cpu_subtype.name(h.cpu_type)
     );
     println!("  File type: {}", h.file_type.name());
-    println!("  Bitness:   {}", mach.bitness());
-    println!("  Endian:    {:?}", mach.endian());
+    println!("  Bitness:   {}", macho.bitness());
+    println!("  Endian:    {:?}", macho.endian());
     println!("  Commands:  {}", h.ncmds);
     println!("  Cmd size:  {:#x}", h.sizeofcmds);
     println!("  Flags:     {:?}", h.flags);
 
-    if let Some(uuid) = mach.uuid() {
+    if let Some(uuid) = macho.uuid() {
         println!("  UUID:      {}", format_uuid(uuid));
     }
 
     println!();
     println!("Segments:");
-    for seg in mach.segments() {
+    for seg in macho.segments() {
         let flags_str = if seg.flags.is_empty() {
             String::new()
         } else {
@@ -144,7 +144,7 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
 
     println!();
     println!("Load Commands:");
-    for (i, lc) in mach.load_commands().iter().enumerate() {
+    for (i, lc) in macho.load_commands().iter().enumerate() {
         let summary = lc.kind.summary();
         if summary.is_empty() {
             println!(
@@ -167,7 +167,7 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
     }
 
     // Summary: symbol table and relocations
-    if let Some(st) = mach
+    if let Some(st) = macho
         .find_load_command(|lc| lc.as_symtab().is_some())
         .and_then(|lc| lc.kind.as_symtab())
     {
@@ -178,28 +178,28 @@ fn print_mach(mach: &MachFile<'_>, do_validate: bool) {
         );
     }
 
-    let reloc_sections: usize = mach.all_sections().filter(|s| s.nreloc > 0).count();
-    let reloc_total: u32 = mach.all_sections().map(|s| s.nreloc).sum();
+    let reloc_sections: usize = macho.all_sections().filter(|s| s.nreloc > 0).count();
+    let reloc_total: u32 = macho.all_sections().map(|s| s.nreloc).sum();
     if reloc_total > 0 {
         println!("Relocations: {reloc_total} entries across {reloc_sections} sections");
     }
 
     // Dyld summary
-    if let Ok(fixups) = crate::metadata::dyld::parse_chained_fixups(mach) {
+    if let Ok(fixups) = crate::metadata::dyld::parse_chained_fixups(macho) {
         println!(
             "Chained Fixups: {} imports, {} fixups",
             fixups.imports.len(),
             fixups.fixups.len()
         );
     }
-    if let Ok(exports) = crate::metadata::dyld::parse_exports(mach) {
+    if let Ok(exports) = crate::metadata::dyld::parse_exports(macho) {
         if !exports.is_empty() {
             println!("Exports Trie: {} exports", exports.len());
         }
     }
 
     if do_validate {
-        let diags = validate::validate(mach);
+        let diags = validate::validate(macho);
         if diags.is_empty() {
             println!();
             println!("Validation: OK (no issues)");

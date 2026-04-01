@@ -2,7 +2,7 @@ use crate::analysis::strings::StringRegions;
 use crate::analysis::xref::ranges::{CodeEntity, SymbolRangeIndex};
 use crate::analysis::xref::refs::{XrefIndex, XrefKind, XrefTarget};
 use crate::model::addr::Va;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::recovery::vtables::SlotTarget;
 use crate::recovery::vtables::VtableIndex;
 use crate::symbols::demangle::demangle_symbol;
@@ -53,15 +53,15 @@ pub fn run_strings(args: StringsArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
             let regions = if args.heuristic {
-                StringRegions::with_heuristic(mach)
+                StringRegions::with_heuristic(macho)
             } else {
-                StringRegions::discover(mach)
+                StringRegions::discover(macho)
             };
 
             let value = if let Some(ref query) = args.search {
-                serde_json::to_value(regions.search(mach, query))?
+                serde_json::to_value(regions.search(macho, query))?
             } else {
                 serde_json::to_value(&regions)?
             };
@@ -80,11 +80,11 @@ pub fn run_strings(args: StringsArgs) -> Result<()> {
         for_each_selected_mach(
             &container,
             args.arch.as_deref(),
-            |mach, arch_name, show_header| {
+            |macho, arch_name, show_header| {
                 if show_header {
                     println!("=== {arch_name} ===");
                 }
-                print_strings_text(mach, &args);
+                print_strings_text(macho, &args);
                 if show_header {
                     println!();
                 }
@@ -96,11 +96,11 @@ pub fn run_strings(args: StringsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_strings_text(mach: &MachFile<'_>, args: &StringsArgs) {
+fn print_strings_text(macho: &MachoFile<'_>, args: &StringsArgs) {
     let regions = if args.heuristic {
-        StringRegions::with_heuristic(mach)
+        StringRegions::with_heuristic(macho)
     } else {
-        StringRegions::discover(mach)
+        StringRegions::discover(macho)
     };
 
     if regions.regions.is_empty() {
@@ -109,7 +109,7 @@ fn print_strings_text(mach: &MachFile<'_>, args: &StringsArgs) {
     }
 
     if let Some(ref query) = args.search {
-        let matches = regions.search(mach, query);
+        let matches = regions.search(macho, query);
         println!(
             "Found {} matches for \"{}\" across {} regions:",
             matches.len(),
@@ -126,7 +126,7 @@ fn print_strings_text(mach: &MachFile<'_>, args: &StringsArgs) {
     } else {
         println!("String regions: {} discovered", regions.regions.len(),);
         for (i, region) in regions.regions.iter().enumerate() {
-            let strings = regions.strings_in_region(mach, region);
+            let strings = regions.strings_in_region(macho, region);
             println!(
                 "  [{i}] {},{} ({:?}) - {} strings, {:#x} bytes @ {:#018x}",
                 region.section_segment,
@@ -149,8 +149,8 @@ pub fn run_vtables(args: VtablesArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let index = VtableIndex::build(mach)?;
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
+            let index = VtableIndex::build(macho)?;
 
             let value = if let Some(ref class_name) = args.class_filter {
                 let filtered: Vec<_> = index
@@ -177,11 +177,11 @@ pub fn run_vtables(args: VtablesArgs) -> Result<()> {
         for_each_selected_mach(
             &container,
             args.arch.as_deref(),
-            |mach, arch_name, show_header| {
+            |macho, arch_name, show_header| {
                 if show_header {
                     println!("=== {arch_name} ===");
                 }
-                print_vtables_text(mach, &args)?;
+                print_vtables_text(macho, &args)?;
                 if show_header {
                     println!();
                 }
@@ -193,8 +193,8 @@ pub fn run_vtables(args: VtablesArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_vtables_text(mach: &MachFile<'_>, args: &VtablesArgs) -> Result<()> {
-    let index = VtableIndex::build(mach)?;
+fn print_vtables_text(macho: &MachoFile<'_>, args: &VtablesArgs) -> Result<()> {
+    let index = VtableIndex::build(macho)?;
 
     if index.vtables.is_empty() {
         println!("No C++ vtables found.");
@@ -289,8 +289,8 @@ pub fn run_ranges(args: RangesArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let index = SymbolRangeIndex::build(mach)?;
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
+            let index = macho.ext::<SymbolRangeIndex>()?;
             let value = if let Some(va) = lookup_va {
                 serde_json::to_value(index.lookup_va(va))?
             } else {
@@ -310,11 +310,11 @@ pub fn run_ranges(args: RangesArgs) -> Result<()> {
         for_each_selected_mach(
             &container,
             args.arch.as_deref(),
-            |mach, arch_name, show_header| {
+            |macho, arch_name, show_header| {
                 if show_header {
                     println!("=== {arch_name} ===");
                 }
-                print_ranges_text(mach, &args, lookup_va)?;
+                print_ranges_text(macho, &args, lookup_va)?;
                 if show_header {
                     println!();
                 }
@@ -326,8 +326,8 @@ pub fn run_ranges(args: RangesArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_ranges_text(mach: &MachFile<'_>, args: &RangesArgs, lookup_va: Option<Va>) -> Result<()> {
-    let index = SymbolRangeIndex::build(mach)?;
+fn print_ranges_text(macho: &MachoFile<'_>, args: &RangesArgs, lookup_va: Option<Va>) -> Result<()> {
+    let index = macho.ext::<SymbolRangeIndex>()?;
 
     if let Some(va) = lookup_va {
         match index.lookup_va(va) {
@@ -445,8 +445,8 @@ pub fn run_xrefs(args: XrefsArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let index = XrefIndex::build(mach)?;
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
+            let index = macho.ext::<XrefIndex>()?;
             let value = if let Some(va) = from_va {
                 let refs: Vec<_> = index.refs_from(va).collect();
                 serde_json::to_value(&refs)?
@@ -470,11 +470,11 @@ pub fn run_xrefs(args: XrefsArgs) -> Result<()> {
         for_each_selected_mach(
             &container,
             args.arch.as_deref(),
-            |mach, arch_name, show_header| {
+            |macho, arch_name, show_header| {
                 if show_header {
                     println!("=== {arch_name} ===");
                 }
-                print_xrefs_text(mach, from_va, to_va)?;
+                print_xrefs_text(macho, from_va, to_va)?;
                 if show_header {
                     println!();
                 }
@@ -486,8 +486,8 @@ pub fn run_xrefs(args: XrefsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_xrefs_text(mach: &MachFile<'_>, from_va: Option<Va>, to_va: Option<Va>) -> Result<()> {
-    let index = XrefIndex::build(mach)?;
+fn print_xrefs_text(macho: &MachoFile<'_>, from_va: Option<Va>, to_va: Option<Va>) -> Result<()> {
+    let index = macho.ext::<XrefIndex>()?;
 
     if let Some(va) = from_va {
         let refs: Vec<_> = index.refs_from(va).collect();

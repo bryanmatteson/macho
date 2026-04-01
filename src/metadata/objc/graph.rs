@@ -4,9 +4,10 @@ use serde::Serialize;
 
 use super::ObjCMetadata;
 use super::types::ObjCCategory;
-use crate::format::parse_symbol_table;
+use crate::ext::MachoExt;
 use crate::model::addr::ThinFileOffset;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ObjCGraph {
@@ -123,8 +124,8 @@ impl ObjCGraph {
     }
 
     /// Build from metadata with symbol cross-references from the binary.
-    pub fn build_from_mach(metadata: &ObjCMetadata, mach: &MachFile<'_>) -> Self {
-        let addr_to_sym = build_address_symbol_map(mach);
+    pub fn build_from_mach(metadata: &ObjCMetadata, macho: &MachoFile<'_>) -> Self {
+        let addr_to_sym = build_address_symbol_map(macho);
         Self::build_with_symbols(metadata, &addr_to_sym)
     }
 
@@ -410,13 +411,14 @@ impl ObjCGraph {
 
     pub fn method_impl_offset(
         &self,
-        mach: &MachFile<'_>,
+        macho: &MachoFile<'_>,
         class_name: &str,
         selector: &str,
         kind: MethodKind,
     ) -> Option<ThinFileOffset> {
         let va = self.method_impl_va(class_name, selector, kind)?;
-        mach.address_map()
+        macho
+            .address_map()
             .va_to_thin_offset(crate::model::addr::Va(va))
             .ok()
     }
@@ -461,6 +463,16 @@ impl ObjCGraph {
         let mut methods: Vec<MethodEntry> = methods.into_values().collect();
         methods.sort_by(method_entry_sort_key);
         Some(methods)
+    }
+}
+
+impl<'data> MachoExt<'data> for ObjCGraph {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> crate::Result<Self>
+    where
+        'data: 'mf,
+    {
+        let meta = macho.ext::<ObjCMetadata>()?;
+        Ok(Self::build_from_mach(&meta, macho))
     }
 }
 
@@ -598,9 +610,9 @@ fn selector_owner_sort_key(left: &SelectorOwner, right: &SelectorOwner) -> std::
         .then(left.imp_symbol.cmp(&right.imp_symbol))
 }
 
-fn build_address_symbol_map(mach: &MachFile<'_>) -> BTreeMap<u64, String> {
+fn build_address_symbol_map(macho: &MachoFile<'_>) -> BTreeMap<u64, String> {
     let mut map = BTreeMap::new();
-    if let Ok(symtab) = parse_symbol_table(mach) {
+    if let Ok(symtab) = macho.ext::<SymbolTable<'_>>() {
         for sym in symtab.symbols() {
             if sym.is_defined() && sym.value != 0 {
                 map.insert(sym.value, sym.name.to_string());

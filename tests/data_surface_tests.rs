@@ -1,16 +1,16 @@
 use macho::analysis::strings::{StringRegionKind, StringRegions};
-use macho::model::container::MachContainer;
-use macho::model::mach_file::MachFile;
+use macho::model::container::MachoContainer;
+use macho::model::macho_file::MachoFile;
 use macho::recovery::vtables::VtableIndex;
 
-fn first_mach(data: &[u8]) -> MachContainer<'_> {
+fn first_mach(data: &[u8]) -> MachoContainer<'_> {
     macho::parse(data).expect("parse")
 }
 
-fn get_mach<'a>(container: &'a MachContainer<'a>) -> &'a MachFile<'a> {
+fn get_mach<'a>(container: &'a MachoContainer<'a>) -> &'a MachoFile<'a> {
     match container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     }
 }
 
@@ -27,9 +27,9 @@ fn discover_finds_cstring_regions() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
     assert!(
         !regions.regions.is_empty(),
         "should find at least one string region"
@@ -55,9 +55,9 @@ fn discover_finds_objc_string_regions() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
     let objc_regions: Vec<_> = regions
         .regions
         .iter()
@@ -78,10 +78,10 @@ fn all_strings_returns_nonempty() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
-    let all = regions.all_strings(mach);
+    let regions = StringRegions::discover(macho);
+    let all = regions.all_strings(macho);
     assert!(!all.is_empty(), "should find strings in string regions");
 
     // Every string should be non-empty
@@ -99,11 +99,11 @@ fn strings_in_region_returns_valid_entries() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
     let first_region = &regions.regions[0];
-    let strings = regions.strings_in_region(mach, first_region);
+    let strings = regions.strings_in_region(macho, first_region);
 
     assert!(!strings.is_empty(), "first region should have strings");
 
@@ -132,10 +132,10 @@ fn search_finds_known_string() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
-    let all = regions.all_strings(mach);
+    let regions = StringRegions::discover(macho);
+    let all = regions.all_strings(macho);
 
     if all.is_empty() {
         return;
@@ -143,7 +143,7 @@ fn search_finds_known_string() {
 
     // Pick the first string and search for it
     let target = &all[0].value;
-    let matches = regions.search(mach, target);
+    let matches = regions.search(macho, target);
     assert!(
         !matches.is_empty(),
         "searching for a known string should yield at least one match"
@@ -165,17 +165,17 @@ fn search_exact_matches_precisely() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
-    let all = regions.all_strings(mach);
+    let regions = StringRegions::discover(macho);
+    let all = regions.all_strings(macho);
 
     if all.is_empty() {
         return;
     }
 
     let target = &all[0].value;
-    let exact_matches = regions.search_exact(mach, target);
+    let exact_matches = regions.search_exact(macho, target);
     assert!(
         !exact_matches.is_empty(),
         "exact search for a known string should yield at least one match"
@@ -195,10 +195,10 @@ fn search_nonexistent_returns_empty() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
-    let matches = regions.search(mach, "zzznonexistentstringzzz_12345");
+    let regions = StringRegions::discover(macho);
+    let matches = regions.search(macho, "zzznonexistentstringzzz_12345");
     assert!(
         matches.is_empty(),
         "searching for nonexistent string should return empty"
@@ -214,10 +214,10 @@ fn with_heuristic_finds_additional_regions() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let standard = StringRegions::discover(mach);
-    let heuristic = StringRegions::with_heuristic(mach);
+    let standard = StringRegions::discover(macho);
+    let heuristic = StringRegions::with_heuristic(macho);
 
     // Heuristic should find at least as many regions as standard
     assert!(
@@ -249,9 +249,9 @@ fn region_metadata_is_valid() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
     for region in &regions.regions {
         assert!(region.size > 0, "region size should be > 0");
         assert!(region.start.0 > 0, "region VA should be > 0");
@@ -275,9 +275,9 @@ fn string_regions_serializes_to_json() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
     let json = serde_json::to_string(&regions).expect("should serialize to JSON");
     assert!(!json.is_empty());
     assert!(json.contains("CString") || json.contains("regions"));
@@ -296,9 +296,9 @@ fn vtable_build_finds_vtables_in_cpp_binary() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     assert!(
         !index.vtables.is_empty(),
         "swift-demangle should have C++ vtables"
@@ -314,9 +314,9 @@ fn vtable_entries_have_valid_metadata() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     for vtable in &index.vtables {
         assert!(vtable.va.0 > 0, "vtable VA should be > 0");
         assert!(vtable.size > 0, "vtable size should be > 0");
@@ -344,10 +344,10 @@ fn vtable_slots_have_valid_offsets() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
-    let ptr_size: u64 = if mach.is_64bit() { 8 } else { 4 };
+    let index = VtableIndex::build(macho).expect("build vtable index");
+    let ptr_size: u64 = if macho.is_64bit() { 8 } else { 4 };
 
     for vtable in &index.vtables {
         for (i, slot) in vtable.slots.iter().enumerate() {
@@ -374,9 +374,9 @@ fn vtable_find_by_va_works() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     if index.vtables.is_empty() {
         return;
     }
@@ -396,9 +396,9 @@ fn vtable_find_by_class_works() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
 
     // Find a vtable that has a demangled name
     let named_vtable = index.vtables.iter().find(|v| v.name.is_some());
@@ -428,9 +428,9 @@ fn vtable_slot_at_works() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     if index.vtables.is_empty() || index.vtables[0].slots.is_empty() {
         return;
     }
@@ -452,9 +452,9 @@ fn vtable_no_vtables_in_c_binary() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     assert!(
         index.vtables.is_empty(),
         "/usr/bin/true (a C binary) should have no vtables"
@@ -470,9 +470,9 @@ fn vtable_index_serializes_to_json() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     let json = serde_json::to_string(&index).expect("should serialize to JSON");
     assert!(!json.is_empty());
     assert!(json.contains("vtables"));
@@ -487,9 +487,9 @@ fn vtable_first_slot_is_offset_to_top() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
 
     // All vtables should have their first slot as OffsetToTop
     for vtable in &index.vtables {
@@ -522,9 +522,9 @@ fn regression_vtable_slots_resolve_function_names_on_chained_fixup_binaries() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
     assert!(!index.vtables.is_empty());
 
     // Count function-resolved slots across all vtables
@@ -573,9 +573,9 @@ fn regression_vtable_slot1_not_classified_as_pure_virtual() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
 
     for vtable in &index.vtables {
         if vtable.slots.len() >= 2 {
@@ -603,9 +603,9 @@ fn regression_vtable_itanium_structure() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
 
     for vtable in &index.vtables {
         if vtable.slots.len() < 3 {
@@ -665,15 +665,15 @@ fn regression_cfstring_region_does_not_produce_garbage_strings() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
 
     // If the binary has a CFString region, strings_in_region should return
     // an empty Vec (we skip struct-format sections)
     for region in &regions.regions {
         if region.kind == StringRegionKind::CFString {
-            let strings = regions.strings_in_region(mach, region);
+            let strings = regions.strings_in_region(macho, region);
             assert!(
                 strings.is_empty(),
                 "CFString region should not produce C strings (got {} strings)",
@@ -699,9 +699,9 @@ fn regression_pure_virtual_detection_by_import_name() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index = VtableIndex::build(mach).expect("build vtable index");
+    let index = VtableIndex::build(macho).expect("build vtable index");
 
     // No slot at index 0 or 1 should be PureVirtual
     for vtable in &index.vtables {
@@ -735,9 +735,9 @@ fn objc_sections_classified_before_type_fallback() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions = StringRegions::discover(mach);
+    let regions = StringRegions::discover(macho);
 
     for region in &regions.regions {
         if region.section_name.starts_with("__objc_") {
@@ -765,10 +765,10 @@ fn vtable_output_is_deterministic() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let index1 = VtableIndex::build(mach).expect("build vtable index");
-    let index2 = VtableIndex::build(mach).expect("build vtable index");
+    let index1 = VtableIndex::build(macho).expect("build vtable index");
+    let index2 = VtableIndex::build(macho).expect("build vtable index");
 
     let json1 = serde_json::to_string(&index1).expect("json");
     let json2 = serde_json::to_string(&index2).expect("json");
@@ -788,10 +788,10 @@ fn string_region_output_is_deterministic() {
     }
     let data = std::fs::read(path).expect("read");
     let container = first_mach(&data);
-    let mach = get_mach(&container);
+    let macho = get_mach(&container);
 
-    let regions1 = StringRegions::discover(mach);
-    let regions2 = StringRegions::discover(mach);
+    let regions1 = StringRegions::discover(macho);
+    let regions2 = StringRegions::discover(macho);
 
     let json1 = serde_json::to_string(&regions1).expect("json");
     let json2 = serde_json::to_string(&regions2).expect("json");

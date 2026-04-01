@@ -1,8 +1,8 @@
 use crate::analysis::deps::compat::{CompatReport, CompatSeverity};
 use crate::analysis::deps::graph::{DepGraph, ImportProvider};
 use crate::metadata::image::DylibLinkKind;
-use crate::model::container::MachContainer;
-use crate::model::mach_file::MachFile;
+use crate::model::container::MachoContainer;
+use crate::model::macho_file::MachoFile;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -43,10 +43,10 @@ pub fn run(args: DepsArgs) -> Result<()> {
     let mut has_incompatible = false;
 
     match &container {
-        MachContainer::Thin(mach) => {
+        MachoContainer::Thin(macho) => {
             let prov_mach = provider.map(|c| c.first_mach());
             has_incompatible |= print_deps(
-                mach,
+                macho,
                 &args.path.display().to_string(),
                 prov_mach,
                 args.check_compat
@@ -56,7 +56,7 @@ pub fn run(args: DepsArgs) -> Result<()> {
                 args.json,
             )?;
         }
-        MachContainer::Fat(fat) => {
+        MachoContainer::Fat(fat) => {
             for arch in fat.arches() {
                 let name = arch.spec.name();
                 if let Some(ref f) = args.arch {
@@ -68,11 +68,11 @@ pub fn run(args: DepsArgs) -> Result<()> {
                     println!("=== {name} ===");
                 }
                 let prov_mach = provider.map(|c| {
-                    c.find_arch(arch.mach.header().cpu_type)
+                    c.find_arch(arch.macho.header().cpu_type)
                         .unwrap_or_else(|| c.first_mach())
                 });
                 has_incompatible |= print_deps(
-                    &arch.mach,
+                    &arch.macho,
                     &args.path.display().to_string(),
                     prov_mach,
                     args.check_compat
@@ -97,17 +97,17 @@ pub fn run(args: DepsArgs) -> Result<()> {
 
 /// Returns true if incompatibilities were found.
 fn print_deps(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     target_path: &str,
-    provider: Option<&MachFile<'_>>,
+    provider: Option<&MachoFile<'_>>,
     provider_path: Option<&str>,
     json: bool,
 ) -> Result<bool> {
-    let graph = DepGraph::build(mach).with_context(|| "failed to build dependency graph")?;
+    let graph = DepGraph::build(macho).with_context(|| "failed to build dependency graph")?;
 
     let compat_report = if provider.is_some() {
         Some(
-            CompatReport::check(mach, target_path, provider, provider_path)
+            CompatReport::check(macho, target_path, provider, provider_path)
                 .with_context(|| "compatibility check failed")?,
         )
     } else {

@@ -39,7 +39,7 @@ mean "can write bytes"; it means "can make changes safely enough to automate."
 
 ## Design
 
-Layer a transaction abstraction on top of `MachEditor` and `OwnedMachFile`.
+Layer a transaction abstraction on top of `MachoEditor` and `OwnedMachFile`.
 Every patch operation should:
 
 1. Stage intended edits

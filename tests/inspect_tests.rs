@@ -8,8 +8,8 @@ use macho::resolve::paths::{resolve_all_rpaths, resolve_path};
 fn inspector_new_with_thin_slice() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
     let info = inspector.info();
 
     assert!(!info.arch.is_empty());
@@ -21,8 +21,8 @@ fn inspector_new_with_thin_slice() {
 fn inspector_info_has_uuid() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     assert!(
         inspector.info().uuid.is_some(),
@@ -34,8 +34,8 @@ fn inspector_info_has_uuid() {
 fn inspector_info_has_platform() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let platform = inspector
         .info()
@@ -51,8 +51,8 @@ fn inspector_info_has_platform() {
 fn inspector_info_has_image_base() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     assert!(
         inspector.info().image_base > 0,
@@ -64,8 +64,8 @@ fn inspector_info_has_image_base() {
 fn inspector_info_linked_dylibs() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let dylibs = &inspector.info().linked_dylibs;
     assert!(!dylibs.is_empty(), "executable should link dylibs");
@@ -92,8 +92,8 @@ fn inspector_info_linked_dylibs() {
 fn inspector_info_dylib_link_kinds() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // At minimum, a typical executable has Required dylibs
     let dylibs = &inspector.info().linked_dylibs;
@@ -107,8 +107,8 @@ fn inspector_info_dylib_link_kinds() {
 fn inspector_address_map() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // address_map should be accessible and functional
     let map = inspector.address_map();
@@ -120,11 +120,11 @@ fn inspector_address_map() {
 fn inspector_mach_escape_hatch() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
-    // Should be able to get back to the raw MachFile
-    assert!(inspector.mach().header().ncmds > 0);
+    // Should be able to get back to the raw MachoFile
+    assert!(inspector.macho().header().ncmds > 0);
 }
 
 // -- Cached deep parse tests --
@@ -133,8 +133,8 @@ fn inspector_mach_escape_hatch() {
 fn inspector_cached_symbols() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // First call parses, second returns cached
     let result1 = inspector.symbols();
@@ -152,8 +152,8 @@ fn inspector_cached_symbols() {
 fn inspector_cached_exports() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // Exports may or may not be present
     let _result = inspector.exports();
@@ -165,8 +165,8 @@ fn inspector_cached_exports() {
 fn inspector_cached_codesign() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let result = inspector.parse_code_signature();
     assert!(result.is_ok(), "system binary should be signed");
@@ -179,8 +179,8 @@ fn inspector_cached_codesign() {
 fn inspector_debug_impl() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let debug = format!("{:?}", inspector);
     assert!(debug.contains("ImageInspector"));
@@ -192,8 +192,8 @@ fn inspector_debug_impl() {
 fn image_info_serializes_to_json() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let json = serde_json::to_string(inspector.info()).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
@@ -210,11 +210,11 @@ fn inspector_fat_binary_all_slices() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
 
-    let machs = container.mach_files();
-    assert!(machs.len() >= 2, "fat binary should have multiple arches");
+    let machos = container.macho_files();
+    assert!(machos.len() >= 2, "fat binary should have multiple arches");
 
-    for mach in machs {
-        let inspector = ImageInspector::new(mach);
+    for macho in machos {
+        let inspector = ImageInspector::new(macho);
         let info = inspector.info();
         assert!(!info.arch.is_empty());
         assert_eq!(info.file_type, "MH_EXECUTE");
@@ -227,8 +227,8 @@ fn inspector_fat_binary_different_arches() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
 
-    let machs = container.mach_files();
-    let arches: Vec<String> = machs
+    let machos = container.macho_files();
+    let arches: Vec<String> = machos
         .iter()
         .map(|m| ImageInspector::new(m).info().arch.clone())
         .collect();
@@ -244,8 +244,8 @@ fn inspector_fat_binary_different_arches() {
 fn inspector_dylib_install_name() {
     let data = std::fs::read("/usr/lib/libffi-trampolines.dylib").expect("read dylib");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let info = inspector.info();
     assert_eq!(info.file_type, "MH_DYLIB");
@@ -390,8 +390,8 @@ fn inspector_graceful_no_objc_metadata() {
     // /usr/bin/true is a C executable, should not have ObjC metadata
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // ObjC metadata parse should either succeed with empty data or
     // return an error -- either way it should not panic
@@ -405,10 +405,10 @@ fn inspector_graceful_no_chained_fixups() {
     // /usr/bin/true may or may not have chained fixups; test graceful handling
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
-    let result = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach());
+    let result = macho::metadata::dyld::chained::parse_chained_fixups(inspector.macho());
     // Should not panic; either Ok or Err is fine
     let _ = result;
 }
@@ -419,8 +419,8 @@ fn inspector_objc_graph_reuses_cached_metadata() {
     // and that objc_graph uses the cached metadata internally
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // Call objc_metadata first to populate the cache
     let meta_result = inspector.parse_objc_metadata();
@@ -438,8 +438,8 @@ fn inspector_objc_graph_reuses_cached_metadata() {
 fn inspector_swift_types_are_cached_and_match_direct_build() {
     let data = std::fs::read("/usr/bin/plutil").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let first = inspector.parse_swift_types().expect("swift types");
     let second = inspector
@@ -450,7 +450,7 @@ fn inspector_swift_types_are_cached_and_match_direct_build() {
         "swift type index should come from the inspector cache"
     );
 
-    let direct = macho::metadata::swift::SwiftTypeIndex::build(mach);
+    let direct = macho::metadata::swift::SwiftTypeIndex::build(macho);
     assert_eq!(
         first.types.iter().map(|ty| &ty.name).collect::<Vec<_>>(),
         direct.types.iter().map(|ty| &ty.name).collect::<Vec<_>>()
@@ -461,8 +461,8 @@ fn inspector_swift_types_are_cached_and_match_direct_build() {
 fn inspector_executable_has_no_install_name() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // Executables should NOT have an install name (that's for dylibs)
     assert!(
@@ -475,8 +475,8 @@ fn inspector_executable_has_no_install_name() {
 fn inspector_cached_calls_return_consistent_results() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     // Call each cached method twice and verify consistency
     let sym1 = inspector.symbols().is_ok();
@@ -487,8 +487,8 @@ fn inspector_cached_calls_return_consistent_results() {
     let exp2 = inspector.exports().is_ok();
     assert_eq!(exp1, exp2, "exports() should be consistent");
 
-    let fix1 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach()).is_ok();
-    let fix2 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.mach()).is_ok();
+    let fix1 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.macho()).is_ok();
+    let fix2 = macho::metadata::dyld::chained::parse_chained_fixups(inspector.macho()).is_ok();
     assert_eq!(fix1, fix2, "fixups() should be consistent");
 
     let cs1 = inspector.parse_code_signature().is_ok();
@@ -500,8 +500,8 @@ fn inspector_cached_calls_return_consistent_results() {
 fn image_info_json_contains_all_fields() {
     let data = std::fs::read("/usr/bin/true").expect("read binary");
     let container = macho::parse(&data).expect("parse");
-    let mach = container.first_mach();
-    let inspector = ImageInspector::new(mach);
+    let macho = container.first_mach();
+    let inspector = ImageInspector::new(macho);
 
     let json = serde_json::to_string(inspector.info()).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");

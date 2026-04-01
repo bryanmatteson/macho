@@ -46,7 +46,7 @@ hand.
 ## Design
 
 Keep `ContainerSnapshot` as the canonical comparison substrate, but expose the
-useful results directly on `MachContainer` and `FatBinary` so callers do not
+useful results directly on `MachoContainer` and `FatBinary` so callers do not
 need to manually build snapshots for common operations.
 
 The plan should converge on:

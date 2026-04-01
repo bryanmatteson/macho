@@ -143,9 +143,9 @@ fn cpp_index_recovers_classes_bases_and_functions() {
     };
     let bytes = std::fs::read(&path).expect("read fixture");
     let container = macho::parse(&bytes).expect("parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let index = build_image_index(mach).expect("build C++ image index");
+    let index = build_image_index(macho).expect("build C++ image index");
     assert!(index.classes.contains_key("Base"));
     assert!(index.classes.contains_key("Derived"));
     assert!(index.classes.contains_key("Multi"));
@@ -221,9 +221,9 @@ fn cpp_header_renders_and_validates() {
     };
     let bytes = std::fs::read(&path).expect("read fixture");
     let container = macho::parse(&bytes).expect("parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let header = build_headers_for_mach(mach).expect("render header");
+    let header = build_headers_for_mach(macho).expect("render header");
     assert!(header.contains("class Derived"));
     assert!(header.contains("virtual"));
     assert!(header.contains("namespace scoped {"));
@@ -250,9 +250,9 @@ fn cpp_unification_merges_duplicate_images() {
     };
     let bytes = std::fs::read(&path).expect("read fixture");
     let container = macho::parse(&bytes).expect("parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let index = build_image_index(mach).expect("build image index");
+    let index = build_image_index(macho).expect("build image index");
     let unified = unify_images(&[index.clone(), index]);
     assert!(unified.classes.contains_key("Derived"));
     assert!(
@@ -270,9 +270,9 @@ fn cpp_unification_propagates_virtuality_from_vtables() {
     };
     let bytes = std::fs::read(&path).expect("read fixture");
     let container = macho::parse(&bytes).expect("parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let index = build_image_index(mach).expect("build image index");
+    let index = build_image_index(macho).expect("build image index");
     let mut methods_only = index.clone();
     methods_only
         .classes

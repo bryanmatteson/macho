@@ -38,9 +38,9 @@ pub fn run(args: CArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
             let analysis = analyze_headers(
-                mach,
+                macho,
                 &CAnalysisOptions {
                     header_root: args.header_root.clone(),
                 },
@@ -60,12 +60,12 @@ pub fn run(args: CArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 crate::outln!("=== {arch_name} ===");
             }
             let analysis = analyze_headers(
-                mach,
+                macho,
                 &CAnalysisOptions {
                     header_root: args.header_root.clone(),
                 },

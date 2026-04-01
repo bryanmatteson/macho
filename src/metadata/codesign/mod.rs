@@ -7,9 +7,9 @@ pub use types::{BlobType, CodeDirectory, HashType, SignatureBlob};
 
 use crate::error::{Error, Result};
 use crate::model::addr::ThinFileOffset;
-use crate::model::ext::MachExt;
+use crate::model::ext::MachoExt;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Parsed code signature from LC_CODE_SIGNATURE.
 #[derive(Debug)]
@@ -20,22 +20,22 @@ pub struct CodeSignature<'data> {
     entitlements_der: Option<&'data [u8]>,
 }
 
-impl<'data> MachExt<'data> for CodeSignature<'data> {
-    fn parse<'mf>(mach: &'mf MachFile<'data>) -> Result<Self>
+impl<'data> MachoExt<'data> for CodeSignature<'data> {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
     where
         'data: 'mf,
     {
-        parse_code_signature(mach)
+        parse_code_signature(macho)
     }
 }
 
-pub fn parse_code_signature<'data>(mach: &MachFile<'data>) -> Result<CodeSignature<'data>> {
-    let linkedit = mach
+pub fn parse_code_signature<'data>(macho: &MachoFile<'data>) -> Result<CodeSignature<'data>> {
+    let linkedit = macho
         .find_load_command(|lc| matches!(lc, LoadCommand::CodeSignature(_)))
         .and_then(|lc| lc.kind.as_linkedit_data())
         .ok_or_else(|| Error::Format("no LC_CODE_SIGNATURE".into()))?;
 
-    let sig_data = mach.read_bytes_at(
+    let sig_data = macho.read_bytes_at(
         ThinFileOffset(linkedit.data_offset as u64),
         linkedit.data_size as usize,
     )?;

@@ -10,16 +10,16 @@ use macho::metadata::objc::{
 };
 use macho::model::addr::ThinFileOffset;
 use macho::model::addr::Va;
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 
 fn graph_for(path: &str) -> Option<ObjCGraph> {
     let data = std::fs::read(path).expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
-    let meta = parse_objc_metadata(mach).ok()?;
+    let meta = parse_objc_metadata(macho).ok()?;
     Some(ObjCGraph::build(&meta))
 }
 
@@ -439,12 +439,12 @@ fn graph_folds_category_protocols_into_class_and_protocol_views() {
 fn graph_method_impl_helpers_report_va_and_offset() {
     let data = std::fs::read("/usr/bin/plutil").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
-    let meta = parse_objc_metadata(mach).expect("should have ObjC metadata");
-    let graph = ObjCGraph::build_from_mach(&meta, mach);
+    let meta = parse_objc_metadata(macho).expect("should have ObjC metadata");
+    let graph = ObjCGraph::build_from_mach(&meta, macho);
     let (class_name, method) = graph
         .classes
         .values()
@@ -463,9 +463,9 @@ fn graph_method_impl_helpers_report_va_and_offset() {
     assert_eq!(method_va, method.imp);
 
     let method_offset = graph
-        .method_impl_offset(mach, class_name, &method.selector, MethodKind::Instance)
+        .method_impl_offset(macho, class_name, &method.selector, MethodKind::Instance)
         .expect("expected method file offset");
-    let expected_offset = mach
+    let expected_offset = macho
         .address_map()
         .va_to_thin_offset(macho::model::addr::Va(method.imp))
         .expect("expected address-map translation");
@@ -478,16 +478,33 @@ fn no_objc_graph_for_minimal_binary() {
     // /usr/bin/true has no ObjC metadata
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
     // parse_objc_metadata might succeed with empty data or fail — both are fine
-    if let Ok(meta) = parse_objc_metadata(mach) {
+    if let Ok(meta) = parse_objc_metadata(macho) {
         let graph = ObjCGraph::build(&meta);
         // Should just be empty
         assert!(graph.classes.is_empty());
     }
+}
+
+#[test]
+fn objc_graph_via_ext_matches_direct_build() {
+    let data = std::fs::read("/usr/bin/plutil").expect("read");
+    let container = macho::parse(&data).expect("parse");
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
+    };
+
+    let meta = parse_objc_metadata(macho).expect("should have ObjC metadata");
+    let direct = ObjCGraph::build_from_mach(&meta, macho);
+    let via_ext: ObjCGraph = macho.ext().expect("objc graph ext");
+
+    assert_eq!(via_ext.classes.len(), direct.classes.len());
+    assert_eq!(via_ext.protocols.len(), direct.protocols.len());
 }
 
 #[test]

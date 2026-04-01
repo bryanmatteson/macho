@@ -1,6 +1,6 @@
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use anyhow::{Context, Result};
-use macho::metadata::codesign::parse_code_signature;
+use macho::metadata::codesign::CodeSignature;
 use std::path::PathBuf;
 
 use crate::cli::commands::common::for_each_selected_mach;
@@ -26,11 +26,11 @@ pub fn run(args: CodesignArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_codesign(mach, &args);
+            print_codesign(macho, &args);
             if show_header {
                 println!();
             }
@@ -40,8 +40,8 @@ pub fn run(args: CodesignArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_codesign(mach: &MachFile<'_>, args: &CodesignArgs) {
-    let sig = match parse_code_signature(mach) {
+fn print_codesign(macho: &MachoFile<'_>, args: &CodesignArgs) {
+    let sig = match macho.ext::<CodeSignature<'_>>() {
         Ok(s) => s,
         Err(e) => {
             println!("No code signature: {e}");

@@ -1,15 +1,17 @@
 use serde::Serialize;
 
 use crate::error::Result;
+use crate::ext::MachoExt;
 use crate::format::constants::*;
-use crate::format::{parse_symbol_table, relocations_for_section};
+use crate::format::relocations_for_section;
 use crate::metadata::dyld::bind::parse_bind_entries;
 use crate::metadata::dyld::chained::parse_chained_fixups;
 use crate::metadata::dyld::types::FixupKind;
 use crate::model::addr::types::{ThinFileOffset, Va};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::relocation::Relocation;
 use crate::model::section::SectionType;
+use crate::model::symbol::SymbolTable;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct XrefIndex {
@@ -42,23 +44,23 @@ pub enum XrefKind {
 }
 
 impl XrefIndex {
-    pub fn build(mach: &MachFile<'_>) -> Result<Self> {
+    pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
         let mut refs = Vec::new();
 
         // 1. Extract stub references from indirect symbol tables
-        collect_stub_refs(mach, &mut refs)?;
+        collect_stub_refs(macho, &mut refs)?;
 
         // 2. Extract chained fixup references
-        collect_chained_fixup_refs(mach, &mut refs);
+        collect_chained_fixup_refs(macho, &mut refs);
 
         // 3. Extract legacy bind references
-        collect_legacy_bind_refs(mach, &mut refs);
+        collect_legacy_bind_refs(macho, &mut refs);
 
         // 4. Extract relocation-backed references (object files, kexts)
-        collect_relocation_refs(mach, &mut refs);
+        collect_relocation_refs(macho, &mut refs);
 
         // 5. Scan for arm64 direct branches in executable sections
-        collect_direct_branches(mach, &mut refs);
+        collect_direct_branches(macho, &mut refs);
 
         // Sort by source address
         refs.sort_by_key(|r| r.source);
@@ -104,13 +106,22 @@ impl XrefIndex {
     }
 }
 
-fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
-    let symtab = match parse_symbol_table(mach) {
+impl<'data> MachoExt<'data> for XrefIndex {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
+    where
+        'data: 'mf,
+    {
+        Self::build(macho)
+    }
+}
+
+fn collect_stub_refs(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
+    let symtab = match macho.ext::<SymbolTable<'_>>() {
         Ok(st) => st,
         Err(_) => return Ok(()),
     };
 
-    let dysymtab = match mach
+    let dysymtab = match macho
         .find_load_command(|lc| matches!(lc, crate::model::load_command::LoadCommand::Dysymtab(_)))
     {
         Some(lc) => match lc.kind.as_dysymtab() {
@@ -126,12 +137,12 @@ fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
 
     let indirect_off = dysymtab.indirectsymoff as usize;
     let n_indirect = dysymtab.nindirectsyms as usize;
-    let endian = mach.endian();
+    let endian = macho.endian();
 
     // Read the indirect symbol table
-    let indirect_data = mach.read_bytes_at(ThinFileOffset(indirect_off as u64), n_indirect * 4)?;
+    let indirect_data = macho.read_bytes_at(ThinFileOffset(indirect_off as u64), n_indirect * 4)?;
 
-    for sect in mach.all_sections() {
+    for sect in macho.all_sections() {
         let is_stub_section = matches!(
             sect.section_type,
             SectionType::SymbolStubs
@@ -152,7 +163,7 @@ fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
             }
             _ => {
                 // Pointer-sized entries
-                if mach.is_64bit() { 8u64 } else { 4u64 }
+                if macho.is_64bit() { 8u64 } else { 4u64 }
             }
         };
 
@@ -210,13 +221,13 @@ fn collect_stub_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) -> Result<()> {
     Ok(())
 }
 
-fn collect_chained_fixup_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    let fixups = match parse_chained_fixups(mach) {
+fn collect_chained_fixup_refs(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    let fixups = match parse_chained_fixups(macho) {
         Ok(f) => f,
         Err(_) => return,
     };
 
-    let segments = mach.segments();
+    let segments = macho.segments();
 
     for fixup in &fixups.fixups {
         let seg = match segments.get(fixup.segment_index) {
@@ -251,13 +262,13 @@ fn collect_chained_fixup_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
     }
 }
 
-fn collect_legacy_bind_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    let (regular, weak, lazy) = match parse_bind_entries(mach) {
+fn collect_legacy_bind_refs(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    let (regular, weak, lazy) = match parse_bind_entries(macho) {
         Ok(entries) => entries,
         Err(_) => return,
     };
 
-    let segments = mach.segments();
+    let segments = macho.segments();
 
     for bind in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
         let seg = match segments.get(bind.segment_index) {
@@ -277,17 +288,17 @@ fn collect_legacy_bind_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
     }
 }
 
-fn collect_relocation_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    let symtab = match parse_symbol_table(mach) {
+fn collect_relocation_refs(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    let symtab = match macho.ext::<SymbolTable<'_>>() {
         Ok(st) => st,
         Err(_) => return,
     };
 
-    for sect in mach.all_sections() {
+    for sect in macho.all_sections() {
         if sect.nreloc == 0 {
             continue;
         }
-        let relocs = match relocations_for_section(mach, sect) {
+        let relocs = match relocations_for_section(macho, sect) {
             Ok(r) => r,
             Err(_) => continue,
         };
@@ -328,20 +339,20 @@ fn collect_relocation_refs(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
     }
 }
 
-fn collect_direct_branches(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    let cpu_type = mach.header().cpu_type.0;
+fn collect_direct_branches(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    let cpu_type = macho.header().cpu_type.0;
 
     if cpu_type == CPU_TYPE_ARM64 {
-        collect_arm64_branches(mach, refs);
+        collect_arm64_branches(macho, refs);
     } else if cpu_type == CPU_TYPE_X86_64 {
-        collect_x86_64_calls(mach, refs);
+        collect_x86_64_calls(macho, refs);
     }
 }
 
-fn collect_arm64_branches(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    let endian = mach.endian();
+fn collect_arm64_branches(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    let endian = macho.endian();
 
-    for sect in mach.all_sections() {
+    for sect in macho.all_sections() {
         // Only scan executable sections
         if !sect
             .attributes
@@ -353,7 +364,7 @@ fn collect_arm64_branches(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
             continue;
         }
 
-        let sect_bytes = match mach.read_bytes_at(sect.offset, sect.size as usize) {
+        let sect_bytes = match macho.read_bytes_at(sect.offset, sect.size as usize) {
             Ok(b) => b,
             Err(_) => continue,
         };
@@ -397,8 +408,8 @@ fn collect_arm64_branches(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
     }
 }
 
-fn collect_x86_64_calls(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
-    for sect in mach.all_sections() {
+fn collect_x86_64_calls(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
+    for sect in macho.all_sections() {
         if !sect
             .attributes
             .contains(SectionAttributes::PURE_INSTRUCTIONS)
@@ -409,7 +420,7 @@ fn collect_x86_64_calls(mach: &MachFile<'_>, refs: &mut Vec<Xref>) {
             continue;
         }
 
-        let sect_bytes = match mach.read_bytes_at(sect.offset, sect.size as usize) {
+        let sect_bytes = match macho.read_bytes_at(sect.offset, sect.size as usize) {
             Ok(b) => b,
             Err(_) => continue,
         };

@@ -1,4 +1,4 @@
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::model::header::{Bitness, FileType};
 use macho::model::load_command::LoadCommand;
 
@@ -43,14 +43,14 @@ fn parse_minimal_thin_64() {
     let container = macho::parse(&data).expect("failed to parse");
 
     match container {
-        MachContainer::Thin(mach) => {
-            assert_eq!(mach.bitness(), Bitness::Bits64);
-            assert_eq!(mach.header().file_type, FileType::Execute);
-            assert_eq!(mach.header().ncmds, 1);
-            assert_eq!(mach.segments().len(), 1);
-            assert_eq!(mach.segments()[0].name, "__TEXT");
+        MachoContainer::Thin(macho) => {
+            assert_eq!(macho.bitness(), Bitness::Bits64);
+            assert_eq!(macho.header().file_type, FileType::Execute);
+            assert_eq!(macho.header().ncmds, 1);
+            assert_eq!(macho.segments().len(), 1);
+            assert_eq!(macho.segments()[0].name, "__TEXT");
         }
-        MachContainer::Fat(_) => panic!("expected thin binary"),
+        MachoContainer::Fat(_) => panic!("expected thin binary"),
     }
 }
 
@@ -74,10 +74,10 @@ fn unknown_load_command_preserved() {
     data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]); // payload
 
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    assert_eq!(mach.load_commands().len(), 1);
-    match &mach.load_commands()[0].kind {
+    assert_eq!(macho.load_commands().len(), 1);
+    match &macho.load_commands()[0].kind {
         LoadCommand::Unknown(unk) => {
             assert_eq!(unk.cmd, 0xFF);
             assert_eq!(unk.data, &[0xAA, 0xBB, 0xCC, 0xDD, 0x11, 0x22, 0x33, 0x44]);
@@ -153,12 +153,12 @@ fn minimal_fat_two_arches() {
 
     let container = macho::parse(&fat).expect("failed to parse fat binary");
     match container {
-        MachContainer::Fat(ref fb) => {
+        MachoContainer::Fat(ref fb) => {
             assert_eq!(fb.arches().len(), 2);
             assert_eq!(fb.arches()[0].spec.cpu_type.name(), "arm64");
             assert_eq!(fb.arches()[1].spec.cpu_type.name(), "x86_64");
         }
-        MachContainer::Thin(_) => panic!("expected fat binary"),
+        MachoContainer::Thin(_) => panic!("expected fat binary"),
     }
 }
 
@@ -166,8 +166,8 @@ fn minimal_fat_two_arches() {
 fn image_base_is_text_vmaddr() {
     let data = minimal_thin_64();
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
-    assert_eq!(mach.image_base().0, 0x100000000);
+    let macho = container.first_mach();
+    assert_eq!(macho.image_base().0, 0x100000000);
 }
 
 // --- Error path tests ---
@@ -308,17 +308,17 @@ fn container_predicates() {
 }
 
 #[test]
-fn mach_file_convenience_methods() {
+fn macho_file_convenience_methods() {
     let data = minimal_thin_64();
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    assert!(mach.is_64bit());
-    assert_eq!(mach.file_size(), data.len());
-    assert_eq!(mach.all_sections().count(), 0); // minimal binary has no sections
+    assert!(macho.is_64bit());
+    assert_eq!(macho.file_size(), data.len());
+    assert_eq!(macho.all_sections().count(), 0); // minimal binary has no sections
 
     // find_load_command
-    let seg_lc = mach.find_load_command(|lc| lc.as_segment().is_some());
+    let seg_lc = macho.find_load_command(|lc| lc.as_segment().is_some());
     assert!(seg_lc.is_some());
 }
 
@@ -326,9 +326,9 @@ fn mach_file_convenience_methods() {
 fn load_command_typed_accessors() {
     let data = minimal_thin_64();
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let lc = &mach.load_commands()[0].kind;
+    let lc = &macho.load_commands()[0].kind;
     assert!(lc.as_segment().is_some());
     assert!(lc.as_uuid().is_none());
     assert!(lc.as_main().is_none());
@@ -340,10 +340,10 @@ fn validation_detects_malformed() {
 
     let data = minimal_thin_64();
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
     // Minimal valid binary should pass
-    let diags = validate::validate(mach);
+    let diags = validate::validate(macho);
     let errors: Vec<_> = diags
         .iter()
         .filter(|d| d.severity == Severity::Error)
@@ -372,10 +372,10 @@ fn dyld_info_only_preserved() {
     data.extend_from_slice(&[0u8; 40]); // remaining fields
 
     let container = macho::parse(&data).expect("failed to parse");
-    let mach = container.first_mach();
-    assert_eq!(mach.load_commands().len(), 1);
+    let macho = container.first_mach();
+    assert_eq!(macho.load_commands().len(), 1);
 
-    match &mach.load_commands()[0].kind {
+    match &macho.load_commands()[0].kind {
         LoadCommand::DyldInfoOnly(_) => {} // correct
         other => panic!("expected DyldInfoOnly, got {}", other.name()),
     }
@@ -404,8 +404,8 @@ fn huge_ncmds_does_not_oom() {
     // error on sizeofcmds mismatch. Either way, no OOM.
     if let Ok(container) = result {
         // Parsed fine — the loop ran out of command region after 1 cmd
-        let mach = container.first_mach();
-        assert!(mach.load_commands().len() <= 1);
+        let macho = container.first_mach();
+        assert!(macho.load_commands().len() <= 1);
     }
 }
 
@@ -436,7 +436,7 @@ fn fat_arch_thin_offset_translation() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         let arch = &fat.arches()[0];
         let thin = ThinFileOffset(0x100);
         let fat_off = arch.thin_to_fat_offset(thin);

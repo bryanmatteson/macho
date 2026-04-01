@@ -1,7 +1,7 @@
 use macho::analysis::deps::compat::{CompatCategory, CompatReport, CompatSeverity};
 use macho::analysis::deps::graph::{DepGraph, ImportProvider, IssueSeverity};
 use macho::metadata::image::DylibLinkKind;
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 
 fn load_binary(path: &str) -> memmap2::Mmap {
     let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
@@ -19,8 +19,8 @@ fn build_graph_libgmalloc() {
     let mmap = load_binary("/usr/lib/libgmalloc.dylib");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
 
         // libgmalloc.dylib should have an install name
         assert!(
@@ -47,8 +47,8 @@ fn build_graph_usr_bin_true() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
 
         // /usr/bin/true is an executable, should not have install_name
         assert!(
@@ -72,8 +72,8 @@ fn build_graph_tar() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
 
         assert!(
             graph.install_name.is_none(),
@@ -97,8 +97,8 @@ fn imports_have_providers() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
 
         for imp in &graph.imports {
             assert!(!imp.name.is_empty(), "import name should not be empty");
@@ -126,8 +126,8 @@ fn imports_have_providers() {
 fn provider_of_lookup() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     if let Some(first_import) = graph.imports.first() {
         let provider = graph.provider_of(&first_import.name);
@@ -144,8 +144,8 @@ fn provider_of_lookup() {
 fn imports_from_ordinal() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     // Find a dylib ordinal that has imports
     let mut found_imports = false;
@@ -175,8 +175,8 @@ fn imports_from_ordinal() {
 fn exports_from_executable() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     let mh = graph.find_export("__mh_execute_header");
     assert!(
@@ -190,8 +190,8 @@ fn exports_from_executable() {
 fn exports_from_dylib() {
     let mmap = load_binary("/usr/lib/libgmalloc.dylib");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     // libgmalloc uses interposition rather than a normal exports trie,
     // so it may have zero trie-based exports. Just verify it doesn't crash.
@@ -202,8 +202,8 @@ fn exports_from_dylib() {
 fn find_export_nonexistent() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     assert!(graph.find_export("_nonexistent_symbol_xyz").is_none());
 }
@@ -215,8 +215,8 @@ fn validate_clean_binary() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
         let issues = graph.validate();
 
         let errors: Vec<_> = issues
@@ -236,8 +236,8 @@ fn validate_dylib() {
     let mmap = load_binary("/usr/lib/libgmalloc.dylib");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let graph = DepGraph::build(mach).expect("failed to build graph");
+    for macho in container.macho_files() {
+        let graph = DepGraph::build(macho).expect("failed to build graph");
         let issues = graph.validate();
 
         let errors: Vec<_> = issues
@@ -258,10 +258,10 @@ fn validate_dylib() {
 fn compat_self_check() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
     let report =
-        CompatReport::check(mach, "/usr/bin/true", None, None).expect("compat check failed");
+        CompatReport::check(macho, "/usr/bin/true", None, None).expect("compat check failed");
 
     assert_eq!(report.target_path, "/usr/bin/true");
     assert!(report.provider_path.is_none());
@@ -320,10 +320,10 @@ fn compat_arch_mismatch() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         if fat.arches().len() >= 2 {
-            let arch1 = &fat.arches()[0].mach;
-            let arch2 = &fat.arches()[1].mach;
+            let arch1 = &fat.arches()[0].macho;
+            let arch2 = &fat.arches()[1].macho;
 
             if arch1.header().cpu_type != arch2.header().cpu_type {
                 let report = CompatReport::check(arch1, "arch1", Some(arch2), Some("arch2"))
@@ -378,8 +378,8 @@ fn compat_file_type_check() {
 fn dylib_versions_are_valid() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     for dylib in &graph.dylibs {
         let parts: Vec<&str> = dylib.current_version.split('.').collect();
@@ -447,8 +447,8 @@ fn issue_severity_display() {
 fn libgmalloc_graph() {
     let mmap = load_binary("/usr/lib/libgmalloc.dylib");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     assert!(
         graph.install_name.is_some(),
@@ -475,11 +475,11 @@ fn multiple_arch_graphs_consistent() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         let graphs: Vec<_> = fat
             .arches()
             .iter()
-            .map(|a| DepGraph::build(&a.mach).expect("failed to build graph"))
+            .map(|a| DepGraph::build(&a.macho).expect("failed to build graph"))
             .collect();
 
         // All arches should have the same set of dylib names
@@ -500,8 +500,8 @@ fn multiple_arch_graphs_consistent() {
 fn reexports_vec_for_non_reexporting_binary() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     // An executable typically doesn't reexport
     let reexports = graph.reexports();
@@ -541,9 +541,9 @@ fn compat_same_binary_as_provider() {
     // links to.
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let report = CompatReport::check(mach, "/usr/bin/true", Some(mach), Some("/usr/bin/true"))
+    let report = CompatReport::check(macho, "/usr/bin/true", Some(macho), Some("/usr/bin/true"))
         .expect("compat check failed");
 
     // Should not crash. Architecture and platform should match.
@@ -572,13 +572,13 @@ fn compat_fat_provider_matches_arch() {
     // Both binaries are fat (x86_64 + arm64e). For each arch slice, the
     // provider should match. We verify by checking that architecture
     // findings are all Info (match), never Incompatible (mismatch).
-    for mach in target_container.mach_files() {
-        let cpu = mach.header().cpu_type;
+    for macho in target_container.macho_files() {
+        let cpu = macho.header().cpu_type;
         let prov_mach = provider_container
             .find_arch(cpu)
             .unwrap_or_else(|| provider_container.first_mach());
 
-        let report = CompatReport::check(mach, "target", Some(prov_mach), Some("provider"))
+        let report = CompatReport::check(macho, "target", Some(prov_mach), Some("provider"))
             .expect("compat check failed");
 
         let arch_findings: Vec<_> = report
@@ -614,8 +614,8 @@ fn minimal_binary_no_imports() {
     // Verify the graph handles this gracefully.
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     // The graph should always be constructable even with zero imports
     assert!(graph.imports_from(9999).is_empty());
@@ -634,8 +634,8 @@ fn minimal_binary_no_imports() {
 fn ordinal_boundary_matches_dylib_count() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     let max_ordinal = graph.dylibs.iter().map(|d| d.ordinal).max().unwrap_or(0);
     assert_eq!(
@@ -664,10 +664,10 @@ fn ordinal_boundary_matches_dylib_count() {
 fn compat_no_provider_produces_target_findings() {
     let mmap = load_binary("/usr/bin/tar");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
     let report =
-        CompatReport::check(mach, "/usr/bin/tar", None, None).expect("compat check failed");
+        CompatReport::check(macho, "/usr/bin/tar", None, None).expect("compat check failed");
 
     // Without a provider, should have no arch/platform/file-type findings
     let cross_findings: Vec<_> = report
@@ -695,8 +695,8 @@ fn compat_no_provider_produces_target_findings() {
 fn reexport_info_has_provider_name_when_ordinal_valid() {
     let mmap = load_binary("/usr/lib/libgmalloc.dylib");
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let graph = DepGraph::build(mach).expect("failed to build graph");
+    let macho = container.first_mach();
+    let graph = DepGraph::build(macho).expect("failed to build graph");
 
     for exp in &graph.exports {
         if let Some(ref reexport) = exp.reexport {

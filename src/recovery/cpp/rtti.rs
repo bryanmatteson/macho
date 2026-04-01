@@ -1,19 +1,19 @@
 use std::collections::BTreeMap;
 
-use crate::Result;
-use crate::format::parse_symbol_table;
 use crate::model::addr::Va;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::recovery::cpp::types::{
     CppBaseClass, CppConfidence, CppEvidence, CppEvidenceKind, CppTypeInfoKind, CppTypeInfoNode,
 };
 use crate::resolve::fixups::{collect_resolved_targets, resolve_pointer_target};
 use crate::resolve::{ResolutionContext, ResolvedTarget};
+use crate::Result;
 
-pub fn build_typeinfo_index(mach: &MachFile<'_>) -> Result<BTreeMap<String, CppTypeInfoNode>> {
-    let symtab = parse_symbol_table(mach)?;
+pub fn build_typeinfo_index(macho: &MachoFile<'_>) -> Result<BTreeMap<String, CppTypeInfoNode>> {
+    let symtab = macho.ext::<SymbolTable<'_>>()?;
     let symbols = symtab.symbols();
-    let resolver = PointerResolver::new(mach);
+    let resolver = PointerResolver::new(macho);
     let mut va_to_symbol = BTreeMap::new();
     for symbol in symbols {
         if symbol.is_defined() && symbol.value != 0 {
@@ -38,12 +38,12 @@ pub fn build_typeinfo_index(mach: &MachFile<'_>) -> Result<BTreeMap<String, CppT
 
         let bases = match kind {
             CppTypeInfoKind::SingleInheritance => {
-                parse_single_base(&resolver, &va_to_symbol, Va(symbol.value), mach.is_64bit())
+                parse_single_base(&resolver, &va_to_symbol, Va(symbol.value), macho.is_64bit())
                     .into_iter()
                     .collect()
             }
             CppTypeInfoKind::VirtualMultipleInheritance => {
-                parse_vmi_bases(&resolver, &va_to_symbol, Va(symbol.value), mach.is_64bit())
+                parse_vmi_bases(&resolver, &va_to_symbol, Va(symbol.value), macho.is_64bit())
             }
             _ => Vec::new(),
         };
@@ -176,10 +176,10 @@ struct PointerResolver<'a> {
 }
 
 impl<'a> PointerResolver<'a> {
-    fn new(mach: &'a MachFile<'a>) -> Self {
+    fn new(macho: &'a MachoFile<'a>) -> Self {
         Self {
-            ctx: ResolutionContext::new(mach),
-            fixups: collect_resolved_targets(mach),
+            ctx: ResolutionContext::new(macho),
+            fixups: collect_resolved_targets(macho),
         }
     }
 
@@ -188,12 +188,12 @@ impl<'a> PointerResolver<'a> {
     }
 
     fn read_u32(&self, va: Va) -> Result<u32> {
-        let bytes = self.ctx.mach().read_bytes_at_va(va, 4)?;
-        Ok(self.ctx.mach().endian().read_u32(bytes.try_into().unwrap()))
+        let bytes = self.ctx.macho().read_bytes_at_va(va, 4)?;
+        Ok(self.ctx.macho().endian().read_u32(bytes.try_into().unwrap()))
     }
 
     fn read_u64(&self, va: Va) -> Result<u64> {
-        let bytes = self.ctx.mach().read_bytes_at_va(va, 8)?;
-        Ok(self.ctx.mach().endian().read_u64(bytes.try_into().unwrap()))
+        let bytes = self.ctx.macho().read_bytes_at_va(va, 8)?;
+        Ok(self.ctx.macho().endian().read_u64(bytes.try_into().unwrap()))
     }
 }

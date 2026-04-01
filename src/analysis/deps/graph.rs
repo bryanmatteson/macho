@@ -5,7 +5,7 @@ use crate::metadata::dyld::exports::parse_exports;
 use crate::metadata::dyld::types::ExportKind;
 use crate::metadata::image::DylibLinkKind;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 #[derive(Debug, Clone)]
 pub struct DepGraph {
@@ -92,10 +92,10 @@ impl std::fmt::Display for IssueSeverity {
 }
 
 impl DepGraph {
-    pub fn build(mach: &MachFile<'_>) -> Result<Self> {
-        let (install_name, dylibs) = collect_dylibs(mach);
-        let imports = collect_imports(mach, &dylibs)?;
-        let exports = collect_exports(mach, &dylibs)?;
+    pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
+        let (install_name, dylibs) = collect_dylibs(macho);
+        let imports = collect_imports(macho, &dylibs)?;
+        let exports = collect_exports(macho, &dylibs)?;
 
         Ok(Self {
             install_name,
@@ -203,12 +203,12 @@ impl DepGraph {
     }
 }
 
-fn collect_dylibs(mach: &MachFile<'_>) -> (Option<String>, Vec<NormalizedDylib>) {
+fn collect_dylibs(macho: &MachoFile<'_>) -> (Option<String>, Vec<NormalizedDylib>) {
     let mut install_name = None;
     let mut dylibs = Vec::new();
     let mut ordinal: usize = 0;
 
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::IdDylib(d) => {
                 install_name = Some(d.name.clone());
@@ -294,9 +294,12 @@ fn resolve_ordinal(ordinal: i32, dylibs: &[NormalizedDylib]) -> ImportProvider {
     }
 }
 
-fn collect_imports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Vec<ResolvedImport>> {
+fn collect_imports(
+    macho: &MachoFile<'_>,
+    dylibs: &[NormalizedDylib],
+) -> Result<Vec<ResolvedImport>> {
     // Try chained fixups first (modern)
-    if let Ok(fixups) = parse_chained_fixups(mach) {
+    if let Ok(fixups) = parse_chained_fixups(macho) {
         let mut imports = Vec::with_capacity(fixups.imports.len());
         for ci in &fixups.imports {
             imports.push(ResolvedImport {
@@ -310,7 +313,7 @@ fn collect_imports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Ve
     }
 
     // Fall back to legacy bind entries
-    if let Ok((regular, weak, lazy)) = parse_bind_entries(mach) {
+    if let Ok((regular, weak, lazy)) = parse_bind_entries(macho) {
         let mut seen = std::collections::HashSet::new();
         let mut imports = Vec::new();
 
@@ -330,8 +333,11 @@ fn collect_imports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Ve
     Ok(Vec::new())
 }
 
-fn collect_exports(mach: &MachFile<'_>, dylibs: &[NormalizedDylib]) -> Result<Vec<ResolvedExport>> {
-    let raw_exports = match parse_exports(mach) {
+fn collect_exports(
+    macho: &MachoFile<'_>,
+    dylibs: &[NormalizedDylib],
+) -> Result<Vec<ResolvedExport>> {
+    let raw_exports = match parse_exports(macho) {
         Ok(e) => e,
         Err(_) => return Ok(Vec::new()),
     };

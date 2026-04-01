@@ -1,6 +1,6 @@
-use crate::metadata::codesign::parse_code_signature;
+use crate::metadata::codesign::CodeSignature;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
@@ -19,12 +19,12 @@ pub struct ResignPlan {
 }
 
 impl ResignPlan {
-    pub fn from_mach(mach: &MachFile<'_>) -> Self {
-        let has_signature_load_command = mach
+    pub fn from_mach(macho: &MachoFile<'_>) -> Self {
+        let has_signature_load_command = macho
             .load_commands()
             .iter()
             .any(|lc| matches!(lc.kind, LoadCommand::CodeSignature(_)));
-        let sig = parse_code_signature(mach);
+        let sig = macho.ext::<CodeSignature<'_>>();
 
         let (
             was_signed,

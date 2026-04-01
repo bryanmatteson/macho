@@ -211,18 +211,18 @@ The library API is intentionally close to the binary model. Parse once, then cho
 ### Parse a container and inspect symbols
 
 ```rust
-use macho::ext::MachExt;
+use macho::ext::MachoExt;
 use macho::model::symbol::SymbolTable;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = std::fs::read("/usr/bin/true")?;
     let container = macho::parse(&bytes)?;
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    println!("file type: {}", mach.header().file_type.name());
-    println!("segments: {}", mach.segments().len());
+    println!("file type: {}", macho.header().file_type.name());
+    println!("segments: {}", macho.segments().len());
 
-    let symtab = mach.ext::<SymbolTable>()?;
+    let symtab = macho.ext::<SymbolTable>()?;
     if let Some(sym) = symtab.find_by_name("__mh_execute_header") {
         println!("__mh_execute_header = {:#x}", sym.value);
     }
@@ -239,9 +239,9 @@ use macho::edit::transaction::PatchTransaction;
 fn rewrite(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
     let container = macho::parse(&bytes)?;
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut txn = PatchTransaction::new(mach);
+    let mut txn = PatchTransaction::new(macho);
     txn.add_rpath("@executable_path/../Frameworks");
 
     let preview = txn.preview()?;
@@ -256,7 +256,7 @@ fn rewrite(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
 
 ```rust
 use macho::edit::transaction::PatchTransaction;
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::model::owned::OwnedFatBinary;
 
 fn rewrite_arm64(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
@@ -264,36 +264,36 @@ fn rewrite_arm64(path: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let container = macho::parse(&bytes)?;
 
     match &container {
-        MachContainer::Fat(fat) => {
+        MachoContainer::Fat(fat) => {
             let arm64_index = fat
                 .arches()
                 .iter()
                 .position(|arch| arch.spec.name() == "arm64")
                 .ok_or("missing arm64 slice")?;
 
-            let mut txn = PatchTransaction::new(&fat.arches()[arm64_index].mach);
+            let mut txn = PatchTransaction::new(&fat.arches()[arm64_index].macho);
             txn.add_rpath("@executable_path/../Frameworks");
 
             let mut owned = OwnedFatBinary::from_fat(fat, &bytes);
             owned.replace_arch(arm64_index, txn.commit()?)?;
             Ok(owned.try_into_bytes()?)
         }
-        MachContainer::Thin(_) => Err("expected fat binary".into()),
+        MachoContainer::Thin(_) => Err("expected fat binary".into()),
     }
 }
 ```
 
 ### Useful API entry points
 
-- `macho::parse(&[u8]) -> Result<MachContainer>`
-- `MachContainer::{is_thin, is_fat, mach_files, first_mach, find_arch}`
-- `MachFile::{header, load_commands, segments, all_sections, address_map, section_bytes, read_bytes_at_va, read_bytes_at_rva, ext}`
+- `macho::parse(&[u8]) -> Result<MachoContainer>`
+- `MachoContainer::{is_thin, is_fat, macho_files, first_mach, find_arch}`
+- `MachoFile::{header, load_commands, segments, all_sections, address_map, section_bytes, read_bytes_at_va, read_bytes_at_rva, ext}`
 - `OwnedFatBinary::{from_fat, replace_arch, try_into_bytes}` for rebuilding universal containers after per-slice edits
-- `macho::validate::validate(&MachFile)` for structural diagnostics
+- `macho::validate::validate(&MachoFile)` for structural diagnostics
 - `macho::analysis::snapshot::ContainerSnapshot::from_container(&container)` for structured analysis output
 - `macho::diff::diff_containers(&old, &new)` for semantic comparison
 - `macho::audit::audit_slice(&slice)` for rule-based findings
-- `macho::edit::MachEditor` and `macho::edit::transaction::PatchTransaction` for structural rewriting
+- `macho::edit::MachoEditor` and `macho::edit::transaction::PatchTransaction` for structural rewriting
 
 ## Audit Rules Included
 

@@ -10,7 +10,7 @@ use macho::analysis::snapshot::{
     CodesignSnapshot, ContainerFormat, ExportSnapshot, FixupSnapshot, HeaderSnapshot, ObjCSnapshot,
     SliceSnapshot,
 };
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::symbols::imports::ImportRecord;
 
 fn snapshot_for(path: &str) -> ContainerSnapshot {
@@ -423,7 +423,7 @@ fn container_methods_match_snapshot_helpers() {
         );
     }
 
-    if let MachContainer::Fat(fat) = &container {
+    if let MachoContainer::Fat(fat) = &container {
         assert_eq!(fat.common_exports(), container.common_exports());
         assert_eq!(fat.common_imports(), container.common_imports());
         assert_eq!(fat.all_signed(), container.all_signed());

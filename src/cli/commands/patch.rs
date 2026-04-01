@@ -1,5 +1,5 @@
-use crate::model::container::MachContainer;
-use crate::model::mach_file::MachFile;
+use crate::model::container::MachoContainer;
+use crate::model::macho_file::MachoFile;
 use crate::model::validate;
 use crate::mutate::owned::OwnedFatBinary;
 use crate::mutate::patch::PatchOp;
@@ -206,9 +206,9 @@ fn run_patch(
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.display()))?;
 
     let output_bytes = match &container {
-        MachContainer::Thin(mach) => {
+        MachoContainer::Thin(macho) => {
             if let Some(filter) = arch_filter {
-                let arch_name = arch_name_for_mach(mach);
+                let arch_name = arch_name_for_mach(macho);
                 if !arch_name.eq_ignore_ascii_case(filter) {
                     anyhow::bail!(
                         "no architecture matching '{filter}' found (available: {arch_name})"
@@ -216,8 +216,8 @@ fn run_patch(
                 }
             }
 
-            let prepared = prepare_patch(mach, &ops)?;
-            let arch_name = arch_name_for_mach(mach);
+            let prepared = prepare_patch(macho, &ops)?;
+            let arch_name = arch_name_for_mach(macho);
             emit_preview(&[(&arch_name, &prepared)], opts.dry_run);
             if !opts.force && !prepared.preview.validation_errors.is_empty() {
                 let details = prepared.preview.validation_errors.join("\n  ");
@@ -227,7 +227,7 @@ fn run_patch(
             }
             prepared.bytes
         }
-        MachContainer::Fat(fat) => {
+        MachoContainer::Fat(fat) => {
             if arch_filter.is_none() && has_raw_byte_patch(&ops) {
                 anyhow::bail!(
                     "raw byte patching a fat binary requires --arch because offsets are slice-relative"
@@ -240,7 +240,7 @@ fn run_patch(
                 .copied()
                 .map(|index| {
                     let arch = &fat.arches()[index];
-                    Ok((index, arch.spec.name(), prepare_patch(&arch.mach, &ops)?))
+                    Ok((index, arch.spec.name(), prepare_patch(&arch.macho, &ops)?))
                 })
                 .collect::<Result<_>>()?;
 
@@ -278,7 +278,7 @@ fn run_patch(
             let reparsed = macho::parse(&rebuilt).with_context(|| {
                 format!("failed to re-parse rebuilt fat binary {}", input.display())
             })?;
-            let MachContainer::Fat(rebuilt_fat) = reparsed else {
+            let MachoContainer::Fat(rebuilt_fat) = reparsed else {
                 anyhow::bail!("rebuilt output is no longer a fat binary");
             };
             if !opts.force {
@@ -286,7 +286,7 @@ fn run_patch(
                 for index in &selected {
                     let arch = &rebuilt_fat.arches()[*index];
                     errors.extend(
-                        validation_errors_for_mach(&arch.mach)
+                        validation_errors_for_mach(&arch.macho)
                             .into_iter()
                             .map(|err| format!("{}: {err}", arch.spec.name())),
                     );
@@ -390,8 +390,8 @@ fn temp_path_for(path: &Path) -> PathBuf {
     parent.join(format!(".{stem}.{pid}.{nanos}.tmp"))
 }
 
-fn prepare_patch(mach: &MachFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> {
-    let mut txn = PatchTransaction::new(mach);
+fn prepare_patch(macho: &MachoFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> {
+    let mut txn = PatchTransaction::new(macho);
     for op in ops {
         txn.add_op(op.clone());
     }
@@ -501,8 +501,8 @@ fn select_fat_arch_indices(
     Ok(selected)
 }
 
-fn validation_errors_for_mach(mach: &MachFile<'_>) -> Vec<String> {
-    validate::validate(mach)
+fn validation_errors_for_mach(macho: &MachoFile<'_>) -> Vec<String> {
+    validate::validate(macho)
         .into_iter()
         .filter(|diag| diag.severity == validate::Severity::Error)
         .map(|diag| format!("{}: {}", diag.code.0, diag.message))

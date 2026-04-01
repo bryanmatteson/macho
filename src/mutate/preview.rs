@@ -2,7 +2,7 @@ use crate::Result;
 use crate::analysis::diff::{DiffReport, diff_slice_snapshots};
 use crate::analysis::snapshot::SliceSnapshot;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::validate;
 use crate::mutate::patch::PatchOp;
 use crate::mutate::resign::ResignPlan;
@@ -29,9 +29,9 @@ pub enum SignatureOutcome {
 }
 
 pub fn build_preview(
-    original_mach: &MachFile<'_>,
+    original_mach: &MachoFile<'_>,
     candidate_bytes: &[u8],
-    candidate_mach: &MachFile<'_>,
+    candidate_mach: &MachoFile<'_>,
     ops: &[PatchOp],
 ) -> Result<PatchPreview> {
     let original_commands: Vec<LoadCommand> = original_mach
@@ -46,8 +46,8 @@ pub fn build_preview(
         .collect();
 
     let semantic_diff = diff_slice_snapshots(
-        &SliceSnapshot::from_mach(original_mach),
-        &SliceSnapshot::from_mach(candidate_mach),
+        &SliceSnapshot::from_macho(original_mach),
+        &SliceSnapshot::from_macho(candidate_mach),
     );
 
     let diags = validate::validate(candidate_mach);
@@ -95,8 +95,9 @@ pub fn build_preview(
     })
 }
 
-fn has_code_signature(mach: &MachFile<'_>) -> bool {
-    mach.load_commands()
+fn has_code_signature(macho: &MachoFile<'_>) -> bool {
+    macho
+        .load_commands()
         .iter()
         .any(|lc| matches!(lc.kind, LoadCommand::CodeSignature(_)))
 }

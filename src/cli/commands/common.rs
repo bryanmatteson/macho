@@ -1,14 +1,14 @@
-use crate::model::container::MachContainer;
+use crate::model::container::MachoContainer;
 use crate::model::header::ArchSpec;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use anyhow::{Result, bail};
 use macho::analysis::snapshot::ContainerSnapshot;
 use std::path::Path;
 
-pub fn arch_name_for_mach(mach: &MachFile<'_>) -> String {
+pub fn arch_name_for_mach(macho: &MachoFile<'_>) -> String {
     let spec = ArchSpec {
-        cpu_type: mach.header().cpu_type,
-        cpu_subtype: mach.header().cpu_subtype,
+        cpu_type: macho.header().cpu_type,
+        cpu_subtype: macho.header().cpu_subtype,
     };
     spec.name()
 }
@@ -35,21 +35,21 @@ pub fn filter_snapshot_by_arch(
 }
 
 pub fn for_each_selected_mach(
-    container: &MachContainer<'_>,
+    container: &MachoContainer<'_>,
     arch_filter: Option<&str>,
-    mut f: impl FnMut(&MachFile<'_>, &str, bool) -> Result<()>,
+    mut f: impl FnMut(&MachoFile<'_>, &str, bool) -> Result<()>,
 ) -> Result<()> {
     match container {
-        MachContainer::Thin(mach) => {
-            let arch_name = arch_name_for_mach(mach);
+        MachoContainer::Thin(macho) => {
+            let arch_name = arch_name_for_mach(macho);
             if let Some(filter) = arch_filter {
                 if !arch_name.eq_ignore_ascii_case(filter) {
                     bail!("no architecture matching '{filter}' found (available: {arch_name})");
                 }
             }
-            f(mach, &arch_name, false)?;
+            f(macho, &arch_name, false)?;
         }
-        MachContainer::Fat(fat) => {
+        MachoContainer::Fat(fat) => {
             let mut matched = false;
             let show_headers = fat.arches().len() > 1;
 
@@ -62,7 +62,7 @@ pub fn for_each_selected_mach(
                 }
 
                 matched = true;
-                f(&arch.mach, &arch_name, show_headers)?;
+                f(&arch.macho, &arch_name, show_headers)?;
             }
 
             if !matched {

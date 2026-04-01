@@ -1,5 +1,5 @@
 use crate::format::relocations::relocations_for_section;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
@@ -30,11 +30,11 @@ pub fn run(args: RelocationsArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_relocations(mach, &args)?;
+            print_relocations(macho, &args)?;
             if show_header {
                 println!();
             }
@@ -45,10 +45,10 @@ pub fn run(args: RelocationsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_relocations(mach: &MachFile<'_>, args: &RelocationsArgs) -> Result<()> {
+fn print_relocations(macho: &MachoFile<'_>, args: &RelocationsArgs) -> Result<()> {
     let mut total = 0usize;
 
-    for seg in mach.segments() {
+    for seg in macho.segments() {
         for sect in &seg.sections {
             if sect.nreloc == 0 {
                 continue;
@@ -64,7 +64,7 @@ fn print_relocations(mach: &MachFile<'_>, args: &RelocationsArgs) -> Result<()> 
                 }
             }
 
-            let relocs = relocations_for_section(mach, sect).with_context(|| {
+            let relocs = relocations_for_section(macho, sect).with_context(|| {
                 format!("failed to parse relocations for {seg_name},{sect_name}")
             })?;
 

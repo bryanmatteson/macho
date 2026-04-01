@@ -145,9 +145,9 @@ Move here:
 
 Public role:
 
-- `parse(&[u8]) -> MachContainer`
+- `parse(&[u8]) -> MachoContainer`
 - read-only Mach-O and fat-container types
-- shared extension traits like `MachExt`
+- shared extension traits like `MachoExt`
 - structural validation diagnostics
 
 Must not own:
@@ -457,7 +457,7 @@ so core container types only expose model-centric operations:
 
 - `is_thin`
 - `is_fat`
-- `mach_files`
+- `macho_files`
 - `first_mach`
 - arch lookup helpers
 

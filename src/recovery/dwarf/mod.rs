@@ -1,26 +1,26 @@
 use gimli::{DwarfSections, SectionId};
 
 use crate::error::{Error, Result};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
-pub fn has_dwarf_sections(mach: &MachFile<'_>) -> bool {
-    mach.all_sections()
+pub fn has_dwarf_sections(macho: &MachoFile<'_>) -> bool {
+    macho.all_sections()
         .any(|section| section.segment_name == "__DWARF" || section.section_name == "__debug_info")
 }
 
-pub fn load_dwarf(mach: &MachFile<'_>) -> Result<Option<DwarfSections<Vec<u8>>>> {
-    if !has_dwarf_sections(mach) {
+pub fn load_dwarf(macho: &MachoFile<'_>) -> Result<Option<DwarfSections<Vec<u8>>>> {
+    if !has_dwarf_sections(macho) {
         return Ok(None);
     }
 
-    let dwarf = DwarfSections::load(|id| load_section_bytes(mach, id))
+    let dwarf = DwarfSections::load(|id| load_section_bytes(macho, id))
         .map_err(|err| Error::Format(format!("failed to load DWARF sections: {err}")))?;
     Ok(Some(dwarf))
 }
 
-fn load_section_bytes(mach: &MachFile<'_>, id: SectionId) -> Result<Vec<u8>> {
+fn load_section_bytes(macho: &MachoFile<'_>, id: SectionId) -> Result<Vec<u8>> {
     let wanted = macho_section_name(id);
-    let Some(section) = mach
+    let Some(section) = macho
         .all_sections()
         .find(|section| section.section_name == wanted.as_str())
     else {
@@ -31,7 +31,7 @@ fn load_section_bytes(mach: &MachFile<'_>, id: SectionId) -> Result<Vec<u8>> {
         return Ok(Vec::new());
     }
 
-    mach.read_bytes_at(section.offset, section.size as usize)
+    macho.read_bytes_at(section.offset, section.size as usize)
         .map(|bytes| bytes.to_vec())
 }
 

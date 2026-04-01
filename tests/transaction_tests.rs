@@ -1,18 +1,18 @@
 mod support;
 
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::model::load_command::LoadCommand;
-use macho::model::mach_file::MachFile;
+use macho::model::macho_file::MachoFile;
 use macho::mutate::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
 use std::path::Path;
 
-fn with_thin_mach(f: impl FnOnce(&macho::model::mach_file::MachFile<'_>)) {
+fn with_thin_mach(f: impl FnOnce(&macho::model::macho_file::MachoFile<'_>)) {
     let source = Path::new("/usr/bin/true");
     let data = std::fs::read(source).expect("read");
     let container = macho::parse(&data).expect("parse");
     match &container {
-        MachContainer::Fat(fat) => f(&fat.arches()[0].mach),
-        MachContainer::Thin(mach) => f(mach),
+        MachoContainer::Fat(fat) => f(&fat.arches()[0].macho),
+        MachoContainer::Thin(macho) => f(macho),
     }
 }
 
@@ -20,8 +20,8 @@ fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-fn infer_page_size(mach: &MachFile<'_>) -> usize {
-    for seg in mach.segments() {
+fn infer_page_size(macho: &MachoFile<'_>) -> usize {
+    for seg in macho.segments() {
         if seg.file_size > 0 && seg.file_offset.0 > 0 {
             let offset = seg.file_offset.0 as usize;
             if offset % 0x4000 == 0 {
@@ -35,7 +35,7 @@ fn infer_page_size(mach: &MachFile<'_>) -> usize {
     0x1000
 }
 
-fn expected_data_shift(original: &MachFile<'_>, rebuilt: &MachFile<'_>) -> usize {
+fn expected_data_shift(original: &MachoFile<'_>, rebuilt: &MachoFile<'_>) -> usize {
     let header_size = original.bitness().header_size();
     let page_size = infer_page_size(original);
     let old_start = align_up(
@@ -49,8 +49,8 @@ fn expected_data_shift(original: &MachFile<'_>, rebuilt: &MachFile<'_>) -> usize
     new_start - old_start
 }
 
-fn main_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
-    mach.load_commands().iter().find_map(|lc| {
+fn main_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
+    macho.load_commands().iter().find_map(|lc| {
         if let LoadCommand::Main(entry) = &lc.kind {
             Some(entry.entry_offset)
         } else {
@@ -61,8 +61,8 @@ fn main_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
 
 #[test]
 fn transaction_add_rpath_preview() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath("/opt/test");
         let preview = txn.preview().expect("preview");
 
@@ -74,8 +74,8 @@ fn transaction_add_rpath_preview() {
 
 #[test]
 fn transaction_signature_invalidation_detected() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath("/opt/test");
         let preview = txn.preview().expect("preview");
 
@@ -89,24 +89,27 @@ fn transaction_signature_invalidation_detected() {
 
 #[test]
 fn transaction_commit_produces_valid_binary() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath("/opt/test");
         let bytes = txn.commit().expect("commit");
 
         // Reparse the result
         let reparsed = macho::parse(&bytes).expect("reparse");
-        let mach2 = reparsed.first_mach();
+        let macho2 = reparsed.first_mach();
 
         // Should have one more load command
-        assert_eq!(mach2.load_commands().len(), mach.load_commands().len() + 1);
+        assert_eq!(
+            macho2.load_commands().len(),
+            macho.load_commands().len() + 1
+        );
     });
 }
 
 #[test]
 fn transaction_remove_rpath_no_op_on_missing() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.remove_rpath("/nonexistent/path");
         let preview = txn.preview().expect("preview");
 
@@ -117,8 +120,8 @@ fn transaction_remove_rpath_no_op_on_missing() {
 
 #[test]
 fn transaction_noop_edit_does_not_invalidate_signature() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.remove_rpath("/definitely/not/present");
         let preview = txn.preview().expect("preview");
 
@@ -131,8 +134,8 @@ fn transaction_noop_edit_does_not_invalidate_signature() {
 
 #[test]
 fn transaction_remove_code_signature_reports_removed_outcome() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.remove_code_signature();
         let preview = txn.preview().expect("preview");
 
@@ -142,17 +145,17 @@ fn transaction_remove_code_signature_reports_removed_outcome() {
 
 #[test]
 fn transaction_remove_code_signature() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.remove_code_signature();
         let bytes = txn.commit().expect("commit");
 
         let reparsed = macho::parse(&bytes).expect("reparse");
-        let mach2 = reparsed.first_mach();
+        let macho2 = reparsed.first_mach();
 
         // Should not have LC_CODE_SIGNATURE
         assert!(
-            !mach2.load_commands().iter().any(|lc| {
+            !macho2.load_commands().iter().any(|lc| {
                 matches!(
                     lc.kind,
                     macho::model::load_command::LoadCommand::CodeSignature(_)
@@ -165,8 +168,8 @@ fn transaction_remove_code_signature() {
 
 #[test]
 fn transaction_multiple_ops() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath("/first");
         txn.add_rpath("/second");
         let preview = txn.preview().expect("preview");
@@ -178,8 +181,8 @@ fn transaction_multiple_ops() {
 
 #[test]
 fn transaction_preview_no_validation_errors_on_valid_ops() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath("/opt/test");
         let preview = txn.preview().expect("preview");
         assert!(
@@ -191,8 +194,8 @@ fn transaction_preview_no_validation_errors_on_valid_ops() {
 
 #[test]
 fn transaction_patch_bytes_out_of_bounds_fails_cleanly() {
-    with_thin_mach(|mach| {
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let mut txn = PatchTransaction::new(macho);
         txn.patch_bytes(u64::MAX, vec![0x90]);
 
         let err = txn.preview().expect_err("preview should fail");
@@ -215,16 +218,16 @@ fn patch_op_display() {
 
 #[test]
 fn transaction_build_unchecked_preserves_shifted_entrypoint() {
-    with_thin_mach(|mach| {
-        let original_entry = main_entry_offset(mach).expect("expected LC_MAIN");
-        let mut txn = PatchTransaction::new(mach);
+    with_thin_mach(|macho| {
+        let original_entry = main_entry_offset(macho).expect("expected LC_MAIN");
+        let mut txn = PatchTransaction::new(macho);
         txn.add_rpath(format!("/{}", "c".repeat(0x5000)));
 
         let bytes = txn.build_unchecked().expect("build_unchecked");
         let reparsed = macho::parse(&bytes).expect("reparse");
         let rebuilt = reparsed.first_mach();
 
-        let delta = expected_data_shift(mach, rebuilt);
+        let delta = expected_data_shift(macho, rebuilt);
         assert!(delta > 0, "test must force a data-region shift");
 
         let rebuilt_entry = main_entry_offset(rebuilt).expect("expected LC_MAIN after rebuild");

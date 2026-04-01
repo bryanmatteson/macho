@@ -6,7 +6,7 @@ use crate::format::io::pod;
 use crate::metadata::dyld::chained::{ChainedFixups, parse_chained_fixups};
 use crate::metadata::dyld::types::FixupKind;
 use crate::model::addr::{ThinFileOffset, Va};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Resolves pointers in ObjC metadata, handling chained fixups.
 ///
@@ -14,7 +14,7 @@ use crate::model::mach_file::MachFile;
 /// fixup entries, not actual addresses. This resolver maps file offsets to
 /// their resolved targets.
 pub struct ObjCResolver<'data> {
-    mach: &'data MachFile<'data>,
+    macho: &'data MachoFile<'data>,
     /// Map from file offset -> resolved fixup
     fixup_map: HashMap<u64, ResolvedFixup>,
     image_base: u64,
@@ -28,19 +28,19 @@ enum ResolvedFixup {
 }
 
 impl<'data> ObjCResolver<'data> {
-    pub fn new(mach: &'data MachFile<'data>) -> Self {
-        let image_base = mach.image_base().0;
-        let endian = mach.endian();
+    pub fn new(macho: &'data MachoFile<'data>) -> Self {
+        let image_base = macho.image_base().0;
+        let endian = macho.endian();
 
         // Build fixup map from chained fixups if available, else from
         // legacy bind/rebase opcodes
-        let fixup_map = match parse_chained_fixups(mach) {
-            Ok(fixups) => build_fixup_map(mach, &fixups),
-            Err(_) => build_legacy_fixup_map(mach),
+        let fixup_map = match parse_chained_fixups(macho) {
+            Ok(fixups) => build_fixup_map(macho, &fixups),
+            Err(_) => build_legacy_fixup_map(macho),
         };
 
         Self {
-            mach,
+            macho,
             fixup_map,
             image_base,
             endian,
@@ -59,7 +59,7 @@ impl<'data> ObjCResolver<'data> {
                 ResolvedFixup::Rebase(_) => {
                     // Legacy rebase sentinel — read the raw pointer value
                     // (the linker already wrote the correct un-slid VA)
-                    let raw = pod::read_pod::<u64>(self.mach.bytes(), file_offset as usize)
+                    let raw = pod::read_pod::<u64>(self.macho.bytes(), file_offset as usize)
                         .map(|v| self.endian.interpret_u64(v))?;
                     if raw == 0 {
                         Ok(None)
@@ -72,7 +72,7 @@ impl<'data> ObjCResolver<'data> {
         }
 
         // No fixup — read raw pointer value
-        let raw = pod::read_pod::<u64>(self.mach.bytes(), file_offset as usize)
+        let raw = pod::read_pod::<u64>(self.macho.bytes(), file_offset as usize)
             .map(|v| self.endian.interpret_u64(v))?;
 
         if raw == 0 {
@@ -84,7 +84,7 @@ impl<'data> ObjCResolver<'data> {
 
     /// Read a pointer at a VA, resolving chained fixups.
     pub fn read_pointer_at_va(&self, va: Va) -> Result<Option<Va>> {
-        let offset = self.mach.address_map().va_to_thin_offset(va)?;
+        let offset = self.macho.address_map().va_to_thin_offset(va)?;
         self.read_pointer_at_offset(offset.0)
     }
 
@@ -93,8 +93,8 @@ impl<'data> ObjCResolver<'data> {
         if va.0 == 0 {
             return Err(Error::Address("null pointer".into()));
         }
-        let offset = self.mach.address_map().va_to_thin_offset(va)?;
-        let data = self.mach.bytes();
+        let offset = self.macho.address_map().va_to_thin_offset(va)?;
+        let data = self.macho.bytes();
         let start = offset.as_usize();
         if start >= data.len() {
             return Err(Error::Bounds {
@@ -111,7 +111,7 @@ impl<'data> ObjCResolver<'data> {
 
     /// Get the file offset for a VA.
     pub fn va_to_offset(&self, va: Va) -> Result<ThinFileOffset> {
-        self.mach.address_map().va_to_thin_offset(va)
+        self.macho.address_map().va_to_thin_offset(va)
     }
 
     /// Get the import name if a fixup at this file offset is a bind.
@@ -122,8 +122,8 @@ impl<'data> ObjCResolver<'data> {
         }
     }
 
-    pub fn mach(&self) -> &MachFile<'data> {
-        self.mach
+    pub fn macho(&self) -> &MachoFile<'data> {
+        self.macho
     }
 
     pub fn image_base(&self) -> u64 {
@@ -135,12 +135,15 @@ impl<'data> ObjCResolver<'data> {
     }
 }
 
-fn build_fixup_map(mach: &MachFile<'_>, fixups: &ChainedFixups<'_>) -> HashMap<u64, ResolvedFixup> {
+fn build_fixup_map(
+    macho: &MachoFile<'_>,
+    fixups: &ChainedFixups<'_>,
+) -> HashMap<u64, ResolvedFixup> {
     let mut map = HashMap::new();
 
     for fixup in &fixups.fixups {
         // Convert segment_index + segment_offset to file offset
-        let seg = match mach.segments().get(fixup.segment_index) {
+        let seg = match macho.segments().get(fixup.segment_index) {
             Some(s) => s,
             None => continue,
         };
@@ -164,13 +167,13 @@ fn build_fixup_map(mach: &MachFile<'_>, fixups: &ChainedFixups<'_>) -> HashMap<u
     map
 }
 
-fn build_legacy_fixup_map(mach: &MachFile<'_>) -> HashMap<u64, ResolvedFixup> {
+fn build_legacy_fixup_map(macho: &MachoFile<'_>) -> HashMap<u64, ResolvedFixup> {
     let mut map = HashMap::new();
 
     // Import bind entries — these give us symbol names at specific offsets
-    if let Ok((regular, weak, lazy)) = crate::metadata::dyld::bind::parse_bind_entries(mach) {
+    if let Ok((regular, weak, lazy)) = crate::metadata::dyld::bind::parse_bind_entries(macho) {
         for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
-            if let Some(seg) = mach.segments().get(entry.segment_index) {
+            if let Some(seg) = macho.segments().get(entry.segment_index) {
                 let file_offset = seg.file_offset.0 + entry.segment_offset;
                 map.insert(
                     file_offset,
@@ -183,9 +186,9 @@ fn build_legacy_fixup_map(mach: &MachFile<'_>) -> HashMap<u64, ResolvedFixup> {
     }
 
     // Rebase entries — these tell us which pointers contain relocated addresses
-    if let Ok(rebases) = crate::metadata::dyld::rebase::parse_rebase_entries(mach) {
+    if let Ok(rebases) = crate::metadata::dyld::rebase::parse_rebase_entries(macho) {
         for entry in &rebases {
-            if let Some(seg) = mach.segments().get(entry.segment_index) {
+            if let Some(seg) = macho.segments().get(entry.segment_index) {
                 let file_offset = seg.file_offset.0 + entry.segment_offset;
                 // For rebases, the actual target is the raw value in the file
                 // (the linker already wrote the correct un-slid VA)

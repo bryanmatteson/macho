@@ -6,7 +6,7 @@ use crate::model::addr::Va;
 
 pub fn parse_ivar_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<ObjCIvar>> {
     let offset = resolver.va_to_offset(va)?;
-    let data = resolver.mach().bytes();
+    let data = resolver.macho().bytes();
     let endian = resolver.endian();
 
     let header: RawMethodListHeader = pod::read_pod(data, offset.as_usize())?;

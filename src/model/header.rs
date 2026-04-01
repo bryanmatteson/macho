@@ -269,13 +269,13 @@ impl FileType {
 }
 
 #[derive(Debug, Clone)]
-pub struct MachHeader {
+pub struct MachoHeader {
     pub magic: MagicNumber,
     pub cpu_type: CpuType,
     pub cpu_subtype: CpuSubtype,
     pub file_type: FileType,
     pub ncmds: u32,
     pub sizeofcmds: u32,
-    pub flags: MachHeaderFlags,
+    pub flags: MachoHeaderFlags,
     pub reserved: u32,
 }

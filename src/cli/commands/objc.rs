@@ -131,8 +131,8 @@ fn run_list(
     for_each_selected_mach(
         &container,
         arch_filter.as_deref(),
-        |mach, arch_name, show_header| {
-            let inspector = ImageInspector::new(mach);
+        |macho, arch_name, show_header| {
+            let inspector = ImageInspector::new(macho);
             if show_header {
                 println!("=== {arch_name} ===");
             }
@@ -159,8 +159,8 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
 
     if json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |mach, arch_name, _| {
-            let inspector = ImageInspector::new(mach);
+        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
+            let inspector = ImageInspector::new(macho);
             let graph = match inspector.parse_objc_graph() {
                 Ok(graph) => graph,
                 Err(_) => {
@@ -191,8 +191,8 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
             println!("{}", serde_json::to_string_pretty(&result)?);
         }
     } else {
-        for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
-            let inspector = ImageInspector::new(mach);
+        for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
+            let inspector = ImageInspector::new(macho);
             if show_header {
                 println!("=== {arch_name} ===");
             }
@@ -302,8 +302,8 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
 
     if json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |mach, arch_name, _| {
-            let inspector = ImageInspector::new(mach);
+        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
+            let inspector = ImageInspector::new(macho);
             let graph = match inspector.parse_objc_graph() {
                 Ok(graph) => graph,
                 Err(_) => {
@@ -339,8 +339,8 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
         return Ok(());
     }
 
-    for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
-        let inspector = ImageInspector::new(mach);
+    for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
+        let inspector = ImageInspector::new(macho);
         if show_header {
             println!("=== {arch_name} ===");
         }
@@ -509,8 +509,8 @@ fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>, json: bool) -
 
     if json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |mach, arch_name, _| {
-            let inspector = ImageInspector::new(mach);
+        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
+            let inspector = ImageInspector::new(macho);
             let graph = match inspector.parse_objc_graph() {
                 Ok(graph) => graph,
                 Err(_) => {
@@ -537,8 +537,8 @@ fn run_xrefs(path: &Path, arch: Option<&str>, class: Option<&str>, json: bool) -
         return Ok(());
     }
 
-    for_each_selected_mach(&container, arch, |mach, arch_name, show_header| {
-        let inspector = ImageInspector::new(mach);
+    for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
+        let inspector = ImageInspector::new(macho);
         if show_header {
             println!("=== {arch_name} ===");
         }

@@ -1,8 +1,8 @@
 use serde::Serialize;
 
-use crate::format::parse_symbol_table;
 use crate::model::addr::Va;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::symbols::demangle::demangle_symbol;
 use crate::{Error, Result};
 
@@ -49,12 +49,12 @@ enum ResolvedSlotValue {
 }
 
 impl VtableIndex {
-    pub fn build(mach: &MachFile<'_>) -> Result<Self> {
-        let symtab = parse_symbol_table(mach)?;
+    pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
+        let symtab = macho.ext::<SymbolTable<'_>>()?;
         let symbols = symtab.symbols();
 
-        let ptr_size: u64 = if mach.is_64bit() { 8 } else { 4 };
-        let image_base = mach.image_base().0;
+        let ptr_size: u64 = if macho.is_64bit() { 8 } else { 4 };
+        let image_base = macho.image_base().0;
 
         // Build a map of VA -> symbol name for resolving slot targets
         let mut va_to_name: std::collections::HashMap<u64, &str> = std::collections::HashMap::new();
@@ -67,7 +67,7 @@ impl VtableIndex {
         // Build a fixup map for resolving chained fixup pointers.
         // On modern arm64/x86_64 binaries, pointer values in __DATA_CONST
         // are encoded chained fixup entries, not actual VAs.
-        let fixup_map = build_vtable_fixup_map(mach);
+        let fixup_map = build_vtable_fixup_map(macho);
 
         // Find typeinfo symbol VAs (symbols starting with __ZTI)
         let typeinfo_vas: std::collections::HashSet<u64> = symbols
@@ -123,7 +123,7 @@ impl VtableIndex {
                 fixup_map: &fixup_map,
             };
 
-            let slots = match read_vtable_slots(mach, Va(vtable_va), ptr_size, max_size, &ctx) {
+            let slots = match read_vtable_slots(macho, Va(vtable_va), ptr_size, max_size, &ctx) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
@@ -201,16 +201,16 @@ enum VtableFixup {
 
 /// Build a map from file_offset -> resolved fixup, using chained fixups
 /// if available, otherwise legacy bind/rebase opcodes.
-fn build_vtable_fixup_map(mach: &MachFile<'_>) -> std::collections::HashMap<u64, VtableFixup> {
+fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u64, VtableFixup> {
     use crate::metadata::dyld::chained::parse_chained_fixups;
     use crate::metadata::dyld::types::FixupKind;
 
     let mut map = std::collections::HashMap::new();
 
-    match parse_chained_fixups(mach) {
+    match parse_chained_fixups(macho) {
         Ok(fixups) => {
             for fixup in &fixups.fixups {
-                let seg = match mach.segments().get(fixup.segment_index) {
+                let seg = match macho.segments().get(fixup.segment_index) {
                     Some(s) => s,
                     None => continue,
                 };
@@ -234,10 +234,10 @@ fn build_vtable_fixup_map(mach: &MachFile<'_>) -> std::collections::HashMap<u64,
         }
         Err(_) => {
             // Try legacy bind/rebase opcodes
-            if let Ok((regular, weak, lazy)) = crate::metadata::dyld::bind::parse_bind_entries(mach)
+            if let Ok((regular, weak, lazy)) = crate::metadata::dyld::bind::parse_bind_entries(macho)
             {
                 for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
-                    if let Some(seg) = mach.segments().get(entry.segment_index) {
+                    if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset.0 + entry.segment_offset;
                         map.insert(
                             file_offset,
@@ -249,9 +249,9 @@ fn build_vtable_fixup_map(mach: &MachFile<'_>) -> std::collections::HashMap<u64,
                 }
             }
 
-            if let Ok(rebases) = crate::metadata::dyld::rebase::parse_rebase_entries(mach) {
+            if let Ok(rebases) = crate::metadata::dyld::rebase::parse_rebase_entries(macho) {
                 for entry in &rebases {
-                    if let Some(seg) = mach.segments().get(entry.segment_index) {
+                    if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset.0 + entry.segment_offset;
                         map.entry(file_offset).or_insert(VtableFixup::Rebase(0));
                     }
@@ -269,7 +269,7 @@ fn resolve_slot_value(
     file_offset: u64,
     image_base: u64,
     fixup_map: &std::collections::HashMap<u64, VtableFixup>,
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     endian: crate::format::io::endian::Endian,
 ) -> ResolvedSlotValue {
     if let Some(fixup) = fixup_map.get(&file_offset) {
@@ -281,7 +281,7 @@ fn resolve_slot_value(
                 // Legacy rebase sentinel -- read the raw pointer directly
                 // (the linker wrote the correct un-slid VA)
                 let raw =
-                    crate::format::io::pod::read_pod::<u64>(mach.bytes(), file_offset as usize)
+                    crate::format::io::pod::read_pod::<u64>(macho.bytes(), file_offset as usize)
                         .map(|v| endian.interpret_u64(v))
                         .unwrap_or(raw_value);
                 ResolvedSlotValue::Address(raw)
@@ -305,13 +305,13 @@ struct VtableScanContext<'a> {
 }
 
 fn read_vtable_slots(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     vtable_va: Va,
     ptr_size: u64,
     max_size: u64,
     ctx: &VtableScanContext<'_>,
 ) -> Result<Vec<VtableSlot>> {
-    let endian = mach.endian();
+    let endian = macho.endian();
     let max_slots = max_size / ptr_size;
     let has_fixups = !ctx.fixup_map.is_empty();
     let mut slots = Vec::new();
@@ -320,7 +320,7 @@ fn read_vtable_slots(
         let slot_offset = i * ptr_size;
         let slot_va = Va(vtable_va.0 + slot_offset);
 
-        let bytes = match mach.read_bytes_at_va(slot_va, ptr_size as usize) {
+        let bytes = match macho.read_bytes_at_va(slot_va, ptr_size as usize) {
             Ok(b) => b,
             Err(_) => break,
         };
@@ -338,7 +338,7 @@ fn read_vtable_slots(
         };
 
         // Resolve the pointer value through the fixup map
-        let file_offset = mach
+        let file_offset = macho
             .address_map()
             .va_to_thin_offset(slot_va)
             .map(|o| o.0)
@@ -349,7 +349,7 @@ fn read_vtable_slots(
             file_offset,
             ctx.image_base,
             ctx.fixup_map,
-            mach,
+            macho,
             endian,
         );
 

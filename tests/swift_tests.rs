@@ -2,16 +2,16 @@ use macho::metadata::swift::SwiftTypeIndex;
 use macho::metadata::swift::types::{
     SwiftType, SwiftTypeConfidence, SwiftTypeKind, SwiftTypeSource,
 };
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 
 fn swift_index_for(path: &str) -> SwiftTypeIndex {
     let data = std::fs::read(path).expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
-    SwiftTypeIndex::build(mach)
+    macho.ext::<SwiftTypeIndex>().expect("swift ext")
 }
 
 #[test]

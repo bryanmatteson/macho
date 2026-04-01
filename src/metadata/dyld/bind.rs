@@ -3,48 +3,48 @@ use crate::format::constants::*;
 use crate::metadata::dyld::types::BindEntry;
 use crate::metadata::dyld::uleb::LebReader;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Parse bind entries from LC_DYLD_INFO/LC_DYLD_INFO_ONLY.
 /// Returns (regular binds, weak binds, lazy binds).
 pub fn parse_bind_entries<'data>(
-    mach: &MachFile<'data>,
+    macho: &MachoFile<'data>,
 ) -> Result<(
     Vec<BindEntry<'data>>,
     Vec<BindEntry<'data>>,
     Vec<BindEntry<'data>>,
 )> {
-    let (bind_data, weak_data, lazy_data) = find_bind_data(mach)?;
+    let (bind_data, weak_data, lazy_data) = find_bind_data(macho)?;
 
     let regular = if bind_data.is_empty() {
         Vec::new()
     } else {
-        interpret_bind_opcodes(bind_data, mach, false)?
+        interpret_bind_opcodes(bind_data, macho, false)?
     };
 
     let weak = if weak_data.is_empty() {
         Vec::new()
     } else {
-        interpret_bind_opcodes(weak_data, mach, false)?
+        interpret_bind_opcodes(weak_data, macho, false)?
     };
 
     let lazy = if lazy_data.is_empty() {
         Vec::new()
     } else {
-        interpret_bind_opcodes(lazy_data, mach, true)?
+        interpret_bind_opcodes(lazy_data, macho, true)?
     };
 
     Ok((regular, weak, lazy))
 }
 
 fn find_bind_data<'data>(
-    mach: &MachFile<'data>,
+    macho: &MachoFile<'data>,
 ) -> Result<(&'data [u8], &'data [u8], &'data [u8])> {
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::DyldInfo(d) | LoadCommand::DyldInfoOnly(d) => {
                 let bind = if d.bind_size > 0 {
-                    mach.read_bytes_at(
+                    macho.read_bytes_at(
                         crate::model::addr::ThinFileOffset(d.bind_off as u64),
                         d.bind_size as usize,
                     )?
@@ -52,7 +52,7 @@ fn find_bind_data<'data>(
                     &[]
                 };
                 let weak = if d.weak_bind_size > 0 {
-                    mach.read_bytes_at(
+                    macho.read_bytes_at(
                         crate::model::addr::ThinFileOffset(d.weak_bind_off as u64),
                         d.weak_bind_size as usize,
                     )?
@@ -60,7 +60,7 @@ fn find_bind_data<'data>(
                     &[]
                 };
                 let lazy = if d.lazy_bind_size > 0 {
-                    mach.read_bytes_at(
+                    macho.read_bytes_at(
                         crate::model::addr::ThinFileOffset(d.lazy_bind_off as u64),
                         d.lazy_bind_size as usize,
                     )?
@@ -77,10 +77,10 @@ fn find_bind_data<'data>(
 
 fn interpret_bind_opcodes<'data>(
     data: &'data [u8],
-    mach: &MachFile<'data>,
+    macho: &MachoFile<'data>,
     lazy: bool,
 ) -> Result<Vec<BindEntry<'data>>> {
-    let pointer_size = if mach.is_64bit() { 8u64 } else { 4u64 };
+    let pointer_size = if macho.is_64bit() { 8u64 } else { 4u64 };
     let mut reader = LebReader::new(data);
     let mut entries = Vec::new();
 

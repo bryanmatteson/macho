@@ -46,12 +46,12 @@ pub struct FilesetEntryInspection {
 }
 
 impl ContainerReport {
-    pub fn from_container(container: &crate::model::container::MachContainer<'_>) -> Self {
+    pub fn from_container(container: &crate::model::container::MachoContainer<'_>) -> Self {
         Self::from_container_with_domains(container, parity::all_domains())
     }
 
     pub fn from_container_with_domains(
-        container: &crate::model::container::MachContainer<'_>,
+        container: &crate::model::container::MachoContainer<'_>,
         domains: &[parity::ParityDomain],
     ) -> Self {
         let snapshot = crate::analysis::snapshot::ContainerSnapshot::from_container(container);

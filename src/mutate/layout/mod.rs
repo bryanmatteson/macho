@@ -3,14 +3,14 @@ mod encoder;
 use crate::Result;
 use crate::format::io::Endian;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
 
 pub(crate) use encoder::encode_load_command;
 
 /// Build the final binary bytes from the editor's state.
 pub fn build_binary(
-    original: &MachFile<'_>,
+    original: &MachoFile<'_>,
     commands: &[(LoadCommand, Vec<u8>)],
     _segments: &[Segment],
 ) -> Result<Vec<u8>> {
@@ -67,7 +67,7 @@ pub fn build_binary(
     Ok(output)
 }
 
-fn find_first_data_offset(mach: &MachFile<'_>) -> usize {
+fn find_first_data_offset(macho: &MachoFile<'_>) -> usize {
     // Find the smallest non-zero file offset among segments with file data.
     // This is where segment content begins in the file. For executables,
     // __TEXT starts at offset 0 (overlapping header+commands), so the actual
@@ -79,13 +79,13 @@ fn find_first_data_offset(mach: &MachFile<'_>) -> usize {
     // the header and commands are already part of __TEXT, so we need to find
     // where the content AFTER the commands starts. That's the page-aligned
     // boundary after header + sizeofcmds.
-    let header_end = mach.bitness().header_size() + mach.header().sizeofcmds as usize;
-    let page_size = infer_page_size(mach);
+    let header_end = macho.bitness().header_size() + macho.header().sizeofcmds as usize;
+    let page_size = infer_page_size(macho);
     align_up(header_end, page_size)
 }
 
-fn infer_page_size(mach: &MachFile<'_>) -> usize {
-    for seg in mach.segments() {
+fn infer_page_size(macho: &MachoFile<'_>) -> usize {
+    for seg in macho.segments() {
         if seg.file_size > 0 && seg.file_offset.0 > 0 {
             let off = seg.file_offset.0 as usize;
             if off % 0x4000 == 0 {

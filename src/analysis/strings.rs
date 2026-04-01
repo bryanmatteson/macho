@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::model::addr::{ThinFileOffset, Va};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::section::SectionType;
 
 #[derive(Debug, Clone, Serialize)]
@@ -45,10 +45,10 @@ pub struct FoundString {
 }
 
 impl StringRegions {
-    pub fn discover(mach: &MachFile<'_>) -> Self {
+    pub fn discover(macho: &MachoFile<'_>) -> Self {
         let mut regions = Vec::new();
 
-        for section in mach.all_sections() {
+        for section in macho.all_sections() {
             let seg = section.segment_name.as_str_lossy();
             let sect = section.section_name.as_str_lossy();
 
@@ -85,10 +85,10 @@ impl StringRegions {
         Self { regions }
     }
 
-    pub fn with_heuristic(mach: &MachFile<'_>) -> Self {
-        let mut result = Self::discover(mach);
+    pub fn with_heuristic(macho: &MachoFile<'_>) -> Self {
+        let mut result = Self::discover(macho);
 
-        for section in mach.all_sections() {
+        for section in macho.all_sections() {
             if section.section_type != SectionType::Regular {
                 continue;
             }
@@ -113,7 +113,7 @@ impl StringRegions {
                 continue;
             }
 
-            let bytes = match mach.read_bytes_at(section.offset, section.size as usize) {
+            let bytes = match macho.read_bytes_at(section.offset, section.size as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -133,7 +133,7 @@ impl StringRegions {
         result
     }
 
-    pub fn search(&self, mach: &MachFile<'_>, query: &str) -> Vec<StringMatch> {
+    pub fn search(&self, macho: &MachoFile<'_>, query: &str) -> Vec<StringMatch> {
         let mut matches = Vec::new();
 
         for (region_index, region) in self.regions.iter().enumerate() {
@@ -143,7 +143,7 @@ impl StringRegions {
                 continue;
             }
 
-            let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
+            let bytes = match macho.read_bytes_at(region.file_offset, region.size as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -166,7 +166,7 @@ impl StringRegions {
         matches
     }
 
-    pub fn search_exact(&self, mach: &MachFile<'_>, query: &str) -> Vec<StringMatch> {
+    pub fn search_exact(&self, macho: &MachoFile<'_>, query: &str) -> Vec<StringMatch> {
         let mut matches = Vec::new();
 
         for (region_index, region) in self.regions.iter().enumerate() {
@@ -174,7 +174,7 @@ impl StringRegions {
                 continue;
             }
 
-            let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
+            let bytes = match macho.read_bytes_at(region.file_offset, region.size as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -199,7 +199,7 @@ impl StringRegions {
 
     pub fn strings_in_region(
         &self,
-        mach: &MachFile<'_>,
+        macho: &MachoFile<'_>,
         region: &StringRegion,
     ) -> Vec<FoundString> {
         // CFString sections contain struct data, not raw C strings.
@@ -207,7 +207,7 @@ impl StringRegions {
             return Vec::new();
         }
 
-        let bytes = match mach.read_bytes_at(region.file_offset, region.size as usize) {
+        let bytes = match macho.read_bytes_at(region.file_offset, region.size as usize) {
             Ok(b) => b,
             Err(_) => return Vec::new(),
         };
@@ -226,10 +226,10 @@ impl StringRegions {
             .collect()
     }
 
-    pub fn all_strings(&self, mach: &MachFile<'_>) -> Vec<FoundString> {
+    pub fn all_strings(&self, macho: &MachoFile<'_>) -> Vec<FoundString> {
         let mut all = Vec::new();
         for region in &self.regions {
-            all.extend(self.strings_in_region(mach, region));
+            all.extend(self.strings_in_region(macho, region));
         }
         all
     }

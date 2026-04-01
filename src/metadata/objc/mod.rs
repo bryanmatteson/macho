@@ -17,8 +17,8 @@ pub use graph::{
 pub use types::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol};
 
 use crate::error::{Error, Result};
-use crate::model::ext::MachExt;
-use crate::model::mach_file::MachFile;
+use crate::model::ext::MachoExt;
+use crate::model::macho_file::MachoFile;
 use resolve::ObjCResolver;
 
 /// Parsed ObjC metadata from a Mach-O binary.
@@ -28,24 +28,24 @@ pub struct ObjCMetadata {
     pub protocols: Vec<ObjCProtocol>,
 }
 
-impl<'data> MachExt<'data> for ObjCMetadata {
-    fn parse<'mf>(mach: &'mf MachFile<'data>) -> Result<Self>
+impl<'data> MachoExt<'data> for ObjCMetadata {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
     where
         'data: 'mf,
     {
-        parse_objc_metadata(mach)
+        parse_objc_metadata(macho)
     }
 }
 
-pub fn parse_objc_metadata(mach: &MachFile<'_>) -> Result<ObjCMetadata> {
-    if !mach.is_64bit() {
+pub fn parse_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadata> {
+    if !macho.is_64bit() {
         return Err(Error::Unsupported(
             "ObjC metadata parsing is only supported for 64-bit binaries".into(),
         ));
     }
-    let resolver = ObjCResolver::new(mach);
+    let resolver = ObjCResolver::new(macho);
     // Parse classes from __objc_classlist
-    let classes = parse_pointer_list(mach, "__objc_classlist")
+    let classes = parse_pointer_list(macho, "__objc_classlist")
         .map(|ptrs| {
             ptrs.into_iter()
                 .filter_map(|file_off| {
@@ -58,7 +58,7 @@ pub fn parse_objc_metadata(mach: &MachFile<'_>) -> Result<ObjCMetadata> {
         .unwrap_or_default();
 
     // Parse categories from __objc_catlist
-    let categories = parse_pointer_list(mach, "__objc_catlist")
+    let categories = parse_pointer_list(macho, "__objc_catlist")
         .map(|ptrs| {
             ptrs.into_iter()
                 .filter_map(|file_off| {
@@ -70,7 +70,7 @@ pub fn parse_objc_metadata(mach: &MachFile<'_>) -> Result<ObjCMetadata> {
         .unwrap_or_default();
 
     // Parse protocols from __objc_protolist
-    let protocols = parse_pointer_list(mach, "__objc_protolist")
+    let protocols = parse_pointer_list(macho, "__objc_protolist")
         .map(|ptrs| {
             ptrs.into_iter()
                 .filter_map(|file_off| {
@@ -90,9 +90,9 @@ pub fn parse_objc_metadata(mach: &MachFile<'_>) -> Result<ObjCMetadata> {
 
 /// Find a section by name across all segments and return file offsets
 /// for each pointer-sized entry.
-fn parse_pointer_list(mach: &MachFile<'_>, sect_name: &str) -> Result<Vec<u64>> {
+fn parse_pointer_list(macho: &MachoFile<'_>, sect_name: &str) -> Result<Vec<u64>> {
     // Search in __DATA_CONST first, then __DATA
-    let section = mach
+    let section = macho
         .all_sections()
         .find(|s| s.section_name == sect_name)
         .ok_or_else(|| Error::Format(format!("section {sect_name} not found")))?;

@@ -10,7 +10,7 @@ use crate::model::addr::Va;
 
 pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClass> {
     let class_offset = resolver.va_to_offset(class_va)?;
-    let data = resolver.mach().bytes();
+    let data = resolver.macho().bytes();
     let endian = resolver.endian();
 
     // Read the data pointer (class_ro_t). Low bit is the Swift class flag.

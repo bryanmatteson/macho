@@ -1,4 +1,4 @@
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::mutate::resign::ResignPlan;
 use macho::mutate::transaction::PatchTransaction;
 use macho::parse;
@@ -51,12 +51,12 @@ fn malformed_codesign_binary() -> Vec<u8> {
 fn resign_plan_for_signed_binary() {
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
 
-    let plan = ResignPlan::from_mach(mach);
+    let plan = ResignPlan::from_mach(macho);
     assert!(plan.was_signed);
     assert!(plan.identifier.is_some());
     assert!(plan.hash_type.is_some());
@@ -68,12 +68,12 @@ fn resign_plan_for_signed_binary() {
 fn resign_plan_includes_identifier_in_command() {
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
 
-    let plan = ResignPlan::from_mach(mach);
+    let plan = ResignPlan::from_mach(macho);
     if let Some(ref id) = plan.identifier {
         assert!(
             plan.suggested_command.contains(id),
@@ -86,12 +86,12 @@ fn resign_plan_includes_identifier_in_command() {
 fn resign_plan_serializes() {
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
 
-    let plan = ResignPlan::from_mach(mach);
+    let plan = ResignPlan::from_mach(macho);
     let json = serde_json::to_string(&plan).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed["was_signed"], true);
@@ -101,12 +101,12 @@ fn resign_plan_serializes() {
 fn resign_plan_display() {
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
 
-    let plan = ResignPlan::from_mach(mach);
+    let plan = ResignPlan::from_mach(macho);
     let display = format!("{plan}");
     assert!(display.contains("Re-sign assistance:"));
     assert!(display.contains("codesign"));
@@ -116,12 +116,12 @@ fn resign_plan_display() {
 fn resign_plan_for_unsigned_binary_is_explicit() {
     let data = std::fs::read("/usr/bin/true").expect("read");
     let container = macho::parse(&data).expect("parse");
-    let mach = match &container {
-        MachContainer::Fat(fat) => &fat.arches()[0].mach,
-        MachContainer::Thin(mach) => mach,
+    let macho = match &container {
+        MachoContainer::Fat(fat) => &fat.arches()[0].macho,
+        MachoContainer::Thin(macho) => macho,
     };
 
-    let mut txn = PatchTransaction::new(mach);
+    let mut txn = PatchTransaction::new(macho);
     txn.remove_code_signature();
     let bytes = txn.commit().expect("commit");
     let reparsed = macho::parse(&bytes).expect("reparse");
@@ -138,9 +138,9 @@ fn resign_plan_for_unsigned_binary_is_explicit() {
 fn resign_plan_reports_unreadable_signature_as_signed() {
     let data = malformed_codesign_binary();
     let container = parse(&data).expect("parse malformed binary");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let plan = ResignPlan::from_mach(mach);
+    let plan = ResignPlan::from_mach(macho);
     assert!(
         plan.was_signed,
         "LC_CODE_SIGNATURE should still count as signed"

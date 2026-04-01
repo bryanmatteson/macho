@@ -6,21 +6,21 @@ use crate::metadata::dyld::chained::parse_chained_fixups;
 use crate::metadata::dyld::rebase::parse_rebase_entries;
 use crate::metadata::dyld::types::FixupKind;
 use crate::model::addr::Va;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 use super::pointers::{ResolutionContext, ResolvedTarget};
 
-pub fn collect_resolved_targets(mach: &MachFile<'_>) -> BTreeMap<u64, ResolvedTarget> {
+pub fn collect_resolved_targets(macho: &MachoFile<'_>) -> BTreeMap<u64, ResolvedTarget> {
     let mut fixups = BTreeMap::new();
-    if let Ok(chained) = parse_chained_fixups(mach) {
+    if let Ok(chained) = parse_chained_fixups(macho) {
         for fixup in &chained.fixups {
-            let Some(seg) = mach.segments().get(fixup.segment_index) else {
+            let Some(seg) = macho.segments().get(fixup.segment_index) else {
                 continue;
             };
             let file_offset = seg.file_offset.0 + fixup.segment_offset;
             let target = match &fixup.kind {
                 FixupKind::Rebase { target } | FixupKind::AuthRebase { target, .. } => {
-                    ResolvedTarget::Address(Va(mach.image_base().0 + target))
+                    ResolvedTarget::Address(Va(macho.image_base().0 + target))
                 }
                 FixupKind::Bind { import_index, .. } | FixupKind::AuthBind { import_index, .. } => {
                     let Some(import) = chained.imports.get(*import_index as usize) else {
@@ -37,9 +37,9 @@ pub fn collect_resolved_targets(mach: &MachFile<'_>) -> BTreeMap<u64, ResolvedTa
         return fixups;
     }
 
-    if let Ok((regular, weak, lazy)) = parse_bind_entries(mach) {
+    if let Ok((regular, weak, lazy)) = parse_bind_entries(macho) {
         for bind in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
-            if let Some(seg) = mach.segments().get(bind.segment_index) {
+            if let Some(seg) = macho.segments().get(bind.segment_index) {
                 let file_offset = seg.file_offset.0 + bind.segment_offset;
                 fixups.insert(
                     file_offset,
@@ -53,9 +53,9 @@ pub fn collect_resolved_targets(mach: &MachFile<'_>) -> BTreeMap<u64, ResolvedTa
         }
     }
 
-    if let Ok(rebases) = parse_rebase_entries(mach) {
+    if let Ok(rebases) = parse_rebase_entries(macho) {
         for rebase in rebases {
-            if let Some(seg) = mach.segments().get(rebase.segment_index) {
+            if let Some(seg) = macho.segments().get(rebase.segment_index) {
                 let file_offset = seg.file_offset.0 + rebase.segment_offset;
                 fixups.insert(file_offset, ResolvedTarget::Address(Va(0)));
             }
@@ -70,7 +70,7 @@ pub fn resolve_pointer_target(
     fixups: &BTreeMap<u64, ResolvedTarget>,
     va: Va,
 ) -> Result<ResolvedTarget> {
-    let offset = ctx.mach().address_map().va_to_thin_offset(va)?;
+    let offset = ctx.macho().address_map().va_to_thin_offset(va)?;
     if let Some(target) = fixups.get(&offset.0) {
         if let ResolvedTarget::Address(resolved) = target {
             if resolved.0 == 0 {

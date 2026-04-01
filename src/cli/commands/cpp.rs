@@ -40,8 +40,8 @@ pub fn run(args: CppArgs) -> Result<()> {
 
     if args.json {
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let mut index = build_image_index(mach)?;
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
+            let mut index = build_image_index(macho)?;
             if let Some(class_name) = &args.class_filter {
                 index.classes.retain(|name, _| name == class_name);
             }
@@ -60,23 +60,23 @@ pub fn run(args: CppArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
 
             if args.headers {
                 if let Some(class_name) = &args.class_filter {
-                    let mut index = build_image_index(mach)?;
+                    let mut index = build_image_index(macho)?;
                     index.classes.retain(|name, _| name == class_name);
                     let unified = unify_images(&[index]);
                     let unit = default_header_unit(&unified);
                     println!("{}", render_header(&unit));
                 } else {
-                    println!("{}", build_headers_for_mach(mach)?);
+                    println!("{}", build_headers_for_mach(macho)?);
                 }
             } else {
-                let mut index = build_image_index(mach)?;
+                let mut index = build_image_index(macho)?;
                 if let Some(class_name) = &args.class_filter {
                     index.classes.retain(|name, _| name == class_name);
                 }

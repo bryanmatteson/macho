@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
 use crate::format::io::pod::{self, RawFatArch32, RawFatArch64, RawFatHeader};
-use crate::format::mach::parse_mach_file;
+use crate::format::macho::parse_macho_file;
 use crate::model::addr::FatFileOffset;
 use crate::model::container::{FatArch, FatBinary};
 use crate::model::header::{ArchSpec, FatHeader, FatMagic};
@@ -42,7 +42,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
 
             validate_arch_bounds(data.len(), offset, size, i)?;
             let slice = &data[offset as usize..(offset + size) as usize];
-            let mach = parse_mach_file(slice)?;
+            let macho = parse_macho_file(slice)?;
 
             arches.push(FatArch {
                 spec: ArchSpec {
@@ -53,7 +53,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
                 size,
                 align,
                 reserved: endian.interpret_u32(raw.reserved),
-                mach,
+                macho: macho,
             });
         }
     } else {
@@ -66,7 +66,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
 
             validate_arch_bounds(data.len(), offset, size, i)?;
             let slice = &data[offset as usize..(offset + size) as usize];
-            let mach = parse_mach_file(slice)?;
+            let macho = parse_macho_file(slice)?;
 
             arches.push(FatArch {
                 spec: ArchSpec {
@@ -77,7 +77,7 @@ pub fn parse_fat_binary(data: &[u8]) -> Result<FatBinary<'_>> {
                 size,
                 align,
                 reserved: 0,
-                mach,
+                macho: macho,
             });
         }
     }

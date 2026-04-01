@@ -6,7 +6,7 @@ use macho::api::ImageInspector;
 use macho::metadata::objc::graph::ObjCGraph;
 use macho::metadata::objc::parse_objc_metadata;
 use macho::metadata::swift::SwiftTypeIndex;
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use support::{copy_macho_fixture, run_cli, temp_file_path};
 
 #[cfg(unix)]
@@ -55,8 +55,8 @@ fn unique_marker(prefix: &str) -> String {
     format!("{prefix}-{nanos}")
 }
 
-fn has_rpath(mach: &macho::model::mach_file::MachFile<'_>, needle: &str) -> bool {
-    mach.load_commands()
+fn has_rpath(macho: &macho::model::macho_file::MachoFile<'_>, needle: &str) -> bool {
+    macho.load_commands()
         .iter()
         .any(|lc| lc.kind.as_rpath() == Some(needle))
 }
@@ -65,22 +65,22 @@ fn objc_graph_fixture(path: &str) -> Option<(String, ObjCGraph)> {
     let data = std::fs::read(path).ok()?;
     let container = macho::parse(&data).ok()?;
     match &container {
-        MachContainer::Fat(fat) => fat.arches().iter().find_map(|arch| {
-            let metadata = parse_objc_metadata(&arch.mach).ok()?;
-            let graph = ObjCGraph::build_from_mach(&metadata, &arch.mach);
+        MachoContainer::Fat(fat) => fat.arches().iter().find_map(|arch| {
+            let metadata = parse_objc_metadata(&arch.macho).ok()?;
+            let graph = ObjCGraph::build_from_mach(&metadata, &arch.macho);
             if graph.classes.is_empty() {
                 None
             } else {
                 Some((arch.spec.name(), graph))
             }
         }),
-        MachContainer::Thin(mach) => {
-            let metadata = parse_objc_metadata(mach).ok()?;
-            let graph = ObjCGraph::build_from_mach(&metadata, mach);
+        MachoContainer::Thin(macho) => {
+            let metadata = parse_objc_metadata(macho).ok()?;
+            let graph = ObjCGraph::build_from_mach(&metadata, macho);
             if graph.classes.is_empty() {
                 None
             } else {
-                Some((ImageInspector::new(mach).info().arch.clone(), graph))
+                Some((ImageInspector::new(macho).info().arch.clone(), graph))
             }
         }
     }
@@ -227,7 +227,7 @@ fn fat_patch_bytes_requires_arch() {
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
-    if !matches!(container, MachContainer::Fat(_)) {
+    if !matches!(container, MachoContainer::Fat(_)) {
         return;
     }
 
@@ -261,7 +261,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
-        MachContainer::Fat(fat) if fat.arches().len() >= 2 => fat,
+        MachoContainer::Fat(fat) if fat.arches().len() >= 2 => fat,
         _ => return,
     };
 
@@ -290,7 +290,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
     let patched = std::fs::read(&output_path).expect("read patched binary");
     let patched_container = macho::parse(&patched).expect("parse patched binary");
     let patched_fat = match &patched_container {
-        MachContainer::Fat(fat) => fat,
+        MachoContainer::Fat(fat) => fat,
         _ => panic!("expected fat output"),
     };
 
@@ -300,7 +300,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
         .find(|arch| arch.spec.name() == selected_arch)
         .expect("selected arch missing");
     assert!(
-        has_rpath(&selected.mach, &rpath),
+        has_rpath(&selected.macho, &rpath),
         "selected arch should contain new rpath"
     );
 
@@ -310,7 +310,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
         .find(|arch| arch.spec.name() == untouched_arch)
         .expect("untouched arch missing");
     assert!(
-        !has_rpath(&untouched.mach, &rpath),
+        !has_rpath(&untouched.macho, &rpath),
         "non-selected arch should not contain new rpath"
     );
 
@@ -324,7 +324,7 @@ fn fat_patch_add_rpath_all_arches_by_default() {
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
-        MachContainer::Fat(fat) => fat,
+        MachoContainer::Fat(fat) => fat,
         _ => return,
     };
 
@@ -349,14 +349,14 @@ fn fat_patch_add_rpath_all_arches_by_default() {
     let patched = std::fs::read(&output_path).expect("read patched binary");
     let patched_container = macho::parse(&patched).expect("parse patched binary");
     let patched_fat = match &patched_container {
-        MachContainer::Fat(fat) => fat,
+        MachoContainer::Fat(fat) => fat,
         _ => panic!("expected fat output"),
     };
 
     assert_eq!(patched_fat.arches().len(), fat.arches().len());
     for arch in patched_fat.arches() {
         assert!(
-            has_rpath(&arch.mach, &rpath),
+            has_rpath(&arch.macho, &rpath),
             "arch {} should contain new rpath",
             arch.spec.name()
         );
@@ -372,12 +372,12 @@ fn swift_json_kind_filter_applies_to_output() {
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
-        MachContainer::Fat(fat) if !fat.arches().is_empty() => fat,
+        MachoContainer::Fat(fat) if !fat.arches().is_empty() => fat,
         _ => return,
     };
 
     let selected_arch = fat.arches()[0].spec.name();
-    let selected_kind = SwiftTypeIndex::build(&fat.arches()[0].mach)
+    let selected_kind = SwiftTypeIndex::build(&fat.arches()[0].macho)
         .types
         .first()
         .map(|ty| ty.kind)
@@ -588,7 +588,7 @@ fn patch_preserves_execute_bit() {
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
-    if !matches!(container, MachContainer::Fat(_)) {
+    if !matches!(container, MachoContainer::Fat(_)) {
         return;
     }
 

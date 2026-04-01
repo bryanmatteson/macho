@@ -3,13 +3,13 @@ mod container;
 pub mod fat;
 pub mod io;
 pub mod load_commands;
-pub mod mach;
+pub mod macho;
 pub mod relocations;
 pub mod sections;
 pub mod symbols;
 
 pub use container::parse;
 pub use fat::parse_fat_binary;
-pub use mach::parse_mach_file;
+pub use macho::parse_macho_file;
 pub use relocations::relocations_for_section;
 pub use symbols::parse_symbol_table;

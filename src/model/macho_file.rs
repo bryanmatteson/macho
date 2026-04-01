@@ -4,15 +4,15 @@ use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
 use crate::model::addr::map::{AddressMap, MappingEntry};
 use crate::model::addr::types::{Rva, ThinFileOffset, Va};
-use crate::model::header::{Bitness, MachHeader};
+use crate::model::header::{Bitness, MachoHeader};
 use crate::model::load_command::{LoadCommand, ParsedLoadCommand};
 use crate::model::names::SegmentName;
 use crate::model::section::Section;
 use crate::model::segment::Segment;
 
-pub struct MachFile<'data> {
+pub struct MachoFile<'data> {
     bytes: &'data [u8],
-    header: MachHeader,
+    header: MachoHeader,
     load_commands: Vec<ParsedLoadCommand>,
     segments: Vec<Segment>,
     endian: Endian,
@@ -62,10 +62,10 @@ impl DerivedIndexes {
     }
 }
 
-impl<'data> MachFile<'data> {
+impl<'data> MachoFile<'data> {
     pub(crate) fn new(
         bytes: &'data [u8],
-        header: MachHeader,
+        header: MachoHeader,
         load_commands: Vec<ParsedLoadCommand>,
         segments: Vec<Segment>,
         endian: Endian,
@@ -87,7 +87,7 @@ impl<'data> MachFile<'data> {
             .get_or_init(|| DerivedIndexes::build(&self.segments, &self.load_commands))
     }
 
-    pub fn header(&self) -> &MachHeader {
+    pub fn header(&self) -> &MachoHeader {
         &self.header
     }
 
@@ -194,7 +194,7 @@ impl<'data> MachFile<'data> {
     }
 }
 
-impl std::fmt::Debug for MachFile<'_> {
+impl std::fmt::Debug for MachoFile<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MachFile")
             .field("header", &self.header)
@@ -214,5 +214,5 @@ impl std::fmt::Debug for MachFile<'_> {
 // This is verified by the static assertions below.
 const _: fn() = || {
     fn assert_send_sync<T: Send + Sync>() {}
-    assert_send_sync::<MachFile<'static>>();
+    assert_send_sync::<MachoFile<'static>>();
 };

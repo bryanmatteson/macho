@@ -1,6 +1,6 @@
 use crate::metadata::dyld::chained::parse_chained_fixups;
 use crate::metadata::dyld::types::FixupKind;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::symbols::demangle::SymbolDemangler;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -34,11 +34,11 @@ pub fn run(args: FixupsArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_fixups(mach, &args);
+            print_fixups(macho, &args);
             if show_header {
                 println!();
             }
@@ -48,8 +48,8 @@ pub fn run(args: FixupsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_fixups(mach: &MachFile<'_>, args: &FixupsArgs) {
-    match parse_chained_fixups(mach) {
+fn print_fixups(macho: &MachoFile<'_>, args: &FixupsArgs) {
+    match parse_chained_fixups(macho) {
         Ok(fixups) => {
             let mut bind_count = 0usize;
             let mut rebase_count = 0usize;

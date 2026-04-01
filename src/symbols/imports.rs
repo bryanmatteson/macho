@@ -5,7 +5,7 @@ use crate::metadata::dyld::bind::parse_bind_entries;
 use crate::metadata::dyld::chained::parse_chained_fixups;
 use crate::metadata::dyld::types::BindEntry;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ImportRecord {
@@ -14,13 +14,13 @@ pub struct ImportRecord {
     pub weak: bool,
 }
 
-pub fn collect_imports(mach: &MachFile<'_>) -> Result<Vec<ImportRecord>> {
-    if !has_chained_fixups(mach) && !has_legacy_bind_info(mach) {
+pub fn collect_imports(macho: &MachoFile<'_>) -> Result<Vec<ImportRecord>> {
+    if !has_chained_fixups(macho) && !has_legacy_bind_info(macho) {
         return Ok(Vec::new());
     }
 
-    if has_chained_fixups(mach) {
-        let fixups = parse_chained_fixups(mach)
+    if has_chained_fixups(macho) {
+        let fixups = parse_chained_fixups(macho)
             .map_err(|err| Error::Format(format!("failed to parse chained fixups: {err}")))?;
         return Ok(dedup_imports(
             fixups
@@ -35,7 +35,7 @@ pub fn collect_imports(mach: &MachFile<'_>) -> Result<Vec<ImportRecord>> {
         ));
     }
 
-    let (regular, weak, lazy) = parse_bind_entries(mach)
+    let (regular, weak, lazy) = parse_bind_entries(macho)
         .map_err(|err| Error::Format(format!("failed to parse legacy bind info: {err}")))?;
 
     Ok(dedup_imports(
@@ -69,14 +69,14 @@ fn into_record(bind: BindEntry) -> ImportRecord {
     }
 }
 
-fn has_chained_fixups(mach: &MachFile<'_>) -> bool {
-    mach.load_commands()
+fn has_chained_fixups(macho: &MachoFile<'_>) -> bool {
+    macho.load_commands()
         .iter()
         .any(|lc| matches!(lc.kind, LoadCommand::DyldChainedFixups(_)))
 }
 
-fn has_legacy_bind_info(mach: &MachFile<'_>) -> bool {
-    mach.load_commands().iter().any(|lc| match &lc.kind {
+fn has_legacy_bind_info(macho: &MachoFile<'_>) -> bool {
+    macho.load_commands().iter().any(|lc| match &lc.kind {
         LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => {
             data.bind_size > 0 || data.weak_bind_size > 0 || data.lazy_bind_size > 0
         }

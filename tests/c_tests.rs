@@ -66,9 +66,9 @@ fn dwarf_analysis_recovers_c_surface() {
 
     let bytes = std::fs::read(&object).expect("read object");
     let container = macho::parse(&bytes).expect("parse object");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let analysis = analyze_headers(mach, &CAnalysisOptions::default()).expect("analyze");
+    let analysis = analyze_headers(macho, &CAnalysisOptions::default()).expect("analyze");
     let header = render_header(&analysis);
 
     assert!(header.contains("struct Widget"));
@@ -102,10 +102,10 @@ fn header_correlation_marks_matches() {
 
     let bytes = std::fs::read(&object).expect("read object");
     let container = macho::parse(&bytes).expect("parse object");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
     let analysis = analyze_headers(
-        mach,
+        macho,
         &CAnalysisOptions {
             header_root: Some(header_root.clone()),
         },
@@ -185,8 +185,8 @@ fn no_dwarf_fallback_does_not_guess_undefined_imports_as_functions() {
 
     let bytes = std::fs::read(&object).expect("read object");
     let container = macho::parse(&bytes).expect("parse object");
-    let mach = container.first_mach();
-    let analysis = analyze_headers(mach, &CAnalysisOptions::default()).expect("analyze");
+    let macho = container.first_mach();
+    let analysis = analyze_headers(macho, &CAnalysisOptions::default()).expect("analyze");
     let header = render_header(&analysis);
 
     assert!(header.contains("local_sum"));
@@ -208,8 +208,8 @@ fn header_output_skips_internal_static_symbols() {
 
     let bytes = std::fs::read(&object).expect("read object");
     let container = macho::parse(&bytes).expect("parse object");
-    let mach = container.first_mach();
-    let analysis = analyze_headers(mach, &CAnalysisOptions::default()).expect("analyze");
+    let macho = container.first_mach();
+    let analysis = analyze_headers(macho, &CAnalysisOptions::default()).expect("analyze");
     let header = render_header(&analysis);
 
     assert!(header.contains("exported_value"));

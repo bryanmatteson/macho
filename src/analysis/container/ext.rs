@@ -4,9 +4,9 @@ use crate::analysis::container::{
 use crate::analysis::diff::DiffReport;
 use crate::analysis::snapshot::{ContainerFormat, ContainerSnapshot};
 use crate::format::parse;
-use crate::model::container::{FatBinary, MachContainer};
+use crate::model::container::{FatBinary, MachoContainer};
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 impl<'data> FatBinary<'data> {
     pub fn snapshot(&self) -> ContainerSnapshot {
@@ -16,7 +16,8 @@ impl<'data> FatBinary<'data> {
                 .arches
                 .iter()
                 .map(|arch| {
-                    let mut snap = crate::analysis::snapshot::SliceSnapshot::from_mach(&arch.mach);
+                    let mut snap =
+                        crate::analysis::snapshot::SliceSnapshot::from_macho(&arch.macho);
                     snap.arch = arch.spec.name();
                     snap
                 })
@@ -88,24 +89,24 @@ impl<'data> FatBinary<'data> {
             .iter()
             .flat_map(|arch| {
                 let arch_name = arch.spec.name();
-                inspect_fileset_entry_in_mach(&arch.mach, &arch_name, entry_id)
+                inspect_fileset_entry_in_macho(&arch.macho, &arch_name, entry_id)
             })
             .collect()
     }
 }
 
-impl<'data> MachContainer<'data> {
+impl<'data> MachoContainer<'data> {
     pub fn snapshot(&self) -> crate::analysis::snapshot::ContainerSnapshot {
         match self {
-            Self::Thin(mach) => {
-                let format = if mach.header().file_type.name() == "MH_FILESET" {
+            Self::Thin(macho) => {
+                let format = if macho.header().file_type.name() == "MH_FILESET" {
                     ContainerFormat::Fileset
                 } else {
                     ContainerFormat::Thin
                 };
                 ContainerSnapshot {
                     format,
-                    slices: vec![crate::analysis::snapshot::SliceSnapshot::from_mach(mach)],
+                    slices: vec![crate::analysis::snapshot::SliceSnapshot::from_macho(macho)],
                 }
             }
             Self::Fat(fat) => fat.snapshot(),
@@ -167,27 +168,31 @@ impl<'data> MachContainer<'data> {
 
     pub fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
         match self {
-            Self::Thin(mach) => {
-                let arch = mach.header().cpu_type.name().to_string();
-                inspect_fileset_entry_in_mach(mach, &arch, entry_id)
+            Self::Thin(macho) => {
+                let arch = macho.header().cpu_type.name().to_string();
+                inspect_fileset_entry_in_macho(macho, &arch, entry_id)
             }
             Self::Fat(fat) => fat.inspect_fileset_entry(entry_id),
         }
     }
 }
 
-fn inspect_fileset_entry_in_mach(
-    mach: &MachFile<'_>,
+fn inspect_fileset_entry_in_macho(
+    macho: &MachoFile<'_>,
     arch: &str,
     entry_id: &str,
 ) -> Vec<FilesetEntryInspection> {
     let mut inspections = Vec::new();
 
-    for data in mach.load_commands().iter().filter_map(|lc| match &lc.kind {
-        LoadCommand::FilesetEntry(data) if data.entry_id == entry_id => Some(data),
-        _ => None,
-    }) {
-        let (member, parse_error) = inspect_fileset_member(mach, data.file_offset);
+    for data in macho
+        .load_commands()
+        .iter()
+        .filter_map(|lc| match &lc.kind {
+            LoadCommand::FilesetEntry(data) if data.entry_id == entry_id => Some(data),
+            _ => None,
+        })
+    {
+        let (member, parse_error) = inspect_fileset_member(macho, data.file_offset);
         inspections.push(FilesetEntryInspection {
             arch: arch.to_string(),
             entry_id: data.entry_id.clone(),
@@ -202,7 +207,7 @@ fn inspect_fileset_entry_in_mach(
 }
 
 fn inspect_fileset_member(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     file_offset: u64,
 ) -> (Option<FilesetMemberReport>, Option<String>) {
     let Ok(offset) = usize::try_from(file_offset) else {
@@ -212,17 +217,17 @@ fn inspect_fileset_member(
         );
     };
 
-    if offset >= mach.bytes().len() {
+    if offset >= macho.bytes().len() {
         return (
             None,
             Some(format!(
                 "member offset {file_offset:#x} is outside image bounds ({:#x} bytes)",
-                mach.bytes().len()
+                macho.bytes().len()
             )),
         );
     }
 
-    match parse(&mach.bytes()[offset..]) {
+    match parse(&macho.bytes()[offset..]) {
         Ok(member) => {
             let member_mach = member.first_mach();
             (

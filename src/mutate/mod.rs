@@ -12,7 +12,7 @@ pub use patch::{
 };
 
 use crate::model::load_command::*;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
 use crate::{Error, Result};
 
@@ -20,22 +20,22 @@ use crate::{Error, Result};
 ///
 /// Allows adding, removing, and replacing load commands, then rebuilding
 /// the binary with updated offsets. Segment data is copied verbatim.
-pub struct MachEditor<'data> {
-    original: &'data MachFile<'data>,
+pub struct MachoEditor<'data> {
+    original: &'data MachoFile<'data>,
     commands: Vec<LoadCommand>,
     segments: Vec<Segment>,
 }
 
-impl<'data> MachEditor<'data> {
-    pub fn new(mach: &'data MachFile<'data>) -> Self {
-        let commands: Vec<LoadCommand> = mach
+impl<'data> MachoEditor<'data> {
+    pub fn new(macho: &'data MachoFile<'data>) -> Self {
+        let commands: Vec<LoadCommand> = macho
             .load_commands()
             .iter()
             .map(|lc| lc.kind.clone())
             .collect();
-        let segments = mach.segments().to_vec();
+        let segments = macho.segments().to_vec();
         Self {
-            original: mach,
+            original: macho,
             commands,
             segments,
         }

@@ -11,8 +11,7 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
-use crate::format::parse_symbol_table;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::section::Section;
 use crate::model::symbol::{Symbol, SymbolTable};
 use crate::recovery::dwarf::load_dwarf;
@@ -275,16 +274,16 @@ impl HeaderCorrelator for FilesystemHeaderCorrelator {
     }
 }
 
-pub fn analyze_headers(mach: &MachFile<'_>, options: &CAnalysisOptions) -> Result<CAnalysis> {
+pub fn analyze_headers(macho: &MachoFile<'_>, options: &CAnalysisOptions) -> Result<CAnalysis> {
     let mut builder = CAnalysisBuilder::default();
-    if let Some(sections) = load_dwarf(mach)? {
-        let endian = runtime_endian(mach.endian());
+    if let Some(sections) = load_dwarf(macho)? {
+        let endian = runtime_endian(macho.endian());
         let borrowed = sections.borrow(|section| EndianSlice::new(section, endian));
         builder.ingest_dwarf(&borrowed)?;
     }
 
-    let symtab = parse_symbol_table(mach).ok();
-    builder.reconcile_symbols(mach, symtab.as_ref());
+    let symtab = macho.ext::<SymbolTable<'_>>().ok();
+    builder.reconcile_symbols(macho, symtab.as_ref());
 
     let mut analysis = builder.finish();
     if let Some(root) = options.header_root.clone() {
@@ -400,7 +399,7 @@ impl CAnalysisBuilder {
         Ok(())
     }
 
-    fn reconcile_symbols(&mut self, mach: &MachFile<'_>, symtab: Option<&SymbolTable<'_>>) {
+    fn reconcile_symbols(&mut self, macho: &MachoFile<'_>, symtab: Option<&SymbolTable<'_>>) {
         let Some(symtab) = symtab else {
             return;
         };
@@ -440,7 +439,7 @@ impl CAnalysisBuilder {
                 continue;
             }
 
-            match classify_symbol(mach, symbol) {
+            match classify_symbol(macho, symbol) {
                 SymbolClassification::Function => {
                     self.functions.insert(
                         normalized.clone(),
@@ -1367,11 +1366,11 @@ enum SymbolClassification {
     Skip,
 }
 
-fn classify_symbol(mach: &MachFile<'_>, symbol: &Symbol<'_>) -> SymbolClassification {
+fn classify_symbol(macho: &MachoFile<'_>, symbol: &Symbol<'_>) -> SymbolClassification {
     if symbol.is_stab() {
         return SymbolClassification::Skip;
     }
-    let Some(section) = section_for_symbol(mach, symbol) else {
+    let Some(section) = section_for_symbol(macho, symbol) else {
         return SymbolClassification::Skip;
     };
     if section.section_name == "__text" {
@@ -1381,12 +1380,12 @@ fn classify_symbol(mach: &MachFile<'_>, symbol: &Symbol<'_>) -> SymbolClassifica
     }
 }
 
-fn section_for_symbol<'a>(mach: &'a MachFile<'_>, symbol: &Symbol<'_>) -> Option<&'a Section> {
+fn section_for_symbol<'a>(macho: &'a MachoFile<'_>, symbol: &Symbol<'_>) -> Option<&'a Section> {
     let section_index = usize::from(symbol.section_index);
     if section_index == 0 {
         return None;
     }
-    mach.all_sections().nth(section_index - 1)
+    macho.all_sections().nth(section_index - 1)
 }
 
 fn normalize_c_symbol_name(name: &str) -> Option<String> {

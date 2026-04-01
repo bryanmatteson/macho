@@ -1,6 +1,6 @@
 use crate::metadata::dyld::exports::parse_exports;
 use crate::metadata::dyld::types::ExportKind;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::symbols::demangle::SymbolDemangler;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -28,11 +28,11 @@ pub fn run(args: ExportsArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_exports(mach, &args);
+            print_exports(macho, &args);
             if show_header {
                 println!();
             }
@@ -42,8 +42,8 @@ pub fn run(args: ExportsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_exports(mach: &MachFile<'_>, args: &ExportsArgs) {
-    match parse_exports(mach) {
+fn print_exports(macho: &MachoFile<'_>, args: &ExportsArgs) {
+    match parse_exports(macho) {
         Ok(exports) => {
             let mut demangler = SymbolDemangler::new(args.demangle);
             demangler.precompute(exports.iter().map(|export| export.name.as_str()));

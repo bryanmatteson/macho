@@ -3,23 +3,23 @@ use crate::format::constants::*;
 use crate::metadata::dyld::types::RebaseEntry;
 use crate::metadata::dyld::uleb::LebReader;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Parse rebase entries from LC_DYLD_INFO/LC_DYLD_INFO_ONLY rebase data.
-pub fn parse_rebase_entries(mach: &MachFile<'_>) -> Result<Vec<RebaseEntry>> {
-    let rebase_data = find_rebase_data(mach)?;
+pub fn parse_rebase_entries(macho: &MachoFile<'_>) -> Result<Vec<RebaseEntry>> {
+    let rebase_data = find_rebase_data(macho)?;
     if rebase_data.is_empty() {
         return Ok(Vec::new());
     }
-    interpret_rebase_opcodes(rebase_data, mach)
+    interpret_rebase_opcodes(rebase_data, macho)
 }
 
-fn find_rebase_data<'data>(mach: &MachFile<'data>) -> Result<&'data [u8]> {
-    for lc in mach.load_commands() {
+fn find_rebase_data<'data>(macho: &MachoFile<'data>) -> Result<&'data [u8]> {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::DyldInfo(d) | LoadCommand::DyldInfoOnly(d) => {
                 if d.rebase_size > 0 {
-                    return mach.read_bytes_at(
+                    return macho.read_bytes_at(
                         crate::model::addr::ThinFileOffset(d.rebase_off as u64),
                         d.rebase_size as usize,
                     );
@@ -31,8 +31,8 @@ fn find_rebase_data<'data>(mach: &MachFile<'data>) -> Result<&'data [u8]> {
     Ok(&[])
 }
 
-fn interpret_rebase_opcodes(data: &[u8], mach: &MachFile<'_>) -> Result<Vec<RebaseEntry>> {
-    let pointer_size = if mach.is_64bit() { 8u64 } else { 4u64 };
+fn interpret_rebase_opcodes(data: &[u8], macho: &MachoFile<'_>) -> Result<Vec<RebaseEntry>> {
+    let pointer_size = if macho.is_64bit() { 8u64 } else { 4u64 };
     let mut reader = LebReader::new(data);
     let mut entries = Vec::new();
 

@@ -1,10 +1,10 @@
 use crate::error::{Error, Result};
 use crate::format::constants::*;
 use crate::format::fat::parse_fat_binary;
-use crate::format::mach::parse_mach_file;
-use crate::model::container::MachContainer;
+use crate::format::macho::parse_macho_file;
+use crate::model::container::MachoContainer;
 
-pub fn parse(data: &[u8]) -> Result<MachContainer<'_>> {
+pub fn parse(data: &[u8]) -> Result<MachoContainer<'_>> {
     if data.len() < 4 {
         return Err(Error::Format("file too small to identify".into()));
     }
@@ -13,10 +13,10 @@ pub fn parse(data: &[u8]) -> Result<MachContainer<'_>> {
 
     match magic {
         FAT_MAGIC | FAT_CIGAM | FAT_MAGIC_64 | FAT_CIGAM_64 => {
-            parse_fat_binary(data).map(MachContainer::Fat)
+            parse_fat_binary(data).map(MachoContainer::Fat)
         }
         MH_MAGIC | MH_CIGAM | MH_MAGIC_64 | MH_CIGAM_64 => {
-            parse_mach_file(data).map(MachContainer::Thin)
+            parse_macho_file(data).map(MachoContainer::Thin)
         }
         _ => Err(Error::Format(format!(
             "unrecognized file magic: {magic:#010x}"

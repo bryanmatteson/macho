@@ -1,14 +1,14 @@
 use crate::error::{Error, Result};
 use crate::format::constants::R_SCATTERED;
 use crate::format::io::pod::{self, RawRelocationInfo};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::relocation::{Relocation, ScatteredRelocation, StandardRelocation};
 use crate::model::section::Section;
 
 const MAX_RELOCS_PER_SECTION: usize = 1_000_000;
 
 /// Parse relocation entries for a given section.
-pub fn relocations_for_section(mach: &MachFile<'_>, section: &Section) -> Result<Vec<Relocation>> {
+pub fn relocations_for_section(macho: &MachoFile<'_>, section: &Section) -> Result<Vec<Relocation>> {
     let nreloc = section.nreloc as usize;
     if nreloc == 0 {
         return Ok(Vec::new());
@@ -20,8 +20,8 @@ pub fn relocations_for_section(mach: &MachFile<'_>, section: &Section) -> Result
         )));
     }
 
-    let data = mach.bytes();
-    let endian = mach.endian();
+    let data = macho.bytes();
+    let endian = macho.endian();
     let entry_size = size_of::<RawRelocationInfo>();
     let offset = section.reloff.as_usize();
 

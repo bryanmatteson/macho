@@ -14,13 +14,25 @@ fn load_tar() -> memmap2::Mmap {
 // --- SymbolRangeIndex tests ---
 
 #[test]
+fn range_index_via_ext_matches_build() {
+    let mmap = load_tar();
+    let container = macho::parse(&mmap).expect("failed to parse");
+    let macho = container.first_mach();
+
+    let direct = SymbolRangeIndex::build(macho).expect("failed to build range index");
+    let via_ext: SymbolRangeIndex = macho.ext().expect("failed to build range index via ext");
+
+    assert_eq!(via_ext.entries().len(), direct.entries().len());
+}
+
+#[test]
 fn range_index_build_tar() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
     let mut found_nonempty = false;
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         if !index.is_empty() {
             found_nonempty = true;
         }
@@ -36,8 +48,8 @@ fn range_index_entries_sorted_by_va() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let entries = index.entries();
 
         for window in entries.windows(2) {
@@ -56,8 +68,8 @@ fn range_index_no_zero_size() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         for entry in index.entries() {
             assert!(
                 entry.end > entry.start,
@@ -75,8 +87,8 @@ fn range_index_lookup_va() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let entries = index.entries();
         if entries.is_empty() {
             continue;
@@ -100,8 +112,8 @@ fn range_index_lookup_middle_of_entry() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
 
         for entry in index.entries() {
             let size = entry.end.0 - entry.start.0;
@@ -125,8 +137,8 @@ fn range_index_entries_in_range() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let entries = index.entries();
         if entries.len() < 3 {
             continue;
@@ -149,8 +161,8 @@ fn range_index_has_symbol_entities() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let has_symbol = index
             .entries()
             .iter()
@@ -167,8 +179,8 @@ fn range_index_sources_are_valid() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let has_nlist = index
             .entries()
             .iter()
@@ -185,9 +197,9 @@ fn range_index_lookup_file_offset() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
-        let address_map = mach.address_map();
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
+        let address_map = macho.address_map();
 
         if let Some(first) = index.entries().first() {
             if let Ok(offset) = address_map.va_to_thin_offset(first.start) {
@@ -203,13 +215,25 @@ fn range_index_lookup_file_offset() {
 // --- XrefIndex tests ---
 
 #[test]
+fn xref_index_via_ext_matches_build() {
+    let mmap = load_tar();
+    let container = macho::parse(&mmap).expect("failed to parse");
+    let macho = container.first_mach();
+
+    let direct = XrefIndex::build(macho).expect("failed to build xref index");
+    let via_ext: XrefIndex = macho.ext().expect("failed to build xref index via ext");
+
+    assert_eq!(via_ext.len(), direct.len());
+}
+
+#[test]
 fn xref_index_build_tar() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
     let mut found_nonempty = false;
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         if !index.is_empty() {
             found_nonempty = true;
         }
@@ -225,8 +249,8 @@ fn xref_index_sorted_by_source() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         let all = index.all_refs();
 
         for window in all.windows(2) {
@@ -245,8 +269,8 @@ fn xref_index_has_stubs() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         let has_stub = index.all_refs().iter().any(|r| r.kind == XrefKind::Stub);
         if has_stub {
             return;
@@ -260,8 +284,8 @@ fn xref_index_stubs_have_import_names() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         for xref in index.all_refs() {
             if xref.kind == XrefKind::Stub {
                 if let XrefTarget::Import { ref name, .. } = xref.target {
@@ -277,8 +301,8 @@ fn xref_index_has_direct_branches() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         let has_branch = index
             .all_refs()
             .iter()
@@ -295,8 +319,8 @@ fn xref_index_refs_from() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         if let Some(first) = index.all_refs().first() {
             let source = first.source;
             let from_refs: Vec<_> = index.refs_from(source).collect();
@@ -314,8 +338,8 @@ fn xref_index_refs_in_range() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         let all = index.all_refs();
         if all.len() < 10 {
             continue;
@@ -342,8 +366,8 @@ fn xref_index_refs_to_internal() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
 
         for xref in index.all_refs() {
             if let XrefTarget::Internal { va: target } = &xref.target {
@@ -360,8 +384,8 @@ fn xref_has_chained_or_legacy_fixups() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         let has_fixup = index.all_refs().iter().any(|r| {
             matches!(
                 r.kind,
@@ -382,9 +406,9 @@ fn direct_branches_target_known_symbols() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let ranges = SymbolRangeIndex::build(mach).expect("failed to build range index");
-        let xrefs = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let ranges = SymbolRangeIndex::build(macho).expect("failed to build range index");
+        let xrefs = XrefIndex::build(macho).expect("failed to build xref index");
 
         let branches: Vec<_> = xrefs
             .all_refs()
@@ -421,8 +445,8 @@ fn range_index_grep() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     let mut max_len = 0;
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("failed to build range index");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         max_len = max_len.max(index.len());
     }
     assert!(
@@ -438,8 +462,8 @@ fn xref_index_grep() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     let mut max_len = 0;
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("failed to build xref index");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("failed to build xref index");
         max_len = max_len.max(index.len());
     }
     assert!(
@@ -456,11 +480,11 @@ fn range_and_xref_build_true() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let ranges = SymbolRangeIndex::build(mach);
+    for macho in container.macho_files() {
+        let ranges = SymbolRangeIndex::build(macho);
         assert!(ranges.is_ok(), "range index build should not error");
 
-        let xrefs = XrefIndex::build(mach);
+        let xrefs = XrefIndex::build(macho);
         assert!(xrefs.is_ok(), "xref index build should not error");
     }
 }
@@ -472,9 +496,9 @@ fn range_index_deterministic() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index1 = SymbolRangeIndex::build(mach).expect("build 1");
-        let index2 = SymbolRangeIndex::build(mach).expect("build 2");
+    for macho in container.macho_files() {
+        let index1 = SymbolRangeIndex::build(macho).expect("build 1");
+        let index2 = SymbolRangeIndex::build(macho).expect("build 2");
 
         assert_eq!(index1.len(), index2.len(), "lengths differ between runs");
         for (a, b) in index1.entries().iter().zip(index2.entries().iter()) {
@@ -491,9 +515,9 @@ fn xref_index_deterministic() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index1 = XrefIndex::build(mach).expect("build 1");
-        let index2 = XrefIndex::build(mach).expect("build 2");
+    for macho in container.macho_files() {
+        let index1 = XrefIndex::build(macho).expect("build 1");
+        let index2 = XrefIndex::build(macho).expect("build 2");
 
         assert_eq!(index1.len(), index2.len(), "lengths differ between runs");
         for (a, b) in index1.all_refs().iter().zip(index2.all_refs().iter()) {
@@ -510,12 +534,12 @@ fn range_entry_ends_do_not_exceed_section_boundaries() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
 
         // Collect section boundaries
         let mut section_ranges: Vec<(Va, Va)> = Vec::new();
-        for seg in mach.segments() {
+        for seg in macho.segments() {
             for sect in &seg.sections {
                 if sect.size > 0 {
                     section_ranges.push((sect.addr, Va(sect.addr.0 + sect.size)));
@@ -548,8 +572,8 @@ fn range_index_lookup_va_zero_returns_none() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
         // VA 0 should never be a valid owned range (we skip value==0 symbols)
         assert!(
             index.lookup_va(Va(0)).is_none(),
@@ -563,8 +587,8 @@ fn range_index_lookup_va_u64_max_returns_none() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
         assert!(
             index.lookup_va(Va(u64::MAX)).is_none(),
             "VA u64::MAX should not be in any range"
@@ -579,8 +603,8 @@ fn xref_stub_source_addresses_are_nonzero() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("build");
         for xref in index.all_refs() {
             if xref.kind == XrefKind::Stub {
                 assert!(xref.source.0 != 0, "stub xref has zero source VA");
@@ -596,13 +620,13 @@ fn direct_branch_targets_are_plausible() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("build");
 
         // Get the overall VA range from segments
         let mut min_va = u64::MAX;
         let mut max_va = 0u64;
-        for seg in mach.segments() {
+        for seg in macho.segments() {
             if seg.vm_size > 0 {
                 min_va = min_va.min(seg.vm_addr.0);
                 max_va = max_va.max(seg.vm_addr.0 + seg.vm_size);
@@ -656,8 +680,8 @@ fn entries_in_range_empty_query_returns_empty() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
         // Query with start == end should return empty
         let result = index.entries_in_range(Va(0x1000), Va(0x1000));
         assert!(
@@ -672,8 +696,8 @@ fn refs_in_range_empty_query_returns_empty() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = XrefIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = XrefIndex::build(macho).expect("build");
         let result = index.refs_in_range(Va(0x1000), Va(0x1000));
         assert!(
             result.is_empty(),
@@ -689,8 +713,8 @@ fn range_entries_do_not_overlap() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
         let entries = index.entries();
 
         for window in entries.windows(2) {
@@ -713,8 +737,8 @@ fn grep_range_lookup_succeeds_for_first_entry() {
     let mmap = load_binary("/usr/bin/grep");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let index = SymbolRangeIndex::build(mach).expect("build");
+    for macho in container.macho_files() {
+        let index = SymbolRangeIndex::build(macho).expect("build");
         if let Some(first) = index.entries().first() {
             let found = index.lookup_va(first.start);
             assert!(found.is_some());

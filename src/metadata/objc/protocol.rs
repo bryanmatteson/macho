@@ -8,7 +8,7 @@ use crate::model::addr::Va;
 
 pub fn parse_protocol(resolver: &ObjCResolver<'_>, proto_va: Va) -> Result<ObjCProtocol> {
     let offset = resolver.va_to_offset(proto_va)?;
-    let data = resolver.mach().bytes();
+    let data = resolver.macho().bytes();
     let endian = resolver.endian();
     let raw: RawProtocolT64 = pod::read_pod(data, offset.as_usize())?;
     let protocol_size = endian.interpret_u32(raw.size) as usize;
@@ -83,7 +83,7 @@ pub fn parse_protocol(resolver: &ObjCResolver<'_>, proto_va: Va) -> Result<ObjCP
 /// Parse a protocol_list_t and return just the protocol names.
 pub fn parse_protocol_name_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<String>> {
     let offset = resolver.va_to_offset(va)?;
-    let data = resolver.mach().bytes();
+    let data = resolver.macho().bytes();
     let endian = resolver.endian();
 
     // protocol_list_t: first 8 bytes is count (as u64)

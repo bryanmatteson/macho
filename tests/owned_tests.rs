@@ -1,5 +1,5 @@
 use macho::model::addr::ThinFileOffset;
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 use macho::mutate::owned::OwnedFatBinary;
 use macho::mutate::transaction::PatchTransaction;
 
@@ -12,34 +12,34 @@ fn load_true() -> memmap2::Mmap {
 fn owned_from_thin() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let owned = mach.to_owned_mach();
-    assert_eq!(owned.bytes().len(), mach.bytes().len());
-    assert_eq!(owned.header().ncmds, mach.header().ncmds);
-    assert_eq!(owned.segments().len(), mach.segments().len());
-    assert_eq!(owned.load_commands().len(), mach.load_commands().len());
+    let owned = macho.to_owned_mach();
+    assert_eq!(owned.bytes().len(), macho.bytes().len());
+    assert_eq!(owned.header().ncmds, macho.header().ncmds);
+    assert_eq!(owned.segments().len(), macho.segments().len());
+    assert_eq!(owned.load_commands().len(), macho.load_commands().len());
 }
 
 #[test]
 fn owned_re_parse() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let owned = mach.to_owned_mach();
+    let owned = macho.to_owned_mach();
     let reparsed = owned.as_mach_file().expect("re-parse failed");
-    assert_eq!(reparsed.header().ncmds, mach.header().ncmds);
-    assert_eq!(reparsed.segments().len(), mach.segments().len());
+    assert_eq!(reparsed.header().ncmds, macho.header().ncmds);
+    assert_eq!(reparsed.segments().len(), macho.segments().len());
 }
 
 #[test]
 fn write_bytes_at_offset() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut owned = mach.to_owned_mach();
+    let mut owned = macho.to_owned_mach();
     let offset = ThinFileOffset(0x100);
     let original = owned.bytes()[0x100..0x104].to_vec();
 
@@ -59,12 +59,12 @@ fn write_bytes_at_offset() {
 fn write_bytes_at_va() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut owned = mach.to_owned_mach();
+    let mut owned = macho.to_owned_mach();
 
     // Find a section with data we can patch
-    let section = mach.section("__TEXT", "__text").expect("no __text section");
+    let section = macho.section("__TEXT", "__text").expect("no __text section");
     let va = section.addr;
 
     let original = owned
@@ -94,9 +94,9 @@ fn write_bytes_at_va() {
 fn write_pod_at() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut owned = mach.to_owned_mach();
+    let mut owned = macho.to_owned_mach();
     let val: u32 = 0xCAFEBABE;
     owned
         .write_pod_at(ThinFileOffset(0x200), &val)
@@ -111,9 +111,9 @@ fn write_pod_at() {
 fn write_bounds_check() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut owned = mach.to_owned_mach();
+    let mut owned = macho.to_owned_mach();
     let offset = ThinFileOffset(owned.bytes().len() as u64 - 2);
     // Try to write 4 bytes at 2 bytes before end — should fail
     assert!(owned.write_bytes_at(offset, &[0; 4]).is_err());
@@ -123,24 +123,24 @@ fn write_bounds_check() {
 fn save_to_vec() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let owned = mach.to_owned_mach();
+    let owned = macho.to_owned_mach();
     let mut buf = Vec::new();
     owned.save_to(&mut buf).expect("save_to failed");
-    assert_eq!(buf.len(), mach.bytes().len());
-    assert_eq!(buf, mach.bytes());
+    assert_eq!(buf.len(), macho.bytes().len());
+    assert_eq!(buf, macho.bytes());
 }
 
 #[test]
 fn into_bytes() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let owned = mach.to_owned_mach();
+    let owned = macho.to_owned_mach();
     let bytes = owned.into_bytes();
-    assert_eq!(bytes.len(), mach.bytes().len());
+    assert_eq!(bytes.len(), macho.bytes().len());
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn owned_fat_binary() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         let owned = OwnedFatBinary::from_fat(fat, &mmap);
         assert_eq!(owned.arches().len(), fat.arches().len());
 
@@ -165,7 +165,7 @@ fn owned_fat_arch_mut() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         let mut owned = OwnedFatBinary::from_fat(fat, &mmap);
 
         // Patch a byte in the first arch
@@ -190,12 +190,12 @@ fn owned_fat_into_bytes_rebuilds_after_size_changing_slice_edit() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         let mut owned = OwnedFatBinary::from_fat(fat, &mmap);
         let original_len = mmap.len();
         let first_arch = &fat.arches()[0];
 
-        let mut txn = PatchTransaction::new(&first_arch.mach);
+        let mut txn = PatchTransaction::new(&first_arch.macho);
         txn.add_rpath(format!("/{}", "z".repeat(0x5000)));
         let rebuilt_arch = txn.commit().expect("rebuild first arch");
 
@@ -208,8 +208,8 @@ fn owned_fat_into_bytes_rebuilds_after_size_changing_slice_edit() {
 
         let reparsed = macho::parse(&bytes).expect("reparse rebuilt fat container");
         let reparsed_fat = match reparsed {
-            MachContainer::Fat(fat) => fat,
-            MachContainer::Thin(_) => panic!("expected fat binary"),
+            MachoContainer::Fat(fat) => fat,
+            MachoContainer::Thin(_) => panic!("expected fat binary"),
         };
 
         assert_eq!(reparsed_fat.arches().len(), fat.arches().len());

@@ -2,7 +2,7 @@ use crate::error::{Error, Result};
 use crate::model::addr::{FatFileOffset, ThinFileOffset};
 use crate::model::header::{ArchSpec, FatHeader};
 use crate::model::header::{CpuSubtype, CpuType};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 #[derive(Debug)]
 pub struct FatArch<'data> {
@@ -11,7 +11,7 @@ pub struct FatArch<'data> {
     pub size: u64,
     pub align: u32,
     pub reserved: u32,
-    pub mach: MachFile<'data>,
+    pub macho: MachoFile<'data>,
 }
 
 impl FatArch<'_> {
@@ -45,12 +45,12 @@ impl<'data> FatBinary<'data> {
     }
 }
 
-pub enum MachContainer<'data> {
-    Thin(MachFile<'data>),
+pub enum MachoContainer<'data> {
+    Thin(MachoFile<'data>),
     Fat(FatBinary<'data>),
 }
 
-impl<'data> MachContainer<'data> {
+impl<'data> MachoContainer<'data> {
     pub fn is_thin(&self) -> bool {
         matches!(self, Self::Thin(_))
     }
@@ -59,10 +59,10 @@ impl<'data> MachContainer<'data> {
         matches!(self, Self::Fat(_))
     }
 
-    pub fn mach_files(&self) -> Vec<&MachFile<'data>> {
+    pub fn macho_files(&self) -> Vec<&MachoFile<'data>> {
         match self {
-            Self::Thin(mach) => vec![mach],
-            Self::Fat(fat) => fat.arches.iter().map(|a| &a.mach).collect(),
+            Self::Thin(macho) => vec![macho],
+            Self::Fat(fat) => fat.arches.iter().map(|a| &a.macho).collect(),
         }
     }
 
@@ -70,23 +70,23 @@ impl<'data> MachContainer<'data> {
     ///
     /// Panics only if a fat binary has zero arches, which `parse_fat_binary` rejects,
     /// so this is safe for parsed containers.
-    pub fn first_mach(&self) -> &MachFile<'data> {
+    pub fn first_mach(&self) -> &MachoFile<'data> {
         match self {
-            Self::Thin(mach) => mach,
-            Self::Fat(fat) => &fat.arches[0].mach,
+            Self::Thin(macho) => macho,
+            Self::Fat(fat) => &fat.arches[0].macho,
         }
     }
 
-    pub fn find_arch<'a>(&'a self, cpu_type: CpuType) -> Option<&'a MachFile<'data>> {
+    pub fn find_arch<'a>(&'a self, cpu_type: CpuType) -> Option<&'a MachoFile<'data>> {
         match self {
-            Self::Thin(mach) => {
-                if mach.header().cpu_type == cpu_type {
-                    Some(mach)
+            Self::Thin(macho) => {
+                if macho.header().cpu_type == cpu_type {
+                    Some(macho)
                 } else {
                     None
                 }
             }
-            Self::Fat(fat) => fat.find_arch(cpu_type).map(|a| &a.mach),
+            Self::Fat(fat) => fat.find_arch(cpu_type).map(|a| &a.macho),
         }
     }
 
@@ -95,13 +95,13 @@ impl<'data> MachContainer<'data> {
         &'a self,
         cpu_type: CpuType,
         cpu_subtype: CpuSubtype,
-    ) -> Option<&'a MachFile<'data>> {
+    ) -> Option<&'a MachoFile<'data>> {
         match self {
-            Self::Thin(mach) => {
-                if mach.header().cpu_type == cpu_type
-                    && mach.header().cpu_subtype.masked() == cpu_subtype.masked()
+            Self::Thin(macho) => {
+                if macho.header().cpu_type == cpu_type
+                    && macho.header().cpu_subtype.masked() == cpu_subtype.masked()
                 {
-                    Some(mach)
+                    Some(macho)
                 } else {
                     None
                 }
@@ -113,7 +113,7 @@ impl<'data> MachContainer<'data> {
                     a.spec.cpu_type == cpu_type
                         && a.spec.cpu_subtype.masked() == cpu_subtype.masked()
                 })
-                .map(|a| &a.mach),
+                .map(|a| &a.macho),
         }
     }
 }
@@ -134,10 +134,10 @@ impl std::fmt::Debug for FatBinary<'_> {
     }
 }
 
-impl std::fmt::Debug for MachContainer<'_> {
+impl std::fmt::Debug for MachoContainer<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Thin(mach) => f.debug_tuple("Thin").field(mach).finish(),
+            Self::Thin(macho) => f.debug_tuple("Thin").field(macho).finish(),
             Self::Fat(fat) => f.debug_tuple("Fat").field(fat).finish(),
         }
     }

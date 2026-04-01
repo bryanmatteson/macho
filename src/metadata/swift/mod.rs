@@ -2,19 +2,30 @@ pub mod types;
 
 pub use types::SwiftTypeIndex;
 
-use crate::format::parse_symbol_table;
-use crate::model::mach_file::MachFile;
+use crate::ext::MachoExt;
+use crate::metadata::objc::ObjCMetadata;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::symbols::demangle::demangle_symbol;
 use std::collections::btree_map::Entry;
 
+impl<'data> MachoExt<'data> for SwiftTypeIndex {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> crate::Result<Self>
+    where
+        'data: 'mf,
+    {
+        Ok(Self::build(macho))
+    }
+}
+
 impl SwiftTypeIndex {
-    pub fn build(mach: &MachFile<'_>) -> Self {
+    pub fn build(macho: &MachoFile<'_>) -> Self {
         let mut types = std::collections::BTreeMap::new();
 
         // 1. From demangled symbols — process descriptors first (they carry
         //    accurate kind info), then metadata accessors for anything not yet
         //    covered.
-        if let Ok(symtab) = parse_symbol_table(mach) {
+        if let Ok(symtab) = macho.ext::<SymbolTable<'_>>() {
             // First pass: descriptors (high-confidence kind)
             for sym in symtab.symbols() {
                 if !is_swift_mangled(sym.name) {
@@ -46,7 +57,7 @@ impl SwiftTypeIndex {
         }
 
         // 2. From ObjC classes marked as Swift
-        if let Ok(meta) = crate::metadata::objc::parse_objc_metadata(mach) {
+        if let Ok(meta) = macho.ext::<ObjCMetadata>() {
             for cls in &meta.classes {
                 if cls.is_swift {
                     insert_swift_type(

@@ -4,11 +4,11 @@ use zerocopy::{Immutable, IntoBytes, KnownLayout};
 
 use crate::format::constants::{FAT_MAGIC, FAT_MAGIC_64};
 use crate::format::io::{Endian, pod};
-use crate::format::parse_mach_file;
+use crate::format::parse_macho_file;
 use crate::model::addr::{AddressMap, MappingEntry, Rva, ThinFileOffset, Va};
-use crate::model::header::{Bitness, FatMagic, MachHeader};
+use crate::model::header::{Bitness, FatMagic, MachoHeader};
 use crate::model::load_command::ParsedLoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
 use crate::{Error, Result};
 
@@ -19,9 +19,9 @@ use crate::{Error, Result};
 /// valid as long as writes are purely in-place — modifying existing data bytes
 /// without changing structural layout. To get a fresh read-only view after
 /// writes, call [`as_mach_file()`](Self::as_mach_file).
-pub struct OwnedMachFile {
+pub struct OwnedMachoFile {
     bytes: Vec<u8>,
-    header: MachHeader,
+    header: MachoHeader,
     load_commands: Vec<ParsedLoadCommand>,
     segments: Vec<Segment>,
     endian: Endian,
@@ -30,24 +30,24 @@ pub struct OwnedMachFile {
     image_base: Va,
 }
 
-impl OwnedMachFile {
+impl OwnedMachoFile {
     /// Create from a parsed `MachFile` by copying its bytes and metadata.
-    pub fn from_mach_file(mach: &MachFile<'_>) -> Self {
+    pub fn from_macho_file(macho: &MachoFile<'_>) -> Self {
         Self {
-            bytes: mach.bytes().to_vec(),
-            header: mach.header().clone(),
-            load_commands: mach.load_commands().to_vec(),
-            segments: mach.segments().to_vec(),
-            endian: mach.endian(),
-            bitness: mach.bitness(),
-            address_map: AddressMap::new(mapping_entries(mach.segments())),
-            image_base: mach.image_base(),
+            bytes: macho.bytes().to_vec(),
+            header: macho.header().clone(),
+            load_commands: macho.load_commands().to_vec(),
+            segments: macho.segments().to_vec(),
+            endian: macho.endian(),
+            bitness: macho.bitness(),
+            address_map: AddressMap::new(mapping_entries(macho.segments())),
+            image_base: macho.image_base(),
         }
     }
 
     /// Create from owned Mach-O bytes by parsing and snapshotting metadata.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
-        let parsed = parse_mach_file(&bytes)?;
+        let parsed = parse_macho_file(&bytes)?;
         let header = parsed.header().clone();
         let load_commands = parsed.load_commands().to_vec();
         let segments = parsed.segments().to_vec();
@@ -76,7 +76,7 @@ impl OwnedMachFile {
         &mut self.bytes
     }
 
-    pub fn header(&self) -> &MachHeader {
+    pub fn header(&self) -> &MachoHeader {
         &self.header
     }
 
@@ -142,8 +142,8 @@ impl OwnedMachFile {
     }
 
     /// Re-parse the owned bytes as a fresh read-only `MachFile`.
-    pub fn as_mach_file(&self) -> Result<MachFile<'_>> {
-        parse_mach_file(&self.bytes)
+    pub fn as_mach_file(&self) -> Result<MachoFile<'_>> {
+        parse_macho_file(&self.bytes)
     }
 
     pub fn into_bytes(self) -> Vec<u8> {
@@ -155,7 +155,7 @@ impl OwnedMachFile {
     }
 }
 
-impl std::fmt::Debug for OwnedMachFile {
+impl std::fmt::Debug for OwnedMachoFile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OwnedMachFile")
             .field("size", &self.bytes.len())
@@ -186,7 +186,7 @@ pub struct OwnedFatArch {
     /// Reserved field from `fat_arch_64`.
     pub reserved: u32,
     /// The owned mutable image for this arch.
-    pub mach: OwnedMachFile,
+    pub macho: OwnedMachoFile,
 }
 
 type FatArchLayout<'a> = (&'a OwnedFatArch, usize, usize);
@@ -204,7 +204,7 @@ impl OwnedFatBinary {
                 size: arch.size as usize,
                 align: arch.align,
                 reserved: arch.reserved,
-                mach: OwnedMachFile::from_mach_file(&arch.mach),
+                macho: OwnedMachoFile::from_macho_file(&arch.macho),
             })
             .collect();
 
@@ -219,24 +219,24 @@ impl OwnedFatBinary {
         &self.arches
     }
 
-    pub fn arch(&self, index: usize) -> Option<&OwnedMachFile> {
-        self.arches.get(index).map(|a| &a.mach)
+    pub fn arch(&self, index: usize) -> Option<&OwnedMachoFile> {
+        self.arches.get(index).map(|a| &a.macho)
     }
 
-    pub fn arch_mut(&mut self, index: usize) -> Option<&mut OwnedMachFile> {
-        self.arches.get_mut(index).map(|a| &mut a.mach)
+    pub fn arch_mut(&mut self, index: usize) -> Option<&mut OwnedMachoFile> {
+        self.arches.get_mut(index).map(|a| &mut a.macho)
     }
 
     pub fn replace_arch(&mut self, index: usize, bytes: Vec<u8>) -> Result<()> {
         let arch_count = self.arches.len();
-        let mach = OwnedMachFile::from_bytes(bytes)?;
+        let macho = OwnedMachoFile::from_bytes(bytes)?;
         let arch = self.arches.get_mut(index).ok_or_else(|| {
             Error::Format(format!(
                 "fat arch index {index} out of range (have {arch_count})",
             ))
         })?;
-        arch.size = mach.bytes().len();
-        arch.mach = mach;
+        arch.size = macho.bytes().len();
+        arch.macho = macho;
         Ok(())
     }
 
@@ -293,7 +293,7 @@ impl OwnedFatBinary {
             |(mut layouts, cursor), arch| {
                 let align_bytes = fat_align_bytes(arch.align)?;
                 let offset = align_up(cursor, align_bytes);
-                let size = arch.mach.bytes().len();
+                let size = arch.macho.bytes().len();
                 let end = offset
                     .checked_add(size)
                     .ok_or_else(|| Error::Format("fat arch offset overflow".into()))?;
@@ -318,7 +318,7 @@ impl OwnedFatBinary {
             )?;
 
             let end = *offset + *size;
-            out[*offset..end].copy_from_slice(arch.mach.bytes());
+            out[*offset..end].copy_from_slice(arch.macho.bytes());
             offsets.push((*offset, *size));
         }
 
@@ -336,9 +336,9 @@ impl std::fmt::Debug for OwnedFatBinary {
 }
 
 // Convenience constructor on MachFile
-impl MachFile<'_> {
-    pub fn to_owned_mach(&self) -> OwnedMachFile {
-        OwnedMachFile::from_mach_file(self)
+impl MachoFile<'_> {
+    pub fn to_owned_mach(&self) -> OwnedMachoFile {
+        OwnedMachoFile::from_macho_file(self)
     }
 }
 
@@ -397,7 +397,7 @@ fn write_fat_arch_entry(
         FatMagic::Fat32 => {
             let offset = u32::try_from(offset)
                 .map_err(|_| Error::Format("fat32 arch offset exceeds u32".into()))?;
-            let size = u32::try_from(arch.mach.bytes().len())
+            let size = u32::try_from(arch.macho.bytes().len())
                 .map_err(|_| Error::Format("fat32 arch size exceeds u32".into()))?;
             out[base + 8..base + 12].copy_from_slice(&offset.to_be_bytes());
             out[base + 12..base + 16].copy_from_slice(&size.to_be_bytes());
@@ -406,7 +406,7 @@ fn write_fat_arch_entry(
         FatMagic::Fat64 => {
             out[base + 8..base + 16].copy_from_slice(&offset.to_be_bytes());
             out[base + 16..base + 24]
-                .copy_from_slice(&(arch.mach.bytes().len() as u64).to_be_bytes());
+                .copy_from_slice(&(arch.macho.bytes().len() as u64).to_be_bytes());
             out[base + 24..base + 28].copy_from_slice(&arch.align.to_be_bytes());
             out[base + 28..base + 32].copy_from_slice(&arch.reserved.to_be_bytes());
         }

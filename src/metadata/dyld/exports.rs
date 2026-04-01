@@ -3,12 +3,12 @@ use crate::format::constants::*;
 use crate::metadata::dyld::types::{Export, ExportKind};
 use crate::metadata::dyld::uleb::LebReader;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Parse the exports trie from LC_DYLD_EXPORTS_TRIE or the export data in
 /// LC_DYLD_INFO/LC_DYLD_INFO_ONLY.
-pub fn parse_exports(mach: &MachFile<'_>) -> Result<Vec<Export>> {
-    let trie_data = find_exports_data(mach)?;
+pub fn parse_exports(macho: &MachoFile<'_>) -> Result<Vec<Export>> {
+    let trie_data = find_exports_data(macho)?;
     if trie_data.is_empty() {
         return Ok(Vec::new());
     }
@@ -20,19 +20,19 @@ pub fn parse_exports(mach: &MachFile<'_>) -> Result<Vec<Export>> {
 }
 
 /// Find a single export by name.
-pub fn find_export(mach: &MachFile<'_>, name: &str) -> Result<Option<Export>> {
-    let trie_data = find_exports_data(mach)?;
+pub fn find_export(macho: &MachoFile<'_>, name: &str) -> Result<Option<Export>> {
+    let trie_data = find_exports_data(macho)?;
     if trie_data.is_empty() {
         return Ok(None);
     }
     lookup_trie(trie_data, name)
 }
 
-fn find_exports_data<'data>(mach: &MachFile<'data>) -> Result<&'data [u8]> {
+fn find_exports_data<'data>(macho: &MachoFile<'data>) -> Result<&'data [u8]> {
     // Prefer LC_DYLD_EXPORTS_TRIE (modern)
-    if let Some(lc) = mach.find_load_command(|lc| matches!(lc, LoadCommand::DyldExportsTrie(_))) {
+    if let Some(lc) = macho.find_load_command(|lc| matches!(lc, LoadCommand::DyldExportsTrie(_))) {
         if let Some(ld) = lc.kind.as_linkedit_data() {
-            return mach.read_bytes_at(
+            return macho.read_bytes_at(
                 crate::model::addr::ThinFileOffset(ld.data_offset as u64),
                 ld.data_size as usize,
             );
@@ -40,11 +40,11 @@ fn find_exports_data<'data>(mach: &MachFile<'data>) -> Result<&'data [u8]> {
     }
 
     // Fall back to LC_DYLD_INFO export data
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::DyldInfo(d) | LoadCommand::DyldInfoOnly(d) => {
                 if d.export_size > 0 {
-                    return mach.read_bytes_at(
+                    return macho.read_bytes_at(
                         crate::model::addr::ThinFileOffset(d.export_off as u64),
                         d.export_size as usize,
                     );

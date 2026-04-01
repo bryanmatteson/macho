@@ -3,6 +3,9 @@ mod error;
 pub mod analysis;
 pub mod api;
 pub mod cli;
+pub mod ext {
+    pub use crate::model::ext::MachoExt;
+}
 pub mod format;
 pub mod inputs;
 pub mod metadata;

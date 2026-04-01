@@ -28,7 +28,7 @@ pub const MH_GPU_DYLIB: u32 = 0xe;
 
 bitflags::bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct MachHeaderFlags: u32 {
+    pub struct MachoHeaderFlags: u32 {
         const NOUNDEFS                      = 0x0000_0001;
         const INCRLINK                      = 0x0000_0002;
         const DYLDLINK                      = 0x0000_0004;

@@ -1,6 +1,6 @@
-use macho::mutate::MachEditor;
 use macho::model::load_command::LoadCommand;
-use macho::model::mach_file::MachFile;
+use macho::model::macho_file::MachoFile;
+use macho::mutate::MachoEditor;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
@@ -46,8 +46,8 @@ fn align_up(value: usize, align: usize) -> usize {
     (value + align - 1) & !(align - 1)
 }
 
-fn infer_page_size(mach: &MachFile<'_>) -> usize {
-    for seg in mach.segments() {
+fn infer_page_size(macho: &MachoFile<'_>) -> usize {
+    for seg in macho.segments() {
         if seg.file_size > 0 && seg.file_offset.0 > 0 {
             let offset = seg.file_offset.0 as usize;
             if offset % 0x4000 == 0 {
@@ -61,7 +61,7 @@ fn infer_page_size(mach: &MachFile<'_>) -> usize {
     0x1000
 }
 
-fn expected_data_shift(original: &MachFile<'_>, rebuilt: &MachFile<'_>) -> usize {
+fn expected_data_shift(original: &MachoFile<'_>, rebuilt: &MachoFile<'_>) -> usize {
     let header_size = original.bitness().header_size();
     let page_size = infer_page_size(original);
     let old_start = align_up(
@@ -75,8 +75,8 @@ fn expected_data_shift(original: &MachFile<'_>, rebuilt: &MachFile<'_>) -> usize
     new_start - old_start
 }
 
-fn main_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
-    mach.load_commands().iter().find_map(|lc| {
+fn main_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
+    macho.load_commands().iter().find_map(|lc| {
         if let LoadCommand::Main(entry) = &lc.kind {
             Some(entry.entry_offset)
         } else {
@@ -85,8 +85,8 @@ fn main_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
     })
 }
 
-fn fileset_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
-    mach.load_commands().iter().find_map(|lc| {
+fn fileset_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
+    macho.load_commands().iter().find_map(|lc| {
         if let LoadCommand::FilesetEntry(entry) = &lc.kind {
             Some(entry.file_offset)
         } else {
@@ -99,9 +99,9 @@ fn fileset_entry_offset(mach: &MachFile<'_>) -> Option<u64> {
 fn round_trip_identity() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let editor = MachEditor::new(mach);
+    let editor = MachoEditor::new(macho);
     let rebuilt = editor.build().expect("build failed");
 
     // Re-parse the rebuilt binary
@@ -109,26 +109,26 @@ fn round_trip_identity() {
     let rm = reparsed.first_mach();
 
     // Verify header fields match
-    assert_eq!(rm.header().ncmds, mach.header().ncmds);
-    assert_eq!(rm.header().file_type, mach.header().file_type);
-    assert_eq!(rm.header().cpu_type, mach.header().cpu_type);
+    assert_eq!(rm.header().ncmds, macho.header().ncmds);
+    assert_eq!(rm.header().file_type, macho.header().file_type);
+    assert_eq!(rm.header().cpu_type, macho.header().cpu_type);
 
     // Verify segment count
-    assert_eq!(rm.segments().len(), mach.segments().len());
+    assert_eq!(rm.segments().len(), macho.segments().len());
 
     // Verify load command count
-    assert_eq!(rm.load_commands().len(), mach.load_commands().len());
+    assert_eq!(rm.load_commands().len(), macho.load_commands().len());
 }
 
 #[test]
 fn add_rpath() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let original_ncmds = mach.header().ncmds;
+    let original_ncmds = macho.header().ncmds;
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     editor.add_rpath("@executable_path/../Frameworks");
 
     let rebuilt = editor.build().expect("build failed");
@@ -152,18 +152,18 @@ fn add_rpath() {
 fn remove_command() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let original_ncmds = mach.header().ncmds;
+    let original_ncmds = macho.header().ncmds;
 
     // Find the UUID command index
-    let uuid_idx = mach
+    let uuid_idx = macho
         .load_commands()
         .iter()
         .position(|lc| matches!(lc.kind, LoadCommand::Uuid(_)));
 
     if let Some(idx) = uuid_idx {
-        let mut editor = MachEditor::new(mach);
+        let mut editor = MachoEditor::new(macho);
         editor.remove_command(idx).expect("remove failed");
 
         let rebuilt = editor.build().expect("build failed");
@@ -179,9 +179,9 @@ fn remove_command() {
 fn segments_still_valid_after_add() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     editor.add_rpath("/test/path");
     editor.add_rpath("/another/path");
 
@@ -190,7 +190,7 @@ fn segments_still_valid_after_add() {
     let rm = reparsed.first_mach();
 
     // All segments should still be parseable
-    assert_eq!(rm.segments().len(), mach.segments().len());
+    assert_eq!(rm.segments().len(), macho.segments().len());
 
     // The TEXT segment should have correct name
     let text = rm.segments().iter().find(|s| s.name == "__TEXT");
@@ -212,9 +212,9 @@ fn segments_still_valid_after_add() {
 fn add_load_dylib() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     editor.add_load_dylib("/usr/lib/libfoo.dylib", 0x10000, 0x10000);
 
     let rebuilt = editor.build().expect("build failed");
@@ -235,9 +235,9 @@ fn add_load_dylib() {
 fn remove_code_signature() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     editor.remove_code_signature();
 
     let rebuilt = editor.build().expect("build failed");
@@ -255,10 +255,10 @@ fn remove_code_signature() {
 fn lc_main_entry_offset_tracks_shifted_text_data() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
-    let original_entry = main_entry_offset(mach).expect("expected LC_MAIN");
+    let macho = container.first_mach();
+    let original_entry = main_entry_offset(macho).expect("expected LC_MAIN");
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     let large_rpath = format!("/{}", "a".repeat(0x5000));
     editor.add_rpath(&large_rpath);
 
@@ -266,7 +266,7 @@ fn lc_main_entry_offset_tracks_shifted_text_data() {
     let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
-    let delta = expected_data_shift(mach, rm);
+    let delta = expected_data_shift(macho, rm);
     assert!(delta > 0, "test must force a data-region shift");
 
     let rebuilt_entry = main_entry_offset(rm).expect("expected LC_MAIN after rebuild");
@@ -277,10 +277,10 @@ fn lc_main_entry_offset_tracks_shifted_text_data() {
 fn fileset_entry_offset_tracks_shifted_payload_data() {
     let data = minimal_fileset_binary("com.example.member", 0x1000_0000, 0x2000);
     let container = macho::parse(&data).expect("failed to parse synthetic fileset");
-    let mach = container.first_mach();
-    let original_offset = fileset_entry_offset(mach).expect("expected LC_FILESET_ENTRY");
+    let macho = container.first_mach();
+    let original_offset = fileset_entry_offset(macho).expect("expected LC_FILESET_ENTRY");
 
-    let mut editor = MachEditor::new(mach);
+    let mut editor = MachoEditor::new(macho);
     let large_rpath = format!("/{}", "b".repeat(0x1400));
     editor.add_rpath(&large_rpath);
 
@@ -288,7 +288,7 @@ fn fileset_entry_offset_tracks_shifted_payload_data() {
     let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
     let rm = reparsed.first_mach();
 
-    let delta = expected_data_shift(mach, rm);
+    let delta = expected_data_shift(macho, rm);
     assert!(delta > 0, "test must force a data-region shift");
 
     let rebuilt_offset = fileset_entry_offset(rm).expect("expected LC_FILESET_ENTRY after rebuild");

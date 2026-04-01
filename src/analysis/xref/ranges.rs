@@ -3,13 +3,14 @@ use std::collections::HashSet;
 use serde::Serialize;
 
 use crate::error::Result;
-use crate::format::parse_symbol_table;
+use crate::ext::MachoExt;
 use crate::metadata::dyld::exports::parse_exports;
 use crate::metadata::dyld::types::ExportKind;
-use crate::metadata::objc::parse_objc_metadata;
+use crate::metadata::objc::ObjCMetadata;
 use crate::model::addr::map::AddressMap;
 use crate::model::addr::types::{ThinFileOffset, Va};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::model::symbol::SymbolType;
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,7 +64,7 @@ struct RawEntry {
 }
 
 impl SymbolRangeIndex {
-    pub fn build(mach: &MachFile<'_>) -> Result<Self> {
+    pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
         let mut raw: Vec<RawEntry> = Vec::new();
 
         // Track nlist VAs in a HashSet for O(1) dedup checks instead of O(n)
@@ -71,7 +72,7 @@ impl SymbolRangeIndex {
         let mut nlist_vas: HashSet<u64> = HashSet::new();
 
         // Collect defined nlist symbols
-        if let Ok(symtab) = parse_symbol_table(mach) {
+        if let Ok(symtab) = macho.ext::<SymbolTable<'_>>() {
             for sym in symtab.symbols() {
                 if sym.sym_type == SymbolType::Section && sym.value != 0 {
                     nlist_vas.insert(sym.value);
@@ -91,7 +92,7 @@ impl SymbolRangeIndex {
         // Collect exports with addresses (only add if not already covered by nlist).
         // Skip Absolute exports — they are linker-defined constants not backed
         // by any file section, so they have no meaningful ownership range.
-        if let Ok(exports) = parse_exports(mach) {
+        if let Ok(exports) = parse_exports(macho) {
             for exp in &exports {
                 let addr = match &exp.kind {
                     ExportKind::Regular { address } => *address,
@@ -118,7 +119,7 @@ impl SymbolRangeIndex {
         }
 
         // Collect ObjC method implementations
-        if let Ok(objc) = parse_objc_metadata(mach) {
+        if let Ok(objc) = macho.ext::<ObjCMetadata>() {
             for class in &objc.classes {
                 for method in &class.instance_methods {
                     if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
@@ -189,7 +190,7 @@ impl SymbolRangeIndex {
 
         // Build section boundaries for sizing the last entry in each section
         let mut section_ends: Vec<(Va, Va)> = Vec::new(); // (start, end)
-        for seg in mach.segments() {
+        for seg in macho.segments() {
             for sect in &seg.sections {
                 if sect.size > 0 {
                     section_ends.push((sect.addr, Va(sect.addr.0 + sect.size)));
@@ -272,6 +273,15 @@ impl SymbolRangeIndex {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+impl<'data> MachoExt<'data> for SymbolRangeIndex {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
+    where
+        'data: 'mf,
+    {
+        Self::build(macho)
     }
 }
 

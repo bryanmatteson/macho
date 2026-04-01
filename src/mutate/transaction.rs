@@ -1,7 +1,7 @@
 use crate::format::parse;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
-use crate::mutate::MachEditor;
+use crate::model::macho_file::MachoFile;
+use crate::mutate::MachoEditor;
 pub use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::build_preview;
 pub use crate::mutate::preview::{PatchPreview, SignatureOutcome};
@@ -14,14 +14,14 @@ pub struct PreparedPatch {
 }
 
 pub struct PatchTransaction<'data> {
-    mach: &'data MachFile<'data>,
+    macho: &'data MachoFile<'data>,
     ops: Vec<PatchOp>,
 }
 
 impl<'data> PatchTransaction<'data> {
-    pub fn new(mach: &'data MachFile<'data>) -> Self {
+    pub fn new(macho: &'data MachoFile<'data>) -> Self {
         Self {
-            mach,
+            macho,
             ops: Vec::new(),
         }
     }
@@ -71,14 +71,14 @@ impl<'data> PatchTransaction<'data> {
     }
 
     pub fn prepare(&self) -> Result<PreparedPatch> {
-        let mut editor = MachEditor::new(self.mach);
+        let mut editor = MachoEditor::new(self.macho);
         apply_ops(&mut editor, &self.ops)?;
         let mut candidate = editor.build()?;
         apply_byte_patches(&mut candidate, &self.ops)?;
         let reparsed = parse(&candidate)?;
         let reparsed_mach = reparsed.first_mach();
 
-        let preview = build_preview(self.mach, candidate.as_slice(), reparsed_mach, &self.ops)?;
+        let preview = build_preview(self.macho, candidate.as_slice(), reparsed_mach, &self.ops)?;
 
         Ok(PreparedPatch {
             preview,
@@ -91,7 +91,7 @@ impl<'data> PatchTransaction<'data> {
     }
 
     pub fn build_unchecked(&self) -> Result<Vec<u8>> {
-        let mut editor = MachEditor::new(self.mach);
+        let mut editor = MachoEditor::new(self.macho);
         apply_ops(&mut editor, &self.ops)?;
         let mut output = editor.build()?;
         apply_byte_patches(&mut output, &self.ops)?;
@@ -113,7 +113,7 @@ impl<'data> PatchTransaction<'data> {
     }
 }
 
-fn apply_ops(editor: &mut MachEditor<'_>, ops: &[PatchOp]) -> Result<()> {
+fn apply_ops(editor: &mut MachoEditor<'_>, ops: &[PatchOp]) -> Result<()> {
     for op in ops {
         match op {
             PatchOp::AddRpath(path) => editor.add_rpath(path),
@@ -132,7 +132,7 @@ fn apply_ops(editor: &mut MachEditor<'_>, ops: &[PatchOp]) -> Result<()> {
                 editor.replace_command(*idx, cmd.clone())?;
             }
             PatchOp::PatchBytes { .. } => {
-                // Byte patches are applied after build, not through MachEditor
+                // Byte patches are applied after build, not through MachoEditor
             }
         }
     }

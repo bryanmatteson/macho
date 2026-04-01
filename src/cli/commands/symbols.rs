@@ -1,5 +1,5 @@
-use crate::format::parse_symbol_table;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::symbols::demangle::SymbolDemangler;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -47,11 +47,11 @@ pub fn run(args: SymbolsArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_symbols(mach, &args);
+            print_symbols(macho, &args);
             if show_header {
                 println!();
             }
@@ -62,8 +62,8 @@ pub fn run(args: SymbolsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_symbols(mach: &MachFile<'_>, args: &SymbolsArgs) {
-    let symtab = match parse_symbol_table(mach) {
+fn print_symbols(macho: &MachoFile<'_>, args: &SymbolsArgs) {
+    let symtab = match macho.ext::<SymbolTable<'_>>() {
         Ok(st) => st,
         Err(e) => {
             let msg = e.to_string();

@@ -1,11 +1,11 @@
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::symbol::{Symbol, SymbolTable};
 use crate::recovery::cpp::types::{
     CppBodyAnalysis, CppBodyKind, CppConfidence, CppEvidence, CppEvidenceKind, CppReturnChannel,
 };
 
 pub fn analyze_symbol_body(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     symtab: &SymbolTable<'_>,
     symbol: &Symbol<'_>,
 ) -> Option<CppBodyAnalysis> {
@@ -13,8 +13,8 @@ pub fn analyze_symbol_body(
         return None;
     }
 
-    let bytes = symbol_bytes(mach, symtab, symbol, 16)?;
-    let arch = mach.header().cpu_type.name().to_string();
+    let bytes = symbol_bytes(macho, symtab, symbol, 16)?;
+    let arch = macho.header().cpu_type.name().to_string();
     let (kind, return_channel, likely_wrapper) = if arch.starts_with("arm64") {
         classify_arm64(bytes)
     } else if arch == "x86_64" {
@@ -38,7 +38,7 @@ pub fn analyze_symbol_body(
 }
 
 fn symbol_bytes<'a>(
-    mach: &'a MachFile<'_>,
+    macho: &'a MachoFile<'_>,
     symtab: &SymbolTable<'_>,
     symbol: &Symbol<'_>,
     max_len: usize,
@@ -50,7 +50,7 @@ fn symbol_bytes<'a>(
         .min()
         .unwrap_or(symbol.value + max_len as u64);
     let len = (next_va - symbol.value).min(max_len as u64) as usize;
-    mach.read_bytes_at_va(crate::model::addr::Va(symbol.value), len.max(1))
+    macho.read_bytes_at_va(crate::model::addr::Va(symbol.value), len.max(1))
         .ok()
 }
 

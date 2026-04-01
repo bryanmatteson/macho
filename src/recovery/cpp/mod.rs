@@ -8,23 +8,23 @@ pub mod unify;
 
 use std::collections::BTreeMap;
 
-use crate::format::parse_symbol_table;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::recovery::cpp::abi::analyze_symbol_body;
 use crate::recovery::cpp::rtti::build_typeinfo_index;
 use crate::recovery::cpp::symbol::parse_symbol;
 use crate::recovery::vtables::{SlotTarget, VtableIndex};
 use crate::{Error, Result};
 
-pub use correlate::{ExternalHeaderIndex, HeaderCandidate, correlate_functions};
+pub use correlate::{correlate_functions, ExternalHeaderIndex, HeaderCandidate};
 pub use render::{default_header_unit, render_header};
 pub use types::*;
 pub use unify::unify_images;
 
-pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
-    let symtab = parse_symbol_table(mach)?;
-    let typeinfos = build_typeinfo_index(mach)?;
-    let vtables = VtableIndex::build(mach)?;
+pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> {
+    let symtab = macho.ext::<SymbolTable<'_>>()?;
+    let typeinfos = build_typeinfo_index(macho)?;
+    let vtables = VtableIndex::build(macho)?;
 
     let mut symbols = Vec::new();
     let mut classes: BTreeMap<String, types::CppClass> = BTreeMap::new();
@@ -48,7 +48,7 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
         };
 
         if let types::CppSymbolKind::Function { ref mut decl } = record.kind {
-            decl.body_analysis = analyze_symbol_body(mach, &symtab, symbol);
+            decl.body_analysis = analyze_symbol_body(macho, &symtab, symbol);
             if let Some(parent) = decl.name.parent() {
                 if decl.is_constructor || decl.is_destructor {
                     probable_classes.insert(parent.as_string());
@@ -113,9 +113,9 @@ pub fn build_image_index(mach: &MachFile<'_>) -> Result<types::CppImageIndex> {
 
     Ok(types::CppImageIndex {
         image: types::CppImageInfo {
-            arch: mach.header().cpu_type.name().to_string(),
-            uuid: mach.uuid().map(crate::model::load_command::format_uuid),
-            install_name: mach.load_commands().iter().find_map(|lc| match &lc.kind {
+            arch: macho.header().cpu_type.name().to_string(),
+            uuid: macho.uuid().map(crate::model::load_command::format_uuid),
+            install_name: macho.load_commands().iter().find_map(|lc| match &lc.kind {
                 crate::model::load_command::LoadCommand::IdDylib(data) => {
                     Some(data.name.to_string())
                 }
@@ -213,8 +213,8 @@ fn strip_leading_return_type(text: &str) -> Option<&str> {
     Some(text[split + 1..].trim_start())
 }
 
-pub fn build_headers_for_mach(mach: &MachFile<'_>) -> Result<String> {
-    let index = build_image_index(mach)?;
+pub fn build_headers_for_mach(macho: &MachoFile<'_>) -> Result<String> {
+    let index = build_image_index(macho)?;
     let unified = unify::unify_images(&[index]);
     let unit = render::default_header_unit(&unified);
     Ok(render::render_header(&unit))

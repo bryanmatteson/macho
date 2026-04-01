@@ -1,7 +1,7 @@
 use macho::metadata::dyld::chained::parse_chained_fixups;
 use macho::metadata::dyld::exports::{find_export, parse_exports};
 use macho::metadata::dyld::types::{ExportKind, FixupKind};
-use macho::model::container::MachContainer;
+use macho::model::container::MachoContainer;
 
 fn load_binary(path: &str) -> memmap2::Mmap {
     let file = std::fs::File::open(path).unwrap_or_else(|e| panic!("failed to open {path}: {e}"));
@@ -20,8 +20,8 @@ fn parse_chained_fixups_tar() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     // tar has arm64e with chained fixups
-    for mach in container.mach_files() {
-        match parse_chained_fixups(mach) {
+    for macho in container.macho_files() {
+        match parse_chained_fixups(macho) {
             Ok(fixups) => {
                 assert!(!fixups.imports.is_empty(), "expected imports");
                 // All import names should be non-empty valid strings
@@ -42,10 +42,10 @@ fn chained_fixups_import_names() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     // The arm64e arch should have archive_* imports
-    if let MachContainer::Fat(ref fat) = container {
+    if let MachoContainer::Fat(ref fat) = container {
         for arch in fat.arches() {
             if arch.spec.is_arm64e() {
-                let fixups = parse_chained_fixups(&arch.mach)
+                let fixups = parse_chained_fixups(&arch.macho)
                     .expect("failed to parse chained fixups for arm64e");
                 let has_archive = fixups
                     .imports
@@ -63,8 +63,8 @@ fn chained_fixups_have_bind_or_rebase() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        if let Ok(fixups) = parse_chained_fixups(mach) {
+    for macho in container.macho_files() {
+        if let Ok(fixups) = parse_chained_fixups(macho) {
             if !fixups.fixups.is_empty() {
                 // At least one should be a bind or rebase
                 let has_bind = fixups
@@ -92,9 +92,9 @@ fn chained_fixups_have_bind_or_rebase() {
 fn parse_exports_tar() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let exports = parse_exports(mach).expect("failed to parse exports");
+    let exports = parse_exports(macho).expect("failed to parse exports");
     assert!(!exports.is_empty(), "expected exports");
 
     // __mh_execute_header should be exported
@@ -108,9 +108,9 @@ fn parse_exports_tar() {
 fn find_export_by_name() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let result = find_export(mach, "__mh_execute_header").expect("failed to find export");
+    let result = find_export(macho, "__mh_execute_header").expect("failed to find export");
     assert!(result.is_some());
     let export = result.unwrap();
     assert_eq!(export.name, "__mh_execute_header");
@@ -121,9 +121,9 @@ fn find_export_by_name() {
 fn find_export_nonexistent() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let result = find_export(mach, "_this_does_not_exist").expect("lookup failed");
+    let result = find_export(macho, "_this_does_not_exist").expect("lookup failed");
     assert!(result.is_none());
 }
 
@@ -132,8 +132,8 @@ fn exports_all_have_names() {
     let mmap = load_tar();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let exports = parse_exports(mach).expect("failed to parse exports");
+    for macho in container.macho_files() {
+        let exports = parse_exports(macho).expect("failed to parse exports");
         for e in &exports {
             assert!(!e.name.is_empty(), "export has empty name");
         }
@@ -160,8 +160,8 @@ fn no_chained_fixups_returns_error() {
     data.extend_from_slice(&[0u8; 64]); // segment data
 
     let container = macho::parse(&data).expect("parse failed");
-    let mach = container.first_mach();
-    assert!(parse_chained_fixups(mach).is_err());
+    let macho = container.first_mach();
+    assert!(parse_chained_fixups(macho).is_err());
 }
 
 // --- ULEB128 edge cases tested in dyld/uleb.rs unit tests ---
@@ -232,19 +232,19 @@ fn synthetic_exports_trie() {
     data.extend_from_slice(&trie);
 
     let container = macho::parse(&data).expect("parse failed");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let exports = parse_exports(mach).expect("export parse failed");
+    let exports = parse_exports(macho).expect("export parse failed");
     assert_eq!(exports.len(), 1);
     assert_eq!(exports[0].name, "_main");
     assert_eq!(exports[0].address(), Some(0x1000));
 
     // find_export
-    let found = find_export(mach, "_main").expect("find failed");
+    let found = find_export(macho, "_main").expect("find failed");
     assert!(found.is_some());
     assert_eq!(found.unwrap().name, "_main");
 
     // Not found
-    let missing = find_export(mach, "_nonexistent").expect("find failed");
+    let missing = find_export(macho, "_nonexistent").expect("find failed");
     assert!(missing.is_none());
 }

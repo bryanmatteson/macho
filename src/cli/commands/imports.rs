@@ -1,5 +1,5 @@
 use crate::metadata::dyld::chained::parse_chained_fixups;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::symbols::demangle::SymbolDemangler;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -27,11 +27,11 @@ pub fn run(args: ImportsArgs) -> Result<()> {
     for_each_selected_mach(
         &container,
         args.arch.as_deref(),
-        |mach, arch_name, show_header| {
+        |macho, arch_name, show_header| {
             if show_header {
                 println!("=== {arch_name} ===");
             }
-            print_imports(mach, &args);
+            print_imports(macho, &args);
             if show_header {
                 println!();
             }
@@ -41,8 +41,8 @@ pub fn run(args: ImportsArgs) -> Result<()> {
     Ok(())
 }
 
-fn print_imports(mach: &MachFile<'_>, args: &ImportsArgs) {
-    match parse_chained_fixups(mach) {
+fn print_imports(macho: &MachoFile<'_>, args: &ImportsArgs) {
+    match parse_chained_fixups(macho) {
         Ok(fixups) => {
             let mut demangler = SymbolDemangler::new(args.demangle);
             demangler.precompute(fixups.imports.iter().map(|import| import.name));

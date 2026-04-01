@@ -1,56 +1,56 @@
 pub mod snapshot;
 
 use crate::format::constants::VmProtection;
-use crate::format::parse_symbol_table;
-use crate::metadata::codesign::parse_code_signature;
+use crate::metadata::codesign::CodeSignature;
 use crate::metadata::dyld::chained::parse_chained_fixups;
 use crate::metadata::dyld::exports::parse_exports;
 use crate::metadata::dyld::types::ExportKind;
-use crate::metadata::objc::parse_objc_metadata;
-use crate::model::container::MachContainer;
+use crate::metadata::objc::ObjCMetadata;
+use crate::model::container::MachoContainer;
 use crate::model::load_command::LoadCommand;
 use crate::model::load_command::format_uuid;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
+use crate::model::symbol::SymbolTable;
 use crate::model::validate;
 use crate::symbols::imports::{ImportRecord, collect_imports};
 
 pub use self::snapshot::*;
 
 impl SliceSnapshot {
-    pub fn from_mach(mach: &MachFile<'_>) -> Self {
+    pub fn from_macho(macho: &MachoFile<'_>) -> Self {
         let mut analysis_issues = Vec::new();
 
         Self {
-            arch: mach.header().cpu_type.name().to_string(),
-            header: extract_header(mach),
-            load_commands: extract_load_commands(mach),
-            segments: extract_segments(mach),
-            symbols: extract_symbols(mach, &mut analysis_issues),
-            exports: extract_exports(mach, &mut analysis_issues),
-            imports: extract_imports(mach, &mut analysis_issues),
-            fixups: extract_fixups(mach, &mut analysis_issues),
-            objc: extract_objc(mach, &mut analysis_issues),
-            codesign: extract_codesign(mach, &mut analysis_issues),
+            arch: macho.header().cpu_type.name().to_string(),
+            header: extract_header(macho),
+            load_commands: extract_load_commands(macho),
+            segments: extract_segments(macho),
+            symbols: extract_symbols(macho, &mut analysis_issues),
+            exports: extract_exports(macho, &mut analysis_issues),
+            imports: extract_imports(macho, &mut analysis_issues),
+            fixups: extract_fixups(macho, &mut analysis_issues),
+            objc: extract_objc(macho, &mut analysis_issues),
+            codesign: extract_codesign(macho, &mut analysis_issues),
             analysis_issues,
-            diagnostics: extract_diagnostics(mach),
+            diagnostics: extract_diagnostics(macho),
         }
     }
 }
 
 impl ContainerSnapshot {
-    pub fn from_container(container: &MachContainer<'_>) -> Self {
+    pub fn from_container(container: &MachoContainer<'_>) -> Self {
         match container {
-            MachContainer::Thin(mach) => Self {
-                format: thin_container_format(mach),
-                slices: vec![SliceSnapshot::from_mach(mach)],
+            MachoContainer::Thin(macho) => Self {
+                format: thin_container_format(macho),
+                slices: vec![SliceSnapshot::from_macho(macho)],
             },
-            MachContainer::Fat(fat) => Self {
+            MachoContainer::Fat(fat) => Self {
                 format: ContainerFormat::Fat,
                 slices: fat
                     .arches()
                     .iter()
                     .map(|arch| {
-                        let mut snap = SliceSnapshot::from_mach(&arch.mach);
+                        let mut snap = SliceSnapshot::from_macho(&arch.macho);
                         snap.arch = arch.spec.name();
                         snap
                     })
@@ -60,20 +60,20 @@ impl ContainerSnapshot {
     }
 }
 
-fn thin_container_format(mach: &MachFile<'_>) -> ContainerFormat {
-    if mach.header().file_type.name() == "MH_FILESET" {
+fn thin_container_format(macho: &MachoFile<'_>) -> ContainerFormat {
+    if macho.header().file_type.name() == "MH_FILESET" {
         ContainerFormat::Fileset
     } else {
         ContainerFormat::Thin
     }
 }
 
-fn extract_header(mach: &MachFile<'_>) -> HeaderSnapshot {
-    let h = mach.header();
+fn extract_header(macho: &MachoFile<'_>) -> HeaderSnapshot {
+    let h = macho.header();
 
-    let uuid = mach.uuid().map(format_uuid);
+    let uuid = macho.uuid().map(format_uuid);
 
-    let platform = extract_platform_snapshot(mach);
+    let platform = extract_platform_snapshot(macho);
 
     let flags: Vec<String> = {
         let mut out = Vec::new();
@@ -95,8 +95,9 @@ fn extract_header(mach: &MachFile<'_>) -> HeaderSnapshot {
     }
 }
 
-fn extract_load_commands(mach: &MachFile<'_>) -> Vec<LoadCommandSnapshot> {
-    mach.load_commands()
+fn extract_load_commands(macho: &MachoFile<'_>) -> Vec<LoadCommandSnapshot> {
+    macho
+        .load_commands()
         .iter()
         .map(|lc| {
             let fileset_entry = match &lc.kind {
@@ -117,8 +118,9 @@ fn extract_load_commands(mach: &MachFile<'_>) -> Vec<LoadCommandSnapshot> {
         .collect()
 }
 
-fn extract_segments(mach: &MachFile<'_>) -> Vec<SegmentSnapshot> {
-    mach.segments()
+fn extract_segments(macho: &MachoFile<'_>) -> Vec<SegmentSnapshot> {
+    macho
+        .segments()
         .iter()
         .map(|seg| SegmentSnapshot {
             name: seg.name.to_string(),
@@ -144,14 +146,14 @@ fn extract_segments(mach: &MachFile<'_>) -> Vec<SegmentSnapshot> {
 }
 
 fn extract_symbols(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Vec<SymbolSnapshot> {
-    if !has_symbol_table(mach) {
+    if !has_symbol_table(macho) {
         return Vec::new();
     }
 
-    let symtab = match parse_symbol_table(mach) {
+    let symtab = match macho.ext::<SymbolTable<'_>>() {
         Ok(st) => st,
         Err(err) => {
             push_analysis_issue(
@@ -177,14 +179,14 @@ fn extract_symbols(
 }
 
 fn extract_exports(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Vec<ExportSnapshot> {
-    if !has_export_trie(mach) {
+    if !has_export_trie(macho) {
         return Vec::new();
     }
 
-    let exports = match parse_exports(mach) {
+    let exports = match parse_exports(macho) {
         Ok(e) => e,
         Err(err) => {
             push_analysis_issue(
@@ -224,10 +226,10 @@ fn extract_exports(
 }
 
 fn extract_imports(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Vec<ImportRecord> {
-    match collect_imports(mach) {
+    match collect_imports(macho) {
         Ok(imports) => imports,
         Err(err) => {
             push_analysis_issue(analysis_issues, "imports", err.to_string());
@@ -237,14 +239,14 @@ fn extract_imports(
 }
 
 fn extract_fixups(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Vec<FixupSnapshot> {
-    if !has_chained_fixups(mach) {
+    if !has_chained_fixups(macho) {
         return Vec::new();
     }
 
-    let fixups = match parse_chained_fixups(mach) {
+    let fixups = match parse_chained_fixups(macho) {
         Ok(fixups) => fixups,
         Err(err) => {
             push_analysis_issue(
@@ -267,10 +269,10 @@ fn extract_fixups(
 }
 
 fn extract_objc(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> ObjCSnapshot {
-    if !has_objc_metadata(mach) {
+    if !has_objc_metadata(macho) {
         return ObjCSnapshot {
             classes: Vec::new(),
             categories: Vec::new(),
@@ -278,7 +280,7 @@ fn extract_objc(
         };
     }
 
-    let meta = match parse_objc_metadata(mach) {
+    let meta = match macho.ext::<ObjCMetadata>() {
         Ok(m) => m,
         Err(err) => {
             push_analysis_issue(
@@ -342,14 +344,14 @@ fn extract_objc(
 }
 
 fn extract_codesign(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
 ) -> Option<CodesignSnapshot> {
-    if !has_code_signature(mach) {
+    if !has_code_signature(macho) {
         return None;
     }
 
-    let sig = match parse_code_signature(mach) {
+    let sig = match macho.ext::<CodeSignature<'_>>() {
         Ok(sig) => sig,
         Err(err) => {
             push_analysis_issue(
@@ -460,8 +462,8 @@ fn stable_fingerprint(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn extract_diagnostics(mach: &MachFile<'_>) -> Vec<DiagnosticSnapshot> {
-    validate::validate(mach)
+fn extract_diagnostics(macho: &MachoFile<'_>) -> Vec<DiagnosticSnapshot> {
+    validate::validate(macho)
         .into_iter()
         .map(|d| DiagnosticSnapshot {
             severity: match d.severity {
@@ -549,26 +551,28 @@ fn push_analysis_issue(
     });
 }
 
-fn has_symbol_table(mach: &MachFile<'_>) -> bool {
-    mach.find_load_command(|lc| lc.as_symtab().is_some())
+fn has_symbol_table(macho: &MachoFile<'_>) -> bool {
+    macho
+        .find_load_command(|lc| lc.as_symtab().is_some())
         .is_some()
 }
 
-fn has_export_trie(mach: &MachFile<'_>) -> bool {
-    mach.load_commands().iter().any(|lc| match &lc.kind {
+fn has_export_trie(macho: &MachoFile<'_>) -> bool {
+    macho.load_commands().iter().any(|lc| match &lc.kind {
         LoadCommand::DyldExportsTrie(_) => true,
         LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => data.export_size > 0,
         _ => false,
     })
 }
 
-fn has_chained_fixups(mach: &MachFile<'_>) -> bool {
-    mach.find_load_command(|lc| matches!(lc, LoadCommand::DyldChainedFixups(_)))
+fn has_chained_fixups(macho: &MachoFile<'_>) -> bool {
+    macho
+        .find_load_command(|lc| matches!(lc, LoadCommand::DyldChainedFixups(_)))
         .is_some()
 }
 
-fn has_objc_metadata(mach: &MachFile<'_>) -> bool {
-    mach.all_sections().any(|section| {
+fn has_objc_metadata(macho: &MachoFile<'_>) -> bool {
+    macho.all_sections().any(|section| {
         matches!(
             section.section_name.as_str_lossy().as_ref(),
             "__objc_classlist" | "__objc_catlist" | "__objc_protolist"
@@ -576,14 +580,15 @@ fn has_objc_metadata(mach: &MachFile<'_>) -> bool {
     })
 }
 
-fn has_code_signature(mach: &MachFile<'_>) -> bool {
-    mach.find_load_command(|lc| matches!(lc, LoadCommand::CodeSignature(_)))
+fn has_code_signature(macho: &MachoFile<'_>) -> bool {
+    macho
+        .find_load_command(|lc| matches!(lc, LoadCommand::CodeSignature(_)))
         .is_some()
 }
 
-fn extract_platform_snapshot(mach: &MachFile<'_>) -> Option<PlatformSnapshot> {
+fn extract_platform_snapshot(macho: &MachoFile<'_>) -> Option<PlatformSnapshot> {
     // Try LC_BUILD_VERSION first
-    if let Some(bv) = mach
+    if let Some(bv) = macho
         .load_commands()
         .iter()
         .find_map(|lc| lc.kind.as_build_version())
@@ -596,7 +601,7 @@ fn extract_platform_snapshot(mach: &MachFile<'_>) -> Option<PlatformSnapshot> {
     }
 
     // Fall back to LC_VERSION_MIN_*
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::VersionMinMacOS(d) => {
                 return Some(PlatformSnapshot {

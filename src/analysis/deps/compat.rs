@@ -3,11 +3,11 @@ use serde::Serialize;
 use crate::analysis::deps::graph::DepGraph;
 use crate::error::Result;
 use crate::format::constants::{
-    MachHeaderFlags, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_WATCHOS,
+    MachoHeaderFlags, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_WATCHOS,
 };
 use crate::model::header::FileType;
 use crate::model::load_command::{LoadCommand, Platform};
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct CompatReport {
@@ -71,9 +71,9 @@ impl std::fmt::Display for CompatSeverity {
 
 impl CompatReport {
     pub fn check(
-        target: &MachFile<'_>,
+        target: &MachoFile<'_>,
         target_path: &str,
-        provider: Option<&MachFile<'_>>,
+        provider: Option<&MachoFile<'_>>,
         provider_path: Option<&str>,
     ) -> Result<Self> {
         let mut findings = Vec::new();
@@ -133,7 +133,7 @@ impl CompatReport {
     }
 }
 
-fn check_arch(target: &MachFile<'_>, provider: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+fn check_arch(target: &MachoFile<'_>, provider: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
     let t_cpu = target.header().cpu_type;
     let p_cpu = provider.header().cpu_type;
 
@@ -157,9 +157,9 @@ fn check_arch(target: &MachFile<'_>, provider: &MachFile<'_>, findings: &mut Vec
 }
 
 fn get_platform(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
 ) -> Option<(Platform, crate::model::load_command::PackedVersion)> {
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         match &lc.kind {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),
             LoadCommand::VersionMinMacOS(d) => {
@@ -181,8 +181,8 @@ fn get_platform(
 }
 
 fn check_platform(
-    target: &MachFile<'_>,
-    provider: &MachFile<'_>,
+    target: &MachoFile<'_>,
+    provider: &MachoFile<'_>,
     findings: &mut Vec<CompatFinding>,
 ) {
     let t_plat = get_platform(target);
@@ -240,8 +240,8 @@ fn check_platform(
 }
 
 fn check_file_type(
-    target: &MachFile<'_>,
-    provider: &MachFile<'_>,
+    target: &MachoFile<'_>,
+    provider: &MachoFile<'_>,
     findings: &mut Vec<CompatFinding>,
 ) {
     let p_type = provider.header().file_type;
@@ -270,8 +270,8 @@ fn check_file_type(
 }
 
 fn check_version_compat(
-    _target: &MachFile<'_>,
-    provider: &MachFile<'_>,
+    _target: &MachoFile<'_>,
+    provider: &MachoFile<'_>,
     target_graph: &DepGraph,
     findings: &mut Vec<CompatFinding>,
 ) {
@@ -341,8 +341,8 @@ fn check_version_compat(
 }
 
 fn check_import_coverage(
-    _target: &MachFile<'_>,
-    provider: &MachFile<'_>,
+    _target: &MachoFile<'_>,
+    provider: &MachoFile<'_>,
     target_graph: &DepGraph,
     findings: &mut Vec<CompatFinding>,
 ) -> Result<()> {
@@ -402,17 +402,17 @@ fn check_import_coverage(
     Ok(())
 }
 
-fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+fn check_namespace_mode(target: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
     let flags = target.header().flags;
 
-    if flags.contains(MachHeaderFlags::FORCE_FLAT) {
+    if flags.contains(MachoHeaderFlags::FORCE_FLAT) {
         findings.push(CompatFinding {
             category: CompatCategory::NamespaceMode,
             severity: CompatSeverity::Warning,
             message: "target uses flat namespace (FORCE_FLAT); symbol collisions may occur"
                 .to_string(),
         });
-    } else if flags.contains(MachHeaderFlags::TWOLEVEL) {
+    } else if flags.contains(MachoHeaderFlags::TWOLEVEL) {
         findings.push(CompatFinding {
             category: CompatCategory::NamespaceMode,
             severity: CompatSeverity::Info,
@@ -421,7 +421,7 @@ fn check_namespace_mode(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>
     }
 }
 
-fn check_rpaths(target: &MachFile<'_>, findings: &mut Vec<CompatFinding>) {
+fn check_rpaths(target: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
     let rpaths: Vec<String> = target
         .load_commands()
         .iter()

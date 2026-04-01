@@ -8,7 +8,7 @@ use crate::format::io::pod::{
 use crate::metadata::dyld::types::{ChainedImport, Fixup, FixupKind};
 use crate::model::addr::{ThinFileOffset, Va};
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 
 /// Parsed chained fixup data from LC_DYLD_CHAINED_FIXUPS.
 #[derive(Debug)]
@@ -17,17 +17,17 @@ pub struct ChainedFixups<'data> {
     pub fixups: Vec<Fixup>,
 }
 
-pub fn parse_chained_fixups<'data>(mach: &MachFile<'data>) -> Result<ChainedFixups<'data>> {
-    let linkedit = mach
+pub fn parse_chained_fixups<'data>(macho: &MachoFile<'data>) -> Result<ChainedFixups<'data>> {
+    let linkedit = macho
         .find_load_command(|lc| matches!(lc, LoadCommand::DyldChainedFixups(_)))
         .and_then(|lc| lc.kind.as_linkedit_data())
         .ok_or_else(|| Error::Format("no LC_DYLD_CHAINED_FIXUPS".into()))?;
 
     let data_off = linkedit.data_offset as usize;
     let data_size = linkedit.data_size as usize;
-    let fixup_data = mach.read_bytes_at(ThinFileOffset(data_off as u64), data_size)?;
+    let fixup_data = macho.read_bytes_at(ThinFileOffset(data_off as u64), data_size)?;
 
-    let endian = mach.endian();
+    let endian = macho.endian();
     let header: RawChainedFixupsHeader = pod::read_pod(fixup_data, 0)?;
     let starts_offset = endian.interpret_u32(header.starts_offset) as usize;
     let imports_offset = endian.interpret_u32(header.imports_offset) as usize;
@@ -49,7 +49,7 @@ pub fn parse_chained_fixups<'data>(mach: &MachFile<'data>) -> Result<ChainedFixu
         imports_format,
         symbols_data,
     )?;
-    let fixups = walk_all_chains(mach, fixup_data, endian, starts_offset)?;
+    let fixups = walk_all_chains(macho, fixup_data, endian, starts_offset)?;
 
     Ok(ChainedFixups { imports, fixups })
 }
@@ -141,7 +141,7 @@ fn read_fixup_string(symbols_data: &[u8], offset: usize) -> Result<&str> {
 }
 
 fn walk_all_chains(
-    mach: &MachFile<'_>,
+    macho: &MachoFile<'_>,
     fixup_data: &[u8],
     endian: Endian,
     starts_offset: usize,
@@ -184,15 +184,15 @@ fn walk_all_chains(
 
         // segment_offset is the VM offset from image base to the start of the
         // segment. Convert to an absolute VA, then translate to file offset.
-        let image_base = mach.image_base().0;
+        let image_base = macho.image_base().0;
         let seg_va = Va(image_base + segment_offset);
-        let seg_file_offset = match mach.address_map().va_to_thin_offset(seg_va) {
+        let seg_file_offset = match macho.address_map().va_to_thin_offset(seg_va) {
             Ok(off) => off.0,
             Err(_) => continue, // segment not mapped
         };
 
         let stride = stride_for_format(pointer_format);
-        let file_data = mach.bytes();
+        let file_data = macho.bytes();
 
         for page_idx in 0..page_count {
             let page_start_pos = seg_starts_base + 22 + page_idx * 2;

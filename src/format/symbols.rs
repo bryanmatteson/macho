@@ -1,29 +1,29 @@
 use crate::error::{Error, Result};
 use crate::format::constants::*;
 use crate::format::io::pod::{self, RawNlist32, RawNlist64};
-use crate::model::ext::MachExt;
+use crate::model::ext::MachoExt;
 use crate::model::header::Bitness;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::symbol::{StringTable, Symbol, SymbolTable, SymbolType};
 
 const MAX_SYMBOLS: usize = 10_000_000;
 
-impl<'data> MachExt<'data> for SymbolTable<'data> {
-    fn parse<'mf>(mach: &'mf MachFile<'data>) -> Result<Self>
+impl<'data> MachoExt<'data> for SymbolTable<'data> {
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
     where
         'data: 'mf,
     {
-        parse_symbol_table(mach)
+        parse_symbol_table(macho)
     }
 }
 
-pub fn parse_symbol_table<'data>(mach: &MachFile<'data>) -> Result<SymbolTable<'data>> {
-    let symtab = mach
+pub fn parse_symbol_table<'data>(macho: &MachoFile<'data>) -> Result<SymbolTable<'data>> {
+    let symtab = macho
         .find_load_command(|lc| lc.as_symtab().is_some())
         .and_then(|lc| lc.kind.as_symtab())
         .ok_or_else(|| Error::Format("no LC_SYMTAB load command found".into()))?;
 
-    let data = mach.bytes();
+    let data = macho.bytes();
 
     // Validate and slice the string table
     let str_start = symtab.str_offset as usize;
@@ -50,10 +50,10 @@ pub fn parse_symbol_table<'data>(mach: &MachFile<'data>) -> Result<SymbolTable<'
         )));
     }
 
-    let endian = mach.endian();
+    let endian = macho.endian();
     let sym_offset = symtab.sym_offset as usize;
 
-    let symbols = match mach.bitness() {
+    let symbols = match macho.bitness() {
         Bitness::Bits64 => parse_nlist64(data, endian, sym_offset, nsyms, &string_table)?,
         Bitness::Bits32 => parse_nlist32(data, endian, sym_offset, nsyms, &string_table)?,
     };

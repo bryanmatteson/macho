@@ -40,8 +40,8 @@ pub fn run(args: SwiftArgs) -> Result<()> {
     if args.json {
         // Collect all slices into a single JSON object keyed by arch
         let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, args.arch.as_deref(), |mach, arch_name, _| {
-            let inspector = ImageInspector::new(mach);
+        for_each_selected_mach(&container, args.arch.as_deref(), |macho, arch_name, _| {
+            let inspector = ImageInspector::new(macho);
             let index = inspector.parse_swift_types()?;
             let value = if let Some(kind) = kind_filter {
                 let filtered = SwiftTypeIndex {
@@ -70,8 +70,8 @@ pub fn run(args: SwiftArgs) -> Result<()> {
         for_each_selected_mach(
             &container,
             args.arch.as_deref(),
-            |mach, arch_name, show_header| {
-                let inspector = ImageInspector::new(mach);
+            |macho, arch_name, show_header| {
+                let inspector = ImageInspector::new(macho);
                 let index = inspector.parse_swift_types()?;
                 if show_header {
                     println!("=== {arch_name} ===");

@@ -10,8 +10,8 @@ fn parse_code_signature_true() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    for mach in container.mach_files() {
-        let sig = parse_code_signature(mach).expect("failed to parse signature");
+    for macho in container.macho_files() {
+        let sig = parse_code_signature(macho).expect("failed to parse signature");
         assert!(!sig.blobs().is_empty(), "expected blobs");
         assert!(
             !sig.code_directories().is_empty(),
@@ -24,9 +24,9 @@ fn parse_code_signature_true() {
 fn code_directory_has_identifier() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let sig = parse_code_signature(mach).expect("failed to parse signature");
+    let sig = parse_code_signature(macho).expect("failed to parse signature");
     let id = sig.identifier();
     assert!(id.is_some(), "expected identifier");
     assert!(
@@ -39,9 +39,9 @@ fn code_directory_has_identifier() {
 fn code_directory_hash_type() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let sig = parse_code_signature(mach).expect("failed to parse signature");
+    let sig = parse_code_signature(macho).expect("failed to parse signature");
     let cd = &sig.code_directories()[0];
     // Modern binaries use SHA-256
     assert!(
@@ -57,9 +57,9 @@ fn code_directory_hash_type() {
 fn cms_signature_present() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let sig = parse_code_signature(mach).expect("failed to parse signature");
+    let sig = parse_code_signature(macho).expect("failed to parse signature");
     assert!(sig.cms_signature_present(), "expected CMS signature");
 }
 
@@ -67,9 +67,9 @@ fn cms_signature_present() {
 fn blob_types_are_valid() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let sig = parse_code_signature(mach).expect("failed to parse signature");
+    let sig = parse_code_signature(macho).expect("failed to parse signature");
     for blob in sig.blobs() {
         assert!(blob.size > 0, "blob should have non-zero size");
         assert!(!blob.data.is_empty(), "blob should have data");
@@ -93,8 +93,8 @@ fn no_signature_graceful() {
     data.extend_from_slice(&[0u8; 64]);
 
     let container = macho::parse(&data).expect("parse failed");
-    let mach = container.first_mach();
-    assert!(parse_code_signature(mach).is_err());
+    let macho = container.first_mach();
+    assert!(parse_code_signature(macho).is_err());
 }
 
 #[test]
@@ -103,8 +103,8 @@ fn code_signature_via_ext_trait() {
 
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
-    let mach = container.first_mach();
+    let macho = container.first_mach();
 
-    let sig: CodeSignature = mach.ext().expect("ext failed");
+    let sig: CodeSignature = macho.ext().expect("ext failed");
     assert!(!sig.blobs().is_empty());
 }

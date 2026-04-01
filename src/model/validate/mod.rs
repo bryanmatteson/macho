@@ -5,25 +5,25 @@ pub use diagnostics::{Diagnostic, DiagnosticCode, Severity, Span};
 use crate::format::constants::VmProtection;
 use crate::model::header::Bitness;
 use crate::model::load_command::LoadCommand;
-use crate::model::mach_file::MachFile;
+use crate::model::macho_file::MachoFile;
 use crate::model::names::SegmentName;
 
-pub fn validate(mach: &MachFile<'_>) -> Vec<Diagnostic> {
+pub fn validate(macho: &MachoFile<'_>) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
 
-    check_header_consistency(mach, &mut diags);
-    check_segment_bounds(mach, &mut diags);
-    check_segment_vm_overlap(mach, &mut diags);
-    check_pagezero(mach, &mut diags);
-    check_symtab_bounds(mach, &mut diags);
-    check_protections(mach, &mut diags);
+    check_header_consistency(macho, &mut diags);
+    check_segment_bounds(macho, &mut diags);
+    check_segment_vm_overlap(macho, &mut diags);
+    check_pagezero(macho, &mut diags);
+    check_symtab_bounds(macho, &mut diags);
+    check_protections(macho, &mut diags);
 
     diags
 }
 
-fn check_header_consistency(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    let expected = mach.header().ncmds as usize;
-    let actual = mach.load_commands().len();
+fn check_header_consistency(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    let expected = macho.header().ncmds as usize;
+    let actual = macho.load_commands().len();
     if expected != actual {
         diags.push(Diagnostic::error(
             "E001",
@@ -31,8 +31,8 @@ fn check_header_consistency(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
         ));
     }
 
-    let expected_size = mach.header().sizeofcmds;
-    let actual_size: u32 = mach.load_commands().iter().map(|lc| lc.raw_size).sum();
+    let expected_size = macho.header().sizeofcmds;
+    let actual_size: u32 = macho.load_commands().iter().map(|lc| lc.raw_size).sum();
     if expected_size != actual_size {
         diags.push(Diagnostic::error(
             "E002",
@@ -43,10 +43,10 @@ fn check_header_consistency(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_segment_bounds(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    let file_size = mach.file_size() as u64;
+fn check_segment_bounds(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    let file_size = macho.file_size() as u64;
 
-    for seg in mach.segments() {
+    for seg in macho.segments() {
         let seg_end = seg.file_offset.0.saturating_add(seg.file_size);
         if seg.file_size > 0 && seg_end > file_size {
             diags.push(Diagnostic::error(
@@ -79,7 +79,7 @@ fn check_segment_bounds(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
 
     // Duplicate segment names
     let mut seen_names = std::collections::HashSet::new();
-    for seg in mach.segments() {
+    for seg in macho.segments() {
         let name_str = seg.name.as_str_lossy().into_owned();
         if !name_str.is_empty() && !seen_names.insert(name_str.clone()) {
             diags.push(Diagnostic::warning(
@@ -90,8 +90,8 @@ fn check_segment_bounds(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_segment_vm_overlap(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    let segments = mach.segments();
+fn check_segment_vm_overlap(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    let segments = macho.segments();
     for (i, a) in segments.iter().enumerate() {
         if a.vm_size == 0 {
             continue;
@@ -117,8 +117,8 @@ fn check_segment_vm_overlap(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_pagezero(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    for seg in mach.segments() {
+fn check_pagezero(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    for seg in macho.segments() {
         if seg.name == SegmentName::PAGEZERO && seg.file_size != 0 {
             diags.push(Diagnostic::error(
                 "E005",
@@ -131,8 +131,8 @@ fn check_pagezero(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_protections(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    for seg in mach.segments() {
+fn check_protections(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    for seg in macho.segments() {
         // initprot bits should be a subset of maxprot bits
         let init = seg.init_prot;
         let max = seg.max_prot;
@@ -150,14 +150,14 @@ fn check_protections(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
     }
 }
 
-fn check_symtab_bounds(mach: &MachFile<'_>, diags: &mut Vec<Diagnostic>) {
-    let file_size = mach.file_size() as u64;
-    let nlist_size: u64 = match mach.bitness() {
+fn check_symtab_bounds(macho: &MachoFile<'_>, diags: &mut Vec<Diagnostic>) {
+    let file_size = macho.file_size() as u64;
+    let nlist_size: u64 = match macho.bitness() {
         Bitness::Bits64 => 16,
         Bitness::Bits32 => 12,
     };
 
-    for lc in mach.load_commands() {
+    for lc in macho.load_commands() {
         if let LoadCommand::Symtab(ref st) = lc.kind {
             // Check symbol table bounds
             if let Some(sym_end) = (st.nsyms as u64)
