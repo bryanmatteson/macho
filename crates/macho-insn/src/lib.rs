@@ -1,0 +1,726 @@
+//! Architecture-aware instruction decoding, encoding, and relocation.
+//!
+//! Wraps [`iced_x86`] and [`bad64`] behind a unified API for the instruction-level
+//! operations that Mach-O patching, xref analysis, and binary diffing need:
+//!
+//! - **Decode**: length, classification, branch target extraction
+//! - **Encode**: branch instruction construction, NOP fill
+//! - **Relocate**: rewrite PC-relative operands for a new address
+//! - **Disassemble**: instruction-to-text for display
+
+mod arm64;
+mod encode;
+mod x86_64;
+
+use std::fmt;
+
+// ───────────────────────────────────────────── types ─────
+
+/// Target architecture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Arch {
+    X86_64,
+    Arm64,
+    Arm64e,
+}
+
+impl fmt::Display for Arch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::X86_64 => write!(f, "x86_64"),
+            Self::Arm64 => write!(f, "arm64"),
+            Self::Arm64e => write!(f, "arm64e"),
+        }
+    }
+}
+
+impl Arch {
+    /// Whether this architecture uses the AArch64 instruction set.
+    pub fn is_arm64(self) -> bool {
+        matches!(self, Self::Arm64 | Self::Arm64e)
+    }
+}
+
+/// A decoded instruction.
+#[derive(Debug, Clone)]
+pub struct Insn {
+    /// Byte offset into the input buffer where this instruction starts.
+    pub offset: usize,
+    /// Byte length of this instruction.
+    pub len: usize,
+    /// Semantic classification.
+    pub kind: InsnKind,
+}
+
+/// High-level classification of an instruction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InsnKind {
+    /// Unconditional branch (B, JMP).
+    Branch(BranchInfo),
+    /// Call with link (BL, CALL).
+    Call(BranchInfo),
+    /// Conditional branch (B.cond, Jcc, CBZ, CBNZ, TBZ, TBNZ, LOOP).
+    CondBranch(BranchInfo),
+    /// Return (RET, C3/CB).
+    Return,
+    /// No-op.
+    Nop,
+    /// PC-relative non-branch (ADR, ADRP, RIP-relative LEA, literal loads).
+    PcRelative(PcRelInfo),
+    /// Anything else.
+    Other,
+}
+
+/// Branch operand information.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchInfo {
+    pub target: BranchTarget,
+}
+
+/// How a branch resolves its destination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchTarget {
+    /// A PC-relative offset (signed, from the instruction's VA).
+    Direct(i64),
+    /// Register-indirect (BR x16, JMP rax).
+    Register,
+    /// Memory-indirect (JMP [rip+disp], etc.).
+    Indirect,
+}
+
+/// PC-relative operand that is *not* a branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PcRelInfo {
+    /// Signed displacement from the instruction's VA.
+    pub displacement: i64,
+}
+
+/// Errors from decode operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeError {
+    pub message: String,
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "decode: {}", self.message)
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Errors from encode / relocate operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncodeError {
+    pub message: String,
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "encode: {}", self.message)
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+// ───────────────────────────────────── iterator ─────
+
+/// Iterator over decoded instructions in a byte slice.
+pub struct InsnIter<'a> {
+    bytes: &'a [u8],
+    base_va: u64,
+    offset: usize,
+    arch: Arch,
+}
+
+impl<'a> Iterator for InsnIter<'a> {
+    type Item = Insn;
+
+    fn next(&mut self) -> Option<Insn> {
+        loop {
+            if self.offset >= self.bytes.len() {
+                return None;
+            }
+            let va = self.base_va + self.offset as u64;
+            match decode_one(&self.bytes[self.offset..], va, self.arch) {
+                Ok(mut insn) => {
+                    insn.offset = self.offset;
+                    self.offset += insn.len;
+                    return Some(insn);
+                }
+                Err(_) => {
+                    // Skip one byte (x86_64) or 4 bytes (arm64) on decode failure.
+                    if self.arch.is_arm64() {
+                        self.offset += 4;
+                    } else {
+                        self.offset += 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ───────────────────────────────── public API ─────
+
+/// Decode a single instruction at the start of `bytes`.
+pub fn decode_one(bytes: &[u8], va: u64, arch: Arch) -> Result<Insn, DecodeError> {
+    match arch {
+        Arch::X86_64 => x86_64::decode_one(bytes, va),
+        Arch::Arm64 | Arch::Arm64e => arm64::decode_one(bytes, va),
+    }
+}
+
+/// Iterate over all instructions in `bytes`, starting at `base_va`.
+pub fn decode_iter(bytes: &[u8], base_va: u64, arch: Arch) -> InsnIter<'_> {
+    InsnIter {
+        bytes,
+        base_va,
+        offset: 0,
+        arch,
+    }
+}
+
+/// Return the byte length of the instruction at the start of `bytes`.
+pub fn instruction_len(bytes: &[u8], arch: Arch) -> Result<usize, DecodeError> {
+    decode_one(bytes, 0, arch).map(|insn| insn.len)
+}
+
+/// Resolve the absolute branch/call target VA, if the instruction has a direct target.
+pub fn resolve_branch_target(insn: &Insn, insn_va: u64) -> Option<u64> {
+    let info = match &insn.kind {
+        InsnKind::Branch(b) | InsnKind::Call(b) | InsnKind::CondBranch(b) => b,
+        _ => return None,
+    };
+    match info.target {
+        BranchTarget::Direct(offset) => Some(insn_va.wrapping_add_signed(offset)),
+        _ => None,
+    }
+}
+
+/// Whether an instruction can be safely relocated to a different VA.
+///
+/// Returns `true` for instructions that are either position-independent or
+/// that the relocation engine knows how to rewrite.
+pub fn can_relocate(insn: &Insn) -> bool {
+    match &insn.kind {
+        InsnKind::Other | InsnKind::Nop | InsnKind::Return => true,
+        InsnKind::Branch(_) | InsnKind::Call(_) | InsnKind::CondBranch(_) => true,
+        InsnKind::PcRelative(_) => true,
+    }
+}
+
+/// Encode a direct branch (or call) instruction from `from_va` to `to_va`.
+///
+/// If `link` is `true`, encodes a call (BL / CALL); otherwise an unconditional
+/// branch (B / JMP).
+pub fn encode_branch(
+    from_va: u64,
+    to_va: u64,
+    link: bool,
+    arch: Arch,
+) -> Result<Vec<u8>, EncodeError> {
+    encode::encode_branch(from_va, to_va, link, arch)
+}
+
+/// Generate `byte_count` bytes of architecture-appropriate NOP fill.
+pub fn encode_nop(arch: Arch, byte_count: usize) -> Result<Vec<u8>, EncodeError> {
+    encode::encode_nop(arch, byte_count)
+}
+
+/// Relocate the instruction in `bytes` (decoded at `old_va`) so it executes
+/// correctly at `new_va`. Returns the rewritten instruction bytes.
+pub fn relocate_insn(
+    bytes: &[u8],
+    old_va: u64,
+    new_va: u64,
+    arch: Arch,
+) -> Result<Vec<u8>, EncodeError> {
+    encode::relocate_insn(bytes, old_va, new_va, arch)
+}
+
+/// Disassemble a single instruction to a human-readable string.
+pub fn disassemble_one(bytes: &[u8], va: u64, arch: Arch) -> Result<String, DecodeError> {
+    match arch {
+        Arch::X86_64 => x86_64::disassemble_one(bytes, va),
+        Arch::Arm64 | Arch::Arm64e => arm64::disassemble_one(bytes, va),
+    }
+}
+
+/// Disassemble all instructions in `bytes` to `(va, text)` pairs.
+pub fn disassemble(
+    bytes: &[u8],
+    base_va: u64,
+    arch: Arch,
+) -> Result<Vec<(u64, String)>, DecodeError> {
+    match arch {
+        Arch::X86_64 => x86_64::disassemble(bytes, base_va),
+        Arch::Arm64 | Arch::Arm64e => arm64::disassemble(bytes, base_va),
+    }
+}
+
+// ───────────────────────────────────── tests ─────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // x86_64: NOP (0x90)
+    #[test]
+    fn x86_64_nop() {
+        let insn = decode_one(&[0x90], 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(insn.len, 1);
+        assert_eq!(insn.kind, InsnKind::Nop);
+    }
+
+    // x86_64: RET (0xC3)
+    #[test]
+    fn x86_64_ret() {
+        let insn = decode_one(&[0xC3], 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(insn.len, 1);
+        assert_eq!(insn.kind, InsnKind::Return);
+    }
+
+    // x86_64: CALL rel32 (E8 xx xx xx xx)
+    #[test]
+    fn x86_64_call_rel32() {
+        // CALL +0x100 (from VA 0x1000, next_ip = 0x1005, target = 0x1105)
+        let bytes = [0xE8, 0x00, 0x01, 0x00, 0x00];
+        let insn = decode_one(&bytes, 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(insn.len, 5);
+        assert!(matches!(insn.kind, InsnKind::Call(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x1105));
+    }
+
+    // x86_64: JMP rel32 (E9 xx xx xx xx)
+    #[test]
+    fn x86_64_jmp_rel32() {
+        // JMP +0 (from VA 0x2000, next_ip = 0x2005, target = 0x2005)
+        let bytes = [0xE9, 0x00, 0x00, 0x00, 0x00];
+        let insn = decode_one(&bytes, 0x2000, Arch::X86_64).unwrap();
+        assert_eq!(insn.len, 5);
+        assert!(matches!(insn.kind, InsnKind::Branch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x2000), Some(0x2005));
+    }
+
+    // x86_64: JE rel8 (74 xx)
+    #[test]
+    fn x86_64_je_rel8() {
+        // JE +0x10 (from VA 0x3000, next_ip = 0x3002, target = 0x3012)
+        let bytes = [0x74, 0x10];
+        let insn = decode_one(&bytes, 0x3000, Arch::X86_64).unwrap();
+        assert_eq!(insn.len, 2);
+        assert!(matches!(insn.kind, InsnKind::CondBranch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x3000), Some(0x3012));
+    }
+
+    // ARM64: BL #offset
+    #[test]
+    fn arm64_bl() {
+        // BL #0x100 (from VA 0x4000, target = 0x4100)
+        // imm26 = 0x100 / 4 = 0x40
+        // encoding: 0x94000000 | 0x40 = 0x94000040
+        let bytes = 0x9400_0040u32.to_le_bytes();
+        let insn = decode_one(&bytes, 0x4000, Arch::Arm64).unwrap();
+        assert_eq!(insn.len, 4);
+        assert!(matches!(insn.kind, InsnKind::Call(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x4000), Some(0x4100));
+    }
+
+    // ARM64: B #offset
+    #[test]
+    fn arm64_b() {
+        // B #-0x10 (from VA 0x5000, target = 0x4FF0)
+        // imm26 = -0x10 / 4 = -4 → 0x03FFFFFC
+        let imm26 = ((-4i32) as u32) & 0x03FF_FFFF;
+        let word = 0x1400_0000u32 | imm26;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x5000, Arch::Arm64).unwrap();
+        assert_eq!(insn.len, 4);
+        assert!(matches!(insn.kind, InsnKind::Branch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x5000), Some(0x4FF0));
+    }
+
+    // ARM64: NOP (0xD503201F)
+    #[test]
+    fn arm64_nop() {
+        let bytes = 0xD503_201Fu32.to_le_bytes();
+        let insn = decode_one(&bytes, 0x6000, Arch::Arm64).unwrap();
+        assert_eq!(insn.len, 4);
+        assert_eq!(insn.kind, InsnKind::Nop);
+    }
+
+    // ARM64: RET
+    #[test]
+    fn arm64_ret() {
+        let bytes = 0xD65F_03C0u32.to_le_bytes();
+        let insn = decode_one(&bytes, 0x7000, Arch::Arm64).unwrap();
+        assert_eq!(insn.len, 4);
+        assert_eq!(insn.kind, InsnKind::Return);
+    }
+
+    // NOP encoding
+    #[test]
+    fn nop_encoding_x86_64() {
+        let nops = encode_nop(Arch::X86_64, 5).unwrap();
+        assert_eq!(nops.len(), 5);
+        // All bytes should decode as NOPs (or multi-byte NOPs)
+    }
+
+    #[test]
+    fn nop_encoding_arm64() {
+        let nops = encode_nop(Arch::Arm64, 8).unwrap();
+        assert_eq!(nops.len(), 8);
+        assert_eq!(&nops[0..4], &[0x1F, 0x20, 0x03, 0xD5]);
+        assert_eq!(&nops[4..8], &[0x1F, 0x20, 0x03, 0xD5]);
+    }
+
+    #[test]
+    fn nop_encoding_arm64_rejects_non_aligned() {
+        assert!(encode_nop(Arch::Arm64, 3).is_err());
+    }
+
+    // Branch encoding round-trip
+    #[test]
+    fn encode_branch_x86_64_call() {
+        let encoded = encode_branch(0x1000, 0x2000, true, Arch::X86_64).unwrap();
+        assert_eq!(encoded.len(), 5);
+        assert_eq!(encoded[0], 0xE8);
+        let insn = decode_one(&encoded, 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x2000));
+    }
+
+    #[test]
+    fn encode_branch_arm64_bl() {
+        let encoded = encode_branch(0x4000, 0x4100, true, Arch::Arm64).unwrap();
+        assert_eq!(encoded.len(), 4);
+        let insn = decode_one(&encoded, 0x4000, Arch::Arm64).unwrap();
+        assert_eq!(resolve_branch_target(&insn, 0x4000), Some(0x4100));
+    }
+
+    // decode_iter
+    #[test]
+    fn decode_iter_x86_64() {
+        // NOP NOP RET
+        let bytes = [0x90, 0x90, 0xC3];
+        let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
+        assert_eq!(insns.len(), 3);
+        assert_eq!(insns[0].kind, InsnKind::Nop);
+        assert_eq!(insns[0].offset, 0);
+        assert_eq!(insns[1].kind, InsnKind::Nop);
+        assert_eq!(insns[1].offset, 1);
+        assert_eq!(insns[2].kind, InsnKind::Return);
+        assert_eq!(insns[2].offset, 2);
+    }
+
+    // Disassembly
+    #[test]
+    fn disassemble_x86_64_nop() {
+        let text = disassemble_one(&[0x90], 0x1000, Arch::X86_64).unwrap();
+        assert!(text.to_lowercase().contains("nop"), "got: {text}");
+    }
+
+    #[test]
+    fn disassemble_arm64_nop() {
+        let bytes = 0xD503_201Fu32.to_le_bytes();
+        let text = disassemble_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(text.to_lowercase().contains("nop"), "got: {text}");
+    }
+
+    // ── TBZ/TBNZ decode + relocation round-trip ──
+
+    #[test]
+    fn arm64_tbz_decode() {
+        // TBZ x0, #0, +0x10  → b5=0, b40=00000, imm14=4, Rt=0
+        // Encoding: 0 0110110 0 00000 00000000000100 00000
+        //         = 0x36000080
+        let word: u32 = 0x3600_0080;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::CondBranch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x1010));
+    }
+
+    #[test]
+    fn arm64_tbnz_high_bit_relocate_preserves_b40() {
+        // TBNZ x0, #17, +0x20 — tests bit 17, so b5=0, b40=10001 (=17).
+        // b40 field is bits[23:19]. b40=17=0b10001.
+        // imm14 = 0x20 / 4 = 8.
+        // Encoding: 0 0110111 0 10001 00000000001000 00000
+        let b40: u32 = 17;
+        let imm14: u32 = 8;
+        let word: u32 = 0x3700_0000 | (b40 << 19) | (imm14 << 5);
+        let bytes = word.to_le_bytes();
+
+        // Verify decode
+        let insn = decode_one(&bytes, 0x2000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::CondBranch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x2000), Some(0x2020));
+
+        // Relocate to 0x3000 — target should still be 0x2020
+        let relocated = relocate_insn(&bytes, 0x2000, 0x3000, Arch::Arm64).unwrap();
+        let relocated_word = u32::from_le_bytes([relocated[0], relocated[1], relocated[2], relocated[3]]);
+        // Verify b40 field (bits[23:19]) is preserved
+        let b40_after = (relocated_word >> 19) & 0x1F;
+        assert_eq!(b40_after, 17, "b40 field corrupted during relocation");
+        // Verify the target resolves correctly
+        let insn2 = decode_one(&relocated, 0x3000, Arch::Arm64).unwrap();
+        assert_eq!(resolve_branch_target(&insn2, 0x3000), Some(0x2020));
+    }
+
+    // ── CBZ/CBNZ decode ──
+
+    #[test]
+    fn arm64_cbz_decode() {
+        // CBZ x0, +0x40  →  sf=1, op=0, imm19=0x10, Rt=0
+        // Encoding: 1 011010 0 0000000000000010000 00000 = 0xB4000200
+        let word: u32 = 0xB400_0200;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::CondBranch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x1040));
+    }
+
+    // ── B.cond decode ──
+
+    #[test]
+    fn arm64_bcond_decode() {
+        // B.EQ +0x100  →  imm19 = 0x100/4 = 0x40, cond=0000 (EQ)
+        // Encoding: 0x54000000 | (0x40 << 5) = 0x54000800
+        let word: u32 = 0x5400_0800;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x5000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::CondBranch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x5000), Some(0x5100));
+    }
+
+    // ── ADR/ADRP decode ──
+
+    #[test]
+    fn arm64_adr_decode() {
+        // ADR x0, +0x4  →  immhi=1, immlo=0, Rd=0
+        // Encoding: 0 00 10000 0000000000000000001 00000 = 0x10000020
+        let word: u32 = 0x1000_0020;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::PcRelative(_)));
+        if let InsnKind::PcRelative(info) = &insn.kind {
+            assert_eq!(info.displacement, 4);
+        }
+    }
+
+    #[test]
+    fn arm64_adrp_decode() {
+        // ADRP x0, +0x1000 (one page forward)
+        // immhi=0, immlo=01, Rd=0  →  imm = (0<<2)|1 = 1 → offset = 1 * 4096 = 0x1000
+        // Encoding: 1 01 10000 0000000000000000000 00000 = 0x90000000 | (1<<29) = 0xB0000000
+        let word: u32 = 0xB000_0000;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x2000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::PcRelative(_)));
+        if let InsnKind::PcRelative(info) = &insn.kind {
+            // ADRP: target = page_of(0x2000) + 1*4096 = 0x2000 + 0x1000 = 0x3000
+            // displacement = 0x3000 - 0x2000 = 0x1000
+            assert_eq!(info.displacement, 0x1000);
+        }
+    }
+
+    // ── LDR literal decode ──
+
+    #[test]
+    fn arm64_ldr_literal_decode() {
+        // LDR x0, +0x10  →  opc=01, V=0, imm19=4, Rt=0
+        // Encoding: 01 011 0 00 0000000000000000100 00000 = 0x58000080
+        let word: u32 = 0x5800_0080;
+        let bytes = word.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::PcRelative(_)));
+        if let InsnKind::PcRelative(info) = &insn.kind {
+            assert_eq!(info.displacement, 0x10);
+        }
+    }
+
+    // ── BR / BLR (register) decode ──
+
+    #[test]
+    fn arm64_br_register() {
+        // BR x16 = 0xD61F0200
+        let bytes = 0xD61F_0200u32.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(
+            insn.kind,
+            InsnKind::Branch(BranchInfo { target: BranchTarget::Register })
+        ));
+    }
+
+    #[test]
+    fn arm64_blr_register() {
+        // BLR x8 = 0xD63F0100
+        let bytes = 0xD63F_0100u32.to_le_bytes();
+        let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert!(matches!(
+            insn.kind,
+            InsnKind::Call(BranchInfo { target: BranchTarget::Register })
+        ));
+    }
+
+    // ── x86_64 RIP-relative (PcRelative) decode ──
+
+    #[test]
+    fn x86_64_lea_rip_relative() {
+        // LEA rax, [rip+0x10]  →  48 8D 05 10 00 00 00
+        let bytes = [0x48, 0x8D, 0x05, 0x10, 0x00, 0x00, 0x00];
+        let insn = decode_one(&bytes, 0x1000, Arch::X86_64).unwrap();
+        assert!(
+            matches!(insn.kind, InsnKind::PcRelative(_)),
+            "expected PcRelative, got {:?}",
+            insn.kind
+        );
+    }
+
+    // ── x86_64 branch encoding (JMP, not just CALL) ──
+
+    #[test]
+    fn encode_branch_x86_64_jmp() {
+        let encoded = encode_branch(0x1000, 0x2000, false, Arch::X86_64).unwrap();
+        assert_eq!(encoded.len(), 5);
+        assert_eq!(encoded[0], 0xE9);
+        let insn = decode_one(&encoded, 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x2000));
+    }
+
+    // ── arm64 B (unconditional) encoding round-trip ──
+
+    #[test]
+    fn encode_branch_arm64_b() {
+        let encoded = encode_branch(0x4000, 0x4100, false, Arch::Arm64).unwrap();
+        assert_eq!(encoded.len(), 4);
+        let insn = decode_one(&encoded, 0x4000, Arch::Arm64).unwrap();
+        assert!(matches!(insn.kind, InsnKind::Branch(_)));
+        assert_eq!(resolve_branch_target(&insn, 0x4000), Some(0x4100));
+    }
+
+    // ── decode error cases ──
+
+    #[test]
+    fn decode_error_empty_x86() {
+        assert!(decode_one(&[], 0, Arch::X86_64).is_err());
+    }
+
+    #[test]
+    fn decode_error_short_arm64() {
+        assert!(decode_one(&[0x00, 0x00], 0, Arch::Arm64).is_err());
+    }
+
+    // ── decode_iter skips invalid bytes without stack overflow ──
+
+    #[test]
+    fn decode_iter_skips_invalid_bytes() {
+        // 256 invalid bytes (0xFF) followed by NOP + RET.
+        // Should not stack-overflow and should find the trailing instructions.
+        let mut bytes = vec![0xFFu8; 256];
+        bytes.push(0x90); // NOP
+        bytes.push(0xC3); // RET
+        let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
+        assert!(insns.len() >= 2);
+        let last_two: Vec<_> = insns.iter().rev().take(2).collect();
+        assert_eq!(last_two[0].kind, InsnKind::Return);
+        assert_eq!(last_two[1].kind, InsnKind::Nop);
+    }
+
+    // ── instruction_len ──
+
+    #[test]
+    fn instruction_len_x86_64() {
+        assert_eq!(instruction_len(&[0x90], Arch::X86_64).unwrap(), 1);
+        assert_eq!(
+            instruction_len(&[0xE8, 0x00, 0x00, 0x00, 0x00], Arch::X86_64).unwrap(),
+            5
+        );
+    }
+
+    #[test]
+    fn instruction_len_arm64() {
+        let nop = 0xD503_201Fu32.to_le_bytes();
+        assert_eq!(instruction_len(&nop, Arch::Arm64).unwrap(), 4);
+    }
+
+    // ── can_relocate ──
+
+    #[test]
+    fn can_relocate_all_kinds() {
+        let nop = decode_one(&[0x90], 0x1000, Arch::X86_64).unwrap();
+        assert!(can_relocate(&nop));
+
+        let ret = decode_one(&[0xC3], 0x1000, Arch::X86_64).unwrap();
+        assert!(can_relocate(&ret));
+
+        let call_bytes = [0xE8, 0x00, 0x01, 0x00, 0x00];
+        let call = decode_one(&call_bytes, 0x1000, Arch::X86_64).unwrap();
+        assert!(can_relocate(&call));
+    }
+
+    // ── Arch Display + is_arm64 ──
+
+    #[test]
+    fn arch_display() {
+        assert_eq!(format!("{}", Arch::X86_64), "x86_64");
+        assert_eq!(format!("{}", Arch::Arm64), "arm64");
+        assert_eq!(format!("{}", Arch::Arm64e), "arm64e");
+    }
+
+    #[test]
+    fn arch_is_arm64() {
+        assert!(!Arch::X86_64.is_arm64());
+        assert!(Arch::Arm64.is_arm64());
+        assert!(Arch::Arm64e.is_arm64());
+    }
+
+    // ── disassemble (multi-instruction) ──
+
+    #[test]
+    fn disassemble_x86_64_multi() {
+        // NOP NOP RET
+        let bytes = [0x90, 0x90, 0xC3];
+        let result = disassemble(&bytes, 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, 0x1000);
+        assert_eq!(result[1].0, 0x1001);
+        assert_eq!(result[2].0, 0x1002);
+    }
+
+    #[test]
+    fn disassemble_arm64_multi() {
+        // NOP NOP RET
+        let nop = 0xD503_201Fu32;
+        let ret = 0xD65F_03C0u32;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&nop.to_le_bytes());
+        bytes.extend_from_slice(&nop.to_le_bytes());
+        bytes.extend_from_slice(&ret.to_le_bytes());
+        let result = disassemble(&bytes, 0x1000, Arch::Arm64).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].0, 0x1000);
+        assert_eq!(result[1].0, 0x1004);
+        assert_eq!(result[2].0, 0x1008);
+    }
+
+    // ── resolve_branch_target returns None for non-branch ──
+
+    #[test]
+    fn resolve_branch_target_none_for_nop() {
+        let insn = decode_one(&[0x90], 0x1000, Arch::X86_64).unwrap();
+        assert_eq!(resolve_branch_target(&insn, 0x1000), None);
+    }
+
+    // ── error Display impls ──
+
+    #[test]
+    fn error_display() {
+        let de = DecodeError { message: "test".into() };
+        assert_eq!(format!("{de}"), "decode: test");
+
+        let ee = EncodeError { message: "test".into() };
+        assert_eq!(format!("{ee}"), "encode: test");
+    }
+}

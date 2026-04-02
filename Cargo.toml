@@ -1,10 +1,11 @@
 [workspace]
 members = [
     "crates/macho-core",
-    "crates/macho-metadata",
+    "crates/macho-insn",
+
     "crates/macho-analysis",
     "crates/macho-mutate",
-    "crates/macho-extract",
+
     "crates/macho",
     "crates/macho-cli",
 ]
@@ -20,10 +21,11 @@ version = "0.1.0"
 
 [workspace.dependencies]
 macho-core = { path = "crates/macho-core", version = "0.1.0" }
-macho-metadata = { path = "crates/macho-metadata", version = "0.1.0" }
+macho-insn = { path = "crates/macho-insn", version = "0.1.0" }
+
 macho-analysis = { path = "crates/macho-analysis", version = "0.1.0" }
 macho-mutate = { path = "crates/macho-mutate", version = "0.1.0" }
-macho-extract = { path = "crates/macho-extract", version = "0.1.0" }
+
 macho = { path = "crates/macho", version = "0.1.0" }
 zerocopy = { version = "0.8", features = ["derive"] }
 thiserror = "2"
@@ -36,3 +38,6 @@ serde_json = "1"
 cpp_demangle = "0.5.1"
 gimli = { version = "0.33.1", features = ["read"] }
 rustc-demangle = "0.1"
+sha2 = "0.10"
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info", "intel"] }
+bad64 = "0.12"

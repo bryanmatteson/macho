@@ -12,10 +12,8 @@ categories = ["development-tools::debugging", "development-tools::profiling"]
 
 [dependencies]
 macho-core.workspace = true
-macho-metadata.workspace = true
 macho-analysis.workspace = true
 macho-mutate.workspace = true
-macho-extract.workspace = true
 clap.workspace = true
 memmap2.workspace = true
 anyhow.workspace = true

@@ -1,4 +1,4 @@
-use crate::extract::cpp::{
+use crate::analysis::reconstruct::cpp::{
     CppImageIndex, build_headers_for_mach, build_image_index, default_header_unit, render_header,
     unify_images,
 };

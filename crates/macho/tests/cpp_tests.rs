@@ -1,6 +1,6 @@
 mod support;
 
-use macho::extract::cpp::{
+use macho::analysis::reconstruct::cpp::{
     build_headers_for_mach, build_image_index, unify_images, validate_header_syntax,
 };
 use std::path::{Path, PathBuf};

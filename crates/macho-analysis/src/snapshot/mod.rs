@@ -1,11 +1,11 @@
 pub mod snapshot;
 
+use crate::core::codesign::CodeSignature;
+use crate::core::dyld::chained::parse_chained_fixups;
+use crate::core::dyld::exports::parse_exports;
+use crate::core::dyld::types::ExportKind;
+use crate::core::objc::ObjCMetadata;
 use crate::format::constants::VmProtection;
-use crate::metadata::codesign::CodeSignature;
-use crate::metadata::dyld::chained::parse_chained_fixups;
-use crate::metadata::dyld::exports::parse_exports;
-use crate::metadata::dyld::types::ExportKind;
-use crate::metadata::objc::ObjCMetadata;
 use crate::model::container::MachoContainer;
 use crate::model::load_command::LoadCommand;
 use crate::model::load_command::format_uuid;
@@ -386,7 +386,7 @@ fn extract_codesign(
     })
 }
 
-fn snap_property(property: &crate::metadata::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
+fn snap_property(property: &crate::core::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
     ObjCPropertySnapshot {
         name: property.name.clone(),
         attributes: property.attributes.clone(),
@@ -486,15 +486,15 @@ fn extract_diagnostics(macho: &MachoFile<'_>) -> Vec<DiagnosticSnapshot> {
         .collect()
 }
 
-fn snap_method(m: &crate::metadata::objc::ObjCMethod) -> ObjCMethodSnapshot {
+fn snap_method(m: &crate::core::objc::ObjCMethod) -> ObjCMethodSnapshot {
     ObjCMethodSnapshot {
         name: m.name.clone(),
         type_encoding: m.type_encoding.clone(),
     }
 }
 
-fn snap_fixup(fixup: crate::metadata::dyld::types::Fixup) -> FixupSnapshot {
-    use crate::metadata::dyld::types::FixupKind;
+fn snap_fixup(fixup: crate::core::dyld::types::Fixup) -> FixupSnapshot {
+    use crate::core::dyld::types::FixupKind;
 
     let kind = match fixup.kind {
         FixupKind::Rebase { target } => FixupKindSnapshot::Rebase { target },

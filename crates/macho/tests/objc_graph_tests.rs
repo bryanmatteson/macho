@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use macho::metadata::objc::graph::{
+use macho::analysis::reconstruct::objc::graph::{
     ClassNode, MethodEntry, MethodKind, MethodOrigin, ObjCGraph, PropertyEntry, ProtocolNode,
     SelectorOwner,
 };
@@ -94,7 +94,7 @@ fn graph_effective_methods_includes_all() {
                     .instance_methods
                     .iter()
                     .filter(|m| {
-                        matches!(m.origin, macho::metadata::objc::graph::MethodOrigin::Class)
+                        matches!(m.origin, macho::analysis::reconstruct::objc::graph::MethodOrigin::Class)
                     })
                     .count()
         );
@@ -223,7 +223,7 @@ fn graph_method_resolution_follows_inheritance() {
     assert_eq!(resolved.class_name, "BaseWidget");
     assert!(matches!(
         resolved.resolution,
-        macho::metadata::objc::graph::MethodResolution::Inherited { .. }
+        macho::analysis::reconstruct::objc::graph::MethodResolution::Inherited { .. }
     ));
 }
 

@@ -8,6 +8,14 @@ pub mod model;
 pub mod resolve;
 pub mod symbols;
 
+pub mod codesign;
+pub mod dwarf;
+pub mod dyld;
+pub mod image;
+pub mod objc;
+pub mod rtti;
+pub mod swift;
+
 pub use crate::error::{Error, Result};
 pub use crate::format::parse;
 

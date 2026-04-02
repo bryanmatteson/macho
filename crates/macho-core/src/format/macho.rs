@@ -45,14 +45,8 @@ pub fn parse_macho_file(data: &[u8]) -> Result<MachoFile<'_>> {
     };
 
     let lc_offset = bitness.header_size();
-    let (load_commands, segments) = parse_load_commands(
-        data,
-        endian,
-        bitness,
-        lc_offset,
-        header.ncmds,
-        header.sizeofcmds,
-    )?;
+    let (load_commands, segments) =
+        parse_load_commands(data, endian, lc_offset, header.ncmds, header.sizeofcmds)?;
 
     Ok(MachoFile::new(
         data,

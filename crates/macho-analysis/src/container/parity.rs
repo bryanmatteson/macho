@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::analysis::snapshot::SliceSnapshot;
+use crate::snapshot::SliceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -420,22 +420,22 @@ fn check_objc_class_parity(slices: &[SliceSnapshot], divs: &mut Vec<ParityDiverg
     }
 }
 
-fn describe_export(export: &crate::analysis::snapshot::ExportSnapshot) -> String {
+fn describe_export(export: &crate::snapshot::ExportSnapshot) -> String {
     let kind = match &export.kind {
-        crate::analysis::snapshot::ExportKindSnapshot::Regular { address } => {
+        crate::snapshot::ExportKindSnapshot::Regular { address } => {
             format!("regular@{address:#x}")
         }
-        crate::analysis::snapshot::ExportKindSnapshot::ThreadLocal { address } => {
+        crate::snapshot::ExportKindSnapshot::ThreadLocal { address } => {
             format!("thread_local@{address:#x}")
         }
-        crate::analysis::snapshot::ExportKindSnapshot::Absolute { address } => {
+        crate::snapshot::ExportKindSnapshot::Absolute { address } => {
             format!("absolute@{address:#x}")
         }
-        crate::analysis::snapshot::ExportKindSnapshot::Reexport { ordinal, name } => format!(
+        crate::snapshot::ExportKindSnapshot::Reexport { ordinal, name } => format!(
             "reexport ordinal={ordinal} name={}",
             name.as_deref().unwrap_or("<none>")
         ),
-        crate::analysis::snapshot::ExportKindSnapshot::StubAndResolver {
+        crate::snapshot::ExportKindSnapshot::StubAndResolver {
             stub_offset,
             resolver_offset,
         } => format!("stub={stub_offset:#x} resolver={resolver_offset:#x}"),

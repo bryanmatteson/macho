@@ -10,18 +10,22 @@ pub use macho_core::ext;
 pub use macho_core::format;
 pub use macho_core::model;
 pub use macho_core::{Error, Result, parse};
-pub use macho_extract as extract;
-pub use macho_metadata::metadata;
 pub use macho_mutate as mutate;
 
+pub mod metadata {
+    pub use macho_core::codesign;
+    pub use macho_core::dyld;
+    pub use macho_core::image;
+    pub use macho_core::objc;
+    pub use macho_core::swift;
+}
+
 pub mod resolve {
-    pub use macho_core::resolve::{ResolutionContext, ResolvedTarget};
-    pub use macho_metadata::resolve::{fixups, paths};
+    pub use macho_core::resolve::{ResolutionContext, ResolvedTarget, fixups, paths};
 }
 
 pub mod symbols {
-    pub use macho_core::symbols::{demangle, table};
-    pub use macho_metadata::symbols::{exports, imports};
+    pub use macho_core::symbols::{demangle, exports, imports, table};
 }
 
 pub mod api;

@@ -3,7 +3,7 @@ mod support;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use macho::api::ImageInspector;
-use macho::metadata::objc::graph::ObjCGraph;
+use macho::analysis::reconstruct::objc::graph::ObjCGraph;
 use macho::metadata::objc::parse_objc_metadata;
 use macho::metadata::swift::SwiftTypeIndex;
 use macho::model::container::MachoContainer;
@@ -235,7 +235,7 @@ fn fat_patch_bytes_requires_arch() {
     let output = run_cli([
         "patch",
         fixture_path,
-        "--patch-bytes",
+        "--bytes",
         "0x100:00010203",
         "--dry-run",
     ]);

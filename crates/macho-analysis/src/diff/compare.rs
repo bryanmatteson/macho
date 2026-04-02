@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::analysis::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport};
-use crate::analysis::snapshot::*;
+use crate::diff::{ChangeSeverity, DiffDomain, DiffFinding, DiffReport};
+use crate::snapshot::*;
 use crate::symbols::imports::ImportRecord;
 
 pub fn diff_slice_snapshots(old: &SliceSnapshot, new: &SliceSnapshot) -> DiffReport {

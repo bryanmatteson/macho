@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use macho::api::ImageInspector;
-use macho::metadata::objc::graph::{MethodKind, ObjCGraph};
-use macho::metadata::objc::render;
+use macho::analysis::reconstruct::objc::graph::{MethodKind, ObjCGraph};
+use macho::analysis::reconstruct::objc::render;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -107,7 +107,7 @@ struct ObjCXref {
     class_name: String,
     selector: String,
     kind: MethodKind,
-    origin: macho::metadata::objc::graph::MethodOrigin,
+    origin: macho::analysis::reconstruct::objc::graph::MethodOrigin,
     imp: u64,
     imp_symbol: String,
 }
@@ -250,7 +250,7 @@ fn run_graph(path: &Path, arch: Option<&str>, json: bool, class: Option<&str>) -
     Ok(())
 }
 
-fn print_class_node(node: &macho::metadata::objc::graph::ClassNode, graph: &ObjCGraph) {
+fn print_class_node(node: &macho::analysis::reconstruct::objc::graph::ClassNode, graph: &ObjCGraph) {
     let super_str = node.superclass.as_deref().unwrap_or("(root)");
     let swift_tag = if node.is_swift { " [swift]" } else { "" };
     println!("{}{swift_tag} : {super_str}", node.name);
@@ -273,8 +273,8 @@ fn print_class_node(node: &macho::metadata::objc::graph::ClassNode, graph: &ObjC
     );
     for m in &node.effective_instance_methods {
         let origin = match &m.origin {
-            macho::metadata::objc::graph::MethodOrigin::Class => String::new(),
-            macho::metadata::objc::graph::MethodOrigin::Category(cat) => format!(" [from {cat}]"),
+            macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => String::new(),
+            macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => format!(" [from {cat}]"),
         };
         println!("    -{} {:#x}{origin}", m.selector, m.imp);
     }
@@ -283,8 +283,8 @@ fn print_class_node(node: &macho::metadata::objc::graph::ClassNode, graph: &ObjC
         println!("  class methods ({}):", node.effective_class_methods.len());
         for m in &node.effective_class_methods {
             let origin = match &m.origin {
-                macho::metadata::objc::graph::MethodOrigin::Class => String::new(),
-                macho::metadata::objc::graph::MethodOrigin::Category(cat) => {
+                macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => String::new(),
+                macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => {
                     format!(" [from {cat}]")
                 }
             };
@@ -373,8 +373,8 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
                 );
                 for owner in owners {
                     let origin = match &owner.origin {
-                        macho::metadata::objc::graph::MethodOrigin::Class => String::new(),
-                        macho::metadata::objc::graph::MethodOrigin::Category(cat) => {
+                        macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => String::new(),
+                        macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => {
                             format!(" [from {cat}]")
                         }
                     };
@@ -391,7 +391,7 @@ fn run_selectors(path: &Path, arch: Option<&str>, name: Option<&str>, json: bool
             for (sel, owners) in &graph.selectors {
                 let classes: Vec<&str> = owners
                     .iter()
-                    .map(|owner: &macho::metadata::objc::SelectorOwner| owner.class_name.as_str())
+                    .map(|owner: &macho::analysis::reconstruct::objc::SelectorOwner| owner.class_name.as_str())
                     .collect();
                 println!("  {sel} -> {}", classes.join(", "));
             }

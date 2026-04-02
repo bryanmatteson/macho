@@ -11,7 +11,6 @@ use crate::model::segment::Segment;
 pub fn parse_load_commands(
     data: &[u8],
     endian: Endian,
-    _bitness: crate::model::header::Bitness,
     offset: usize,
     ncmds: u32,
     sizeofcmds: u32,

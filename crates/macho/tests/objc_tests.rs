@@ -101,7 +101,7 @@ fn header_rendering() {
     for macho in container.macho_files() {
         if let Ok(meta) = parse_objc_metadata(macho) {
             for class in &meta.classes {
-                let header = macho::metadata::objc::render::render_class_header(class);
+                let header = macho::analysis::reconstruct::objc::render::render_class_header(class);
                 assert!(header.contains("@interface"));
                 assert!(header.contains("@end"));
                 assert!(header.contains(&class.name));

@@ -4,11 +4,11 @@ pub mod resolve;
 
 use serde::Serialize;
 
-use crate::analysis::snapshot::ContainerSnapshot;
+use crate::snapshot::ContainerSnapshot;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContainerReport {
-    pub format: crate::analysis::snapshot::ContainerFormat,
+    pub format: crate::snapshot::ContainerFormat,
     pub arches: Vec<String>,
     pub parity: Option<parity::ArchParityReport>,
     pub fileset: Option<FilesetReport>,
@@ -54,7 +54,7 @@ impl ContainerReport {
         container: &crate::model::container::MachoContainer<'_>,
         domains: &[parity::ParityDomain],
     ) -> Self {
-        let snapshot = crate::analysis::snapshot::ContainerSnapshot::from_container(container);
+        let snapshot = crate::snapshot::ContainerSnapshot::from_container(container);
         Self::from_snapshot_with_domains(&snapshot, domains)
     }
 

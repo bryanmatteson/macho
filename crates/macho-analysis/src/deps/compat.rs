@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-use crate::analysis::deps::graph::DepGraph;
-use crate::error::Result;
+use crate::deps::graph::DepGraph;
+use crate::Result;
 use crate::format::constants::{
     MachoHeaderFlags, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_WATCHOS,
 };
@@ -84,10 +84,10 @@ impl CompatReport {
             findings.push(CompatFinding {
                 category: CompatCategory::ImportCoverage,
                 severity: match issue.severity {
-                    crate::analysis::deps::graph::IssueSeverity::Error => {
+                    crate::deps::graph::IssueSeverity::Error => {
                         CompatSeverity::Incompatible
                     }
-                    crate::analysis::deps::graph::IssueSeverity::Warning => CompatSeverity::Warning,
+                    crate::deps::graph::IssueSeverity::Warning => CompatSeverity::Warning,
                 },
                 message: issue.message.clone(),
             });

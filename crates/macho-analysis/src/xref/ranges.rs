@@ -2,11 +2,11 @@ use std::collections::HashSet;
 
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::Result;
+use crate::core::dyld::exports::parse_exports;
+use crate::core::dyld::types::ExportKind;
+use crate::core::objc::ObjCMetadata;
 use crate::ext::MachoExt;
-use crate::metadata::dyld::exports::parse_exports;
-use crate::metadata::dyld::types::ExportKind;
-use crate::metadata::objc::ObjCMetadata;
 use crate::model::addr::map::AddressMap;
 use crate::model::addr::types::{ThinFileOffset, Va};
 use crate::model::macho_file::MachoFile;

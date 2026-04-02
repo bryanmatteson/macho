@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use macho::extract::c::{CAnalysisOptions, analyze_headers, render_header, validate_header_syntax};
+use macho::analysis::reconstruct::c::{
+    CAnalysisOptions, analyze_headers, render_header, validate_header_syntax,
+};
 use support::run_cli;
 
 fn unique_path(stem: &str, ext: &str) -> PathBuf {

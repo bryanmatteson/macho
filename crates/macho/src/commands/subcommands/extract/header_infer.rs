@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::extract::headers::{
+use crate::analysis::reconstruct::{
     BundleValidationReport, ClangSyntaxValidator, EvidenceBundle, HeaderInferenceSession,
     ModelOutput, PromptSet, ValidationReport, validate_bundle,
 };
@@ -160,7 +160,7 @@ fn read_model_output(session: &HeaderInferenceSession, path: &PathBuf) -> Result
     Ok(output)
 }
 
-fn validators() -> [&'static dyn crate::extract::headers::ModelOutputValidator; 1] {
+fn validators() -> [&'static dyn crate::analysis::reconstruct::ModelOutputValidator; 1] {
     static CLANG: ClangSyntaxValidator = ClangSyntaxValidator;
     [&CLANG]
 }
@@ -182,7 +182,7 @@ fn print_bundle_summary(bundle: &EvidenceBundle) {
     println!("  bundle valid: {}", report.valid);
 }
 
-fn print_bundle_validation_report(report: &crate::extract::headers::BundleValidationReport) {
+fn print_bundle_validation_report(report: &crate::analysis::reconstruct::BundleValidationReport) {
     println!("valid: {}", report.valid);
     if report.issues.is_empty() {
         println!("issues: none");
@@ -218,7 +218,7 @@ fn print_prompt(prompt: &PromptSet) {
     println!("{}", prompt.user);
 }
 
-fn print_validation_report(report: &crate::extract::headers::ValidationReport) {
+fn print_validation_report(report: &crate::analysis::reconstruct::ValidationReport) {
     println!("valid: {}", report.valid);
     println!("syntax checked: {}", report.syntax_checked);
     println!("syntax ok: {}", report.syntax_ok);

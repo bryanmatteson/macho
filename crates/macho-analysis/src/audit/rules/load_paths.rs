@@ -1,5 +1,5 @@
-use crate::analysis::audit::{AuditFinding, AuditRule, AuditSeverity};
-use crate::analysis::snapshot::SliceSnapshot;
+use crate::audit::{AuditFinding, AuditRule, AuditSeverity};
+use crate::snapshot::SliceSnapshot;
 
 pub struct AbsoluteRpath;
 

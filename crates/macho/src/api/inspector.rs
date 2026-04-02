@@ -5,7 +5,8 @@ use crate::analysis::xref::ranges::SymbolRangeIndex;
 use crate::analysis::xref::refs::XrefIndex;
 use crate::metadata::codesign::CodeSignature;
 use crate::metadata::image::ImageInfo;
-use crate::metadata::objc::{ObjCGraph, ObjCMetadata};
+use crate::analysis::reconstruct::objc::ObjCGraph;
+use crate::metadata::objc::ObjCMetadata;
 use crate::metadata::swift::SwiftTypeIndex;
 use crate::model::addr::AddressMap;
 use crate::model::load_command::LoadCommand;
@@ -13,6 +14,8 @@ use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
 use crate::model::validate;
 use crate::symbols::imports::{ImportRecord, collect_imports};
+use crate::core::dwarf::DwarfFunctionIndex;
+use crate::core::rtti::VtableIndex;
 
 pub struct ImageInspector<'data> {
     macho: &'data MachoFile<'data>,
@@ -26,6 +29,8 @@ pub struct ImageInspector<'data> {
     swift_types: OnceLock<Result<SwiftTypeIndex>>,
     range_index: OnceLock<Result<SymbolRangeIndex>>,
     xref_index: OnceLock<Result<XrefIndex>>,
+    vtable_index: OnceLock<Result<VtableIndex>>,
+    dwarf_functions: OnceLock<Result<DwarfFunctionIndex>>,
 }
 
 impl<'data> ImageInspector<'data> {
@@ -43,6 +48,8 @@ impl<'data> ImageInspector<'data> {
             swift_types: OnceLock::new(),
             range_index: OnceLock::new(),
             xref_index: OnceLock::new(),
+            vtable_index: OnceLock::new(),
+            dwarf_functions: OnceLock::new(),
         }
     }
 
@@ -125,6 +132,20 @@ impl<'data> ImageInspector<'data> {
     pub fn xref_index(&self) -> Result<&XrefIndex> {
         self.xref_index
             .get_or_init(|| self.macho.ext::<XrefIndex>())
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn vtable_index(&self) -> Result<&VtableIndex> {
+        self.vtable_index
+            .get_or_init(|| VtableIndex::build(self.macho))
+            .as_ref()
+            .map_err(|e| e.clone())
+    }
+
+    pub fn dwarf_functions(&self) -> Result<&DwarfFunctionIndex> {
+        self.dwarf_functions
+            .get_or_init(|| DwarfFunctionIndex::build(self.macho))
             .as_ref()
             .map_err(|e| e.clone())
     }

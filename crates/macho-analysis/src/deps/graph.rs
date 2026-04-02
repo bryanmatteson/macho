@@ -1,9 +1,9 @@
-use crate::error::Result;
-use crate::metadata::dyld::bind::parse_bind_entries;
-use crate::metadata::dyld::chained::parse_chained_fixups;
-use crate::metadata::dyld::exports::parse_exports;
-use crate::metadata::dyld::types::ExportKind;
-use crate::metadata::image::DylibLinkKind;
+use crate::Result;
+use crate::core::dyld::bind::parse_bind_entries;
+use crate::core::dyld::chained::parse_chained_fixups;
+use crate::core::dyld::exports::parse_exports;
+use crate::core::dyld::types::ExportKind;
+use crate::core::image::DylibLinkKind;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 

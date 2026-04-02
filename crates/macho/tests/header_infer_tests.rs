@@ -2,7 +2,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use macho::extract::headers::{
+use macho::analysis::reconstruct::{
     ClangSyntaxValidator, ConfidenceSummary, EntityKind, EvidenceBundle, EvidenceEntity,
     EvidenceFact, EvidenceSource, EvidenceSourceKind, EvidenceStrength, HeaderInferenceModel,
     HeaderInferenceSession, HeaderLanguage, HeaderUnit, InferenceOptions, InferredDeclaration,
@@ -64,7 +64,7 @@ fn sample_bundle(language: HeaderLanguage) -> EvidenceBundle {
             }],
             payload: serde_json::Value::Null,
         }],
-        unresolved: vec![macho::extract::headers::UnresolvedGap {
+        unresolved: vec![macho::analysis::reconstruct::UnresolvedGap {
             id: "gap.ret".into(),
             entity_id: "entity.widget".into(),
             summary: "Return type alias may be source-specific".into(),
@@ -319,7 +319,7 @@ fn cli_prompt_and_apply_flow() {
         "apply stderr: {}",
         String::from_utf8_lossy(&apply.stderr)
     );
-    let sidecar: macho::extract::headers::SidecarOutput =
+    let sidecar: macho::analysis::reconstruct::SidecarOutput =
         serde_json::from_slice(&apply.stdout).expect("valid sidecar json");
     assert!(sidecar.valid);
 

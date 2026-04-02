@@ -1,13 +1,21 @@
 pub use macho_analysis as analysis;
 pub use macho_core::{Error, Result};
 pub use macho_core::{format, model};
-pub use macho_metadata::metadata;
+
+pub mod metadata {
+    pub use macho_core::codesign;
+    pub use macho_core::dyld;
+    pub use macho_core::image;
+    pub use macho_core::objc;
+    pub use macho_core::swift;
+}
 
 pub mod layout;
 pub mod owned;
 pub mod patch;
 pub mod preview;
 pub mod resign;
+pub mod sign;
 pub mod transaction;
 
 pub use patch::{

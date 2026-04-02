@@ -3,8 +3,8 @@ pub mod rules;
 use serde::Serialize;
 use std::fmt;
 
-use crate::analysis::snapshot::ContainerSnapshot;
-use crate::analysis::snapshot::SliceSnapshot;
+use crate::snapshot::ContainerSnapshot;
+use crate::snapshot::SliceSnapshot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]

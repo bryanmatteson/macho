@@ -1,5 +1,5 @@
 use macho::analysis::strings::{StringRegionKind, StringRegions};
-use macho::extract::vtables::VtableIndex;
+use macho::analysis::vtables::VtableIndex;
 use macho::model::container::MachoContainer;
 use macho::model::macho_file::MachoFile;
 
@@ -496,7 +496,7 @@ fn vtable_first_slot_is_offset_to_top() {
         assert!(
             matches!(
                 vtable.slots.first().map(|s| &s.target),
-                Some(macho::extract::vtables::SlotTarget::OffsetToTop { .. })
+                Some(macho::analysis::vtables::SlotTarget::OffsetToTop { .. })
             ),
             "first slot of vtable {:?} should be OffsetToTop, got {:?}",
             vtable.name,
@@ -535,7 +535,7 @@ fn regression_vtable_slots_resolve_function_names_on_chained_fixup_binaries() {
         .filter(|s| {
             matches!(
                 &s.target,
-                macho::extract::vtables::SlotTarget::Function { .. }
+                macho::analysis::vtables::SlotTarget::Function { .. }
             )
         })
         .count();
@@ -547,7 +547,7 @@ fn regression_vtable_slots_resolve_function_names_on_chained_fixup_binaries() {
         .filter(|s| {
             matches!(
                 &s.target,
-                macho::extract::vtables::SlotTarget::Unknown { .. }
+                macho::analysis::vtables::SlotTarget::Unknown { .. }
             )
         })
         .count();
@@ -582,7 +582,7 @@ fn regression_vtable_slot1_not_classified_as_pure_virtual() {
             assert!(
                 matches!(
                     &vtable.slots[1].target,
-                    macho::extract::vtables::SlotTarget::TypeInfo { .. }
+                    macho::analysis::vtables::SlotTarget::TypeInfo { .. }
                 ),
                 "slot 1 of vtable {:?} should be TypeInfo, got {:?}",
                 vtable.name,
@@ -616,7 +616,7 @@ fn regression_vtable_itanium_structure() {
         assert!(
             matches!(
                 &vtable.slots[0].target,
-                macho::extract::vtables::SlotTarget::OffsetToTop { .. }
+                macho::analysis::vtables::SlotTarget::OffsetToTop { .. }
             ),
             "vtable {:?} slot 0 should be OffsetToTop",
             vtable.name,
@@ -626,7 +626,7 @@ fn regression_vtable_itanium_structure() {
         assert!(
             matches!(
                 &vtable.slots[1].target,
-                macho::extract::vtables::SlotTarget::TypeInfo { .. }
+                macho::analysis::vtables::SlotTarget::TypeInfo { .. }
             ),
             "vtable {:?} slot 1 should be TypeInfo",
             vtable.name,
@@ -637,8 +637,8 @@ fn regression_vtable_itanium_structure() {
             assert!(
                 !matches!(
                     &slot.target,
-                    macho::extract::vtables::SlotTarget::OffsetToTop { .. }
-                        | macho::extract::vtables::SlotTarget::TypeInfo { .. }
+                    macho::analysis::vtables::SlotTarget::OffsetToTop { .. }
+                        | macho::analysis::vtables::SlotTarget::TypeInfo { .. }
                 ),
                 "vtable {:?} slot {} should not be OffsetToTop or TypeInfo (got {:?})",
                 vtable.name,
@@ -709,7 +709,7 @@ fn regression_pure_virtual_detection_by_import_name() {
             assert!(
                 !matches!(
                     &slot.target,
-                    macho::extract::vtables::SlotTarget::PureVirtual
+                    macho::analysis::vtables::SlotTarget::PureVirtual
                 ),
                 "structural slots (offset-to-top, typeinfo) should never be PureVirtual \
                  in vtable {:?}",

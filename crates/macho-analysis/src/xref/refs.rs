@@ -1,12 +1,12 @@
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::Result;
+use crate::core::dyld::bind::parse_bind_entries;
+use crate::core::dyld::chained::parse_chained_fixups;
+use crate::core::dyld::types::FixupKind;
 use crate::ext::MachoExt;
 use crate::format::constants::*;
 use crate::format::relocations_for_section;
-use crate::metadata::dyld::bind::parse_bind_entries;
-use crate::metadata::dyld::chained::parse_chained_fixups;
-use crate::metadata::dyld::types::FixupKind;
 use crate::model::addr::types::{ThinFileOffset, Va};
 use crate::model::macho_file::MachoFile;
 use crate::model::relocation::Relocation;

@@ -10,7 +10,8 @@
 
 [dependencies]
     macho-core.workspace     = true
-    macho-metadata.workspace = true
+    macho-insn.workspace     = true
     macho-analysis.workspace = true
     serde.workspace          = true
     zerocopy.workspace       = true
+    sha2.workspace           = true

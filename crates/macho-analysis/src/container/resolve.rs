@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::analysis::diff::DiffReport;
-use crate::analysis::diff::diff_slice_snapshots;
-use crate::analysis::snapshot::ContainerSnapshot;
-use crate::analysis::snapshot::ExportSnapshot;
-use crate::analysis::snapshot::SliceSnapshot;
+use crate::diff::DiffReport;
+use crate::diff::diff_slice_snapshots;
+use crate::snapshot::ContainerSnapshot;
+use crate::snapshot::ExportSnapshot;
+use crate::snapshot::SliceSnapshot;
 use crate::symbols::imports::ImportRecord;
 
 #[derive(Debug, Clone, Serialize)]
