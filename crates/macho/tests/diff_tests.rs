@@ -799,7 +799,7 @@ fn diff_ignores_metadata_load_commands_covered_by_header() {
 
 #[test]
 fn diff_cli_json_outputs_findings() {
-    let output = run_cli(["compare", "/usr/bin/true", "/usr/bin/false", "--json"]);
+    let output = run_cli(["diff", "/usr/bin/true", "/usr/bin/false", "--json"]);
 
     assert!(
         output.status.success(),
@@ -822,7 +822,7 @@ fn diff_cli_json_outputs_findings() {
 #[test]
 fn diff_cli_fail_on_info_exits_nonzero() {
     let output = run_cli([
-        "compare",
+        "diff",
         "/usr/bin/true",
         "/usr/bin/false",
         "--json",

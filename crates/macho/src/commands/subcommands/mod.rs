@@ -1,15 +1,24 @@
-pub mod analysis;
+pub mod audit;
+pub mod c;
+pub mod codesign;
 pub mod common;
-pub mod compare;
+pub mod container;
+pub mod cpp;
+pub mod data_surface;
+pub mod deps;
+pub mod diff;
+pub mod dwarf;
 pub mod dyld_cache;
-pub mod extract;
+pub mod exports;
 pub mod fileset;
+pub mod fixups;
+pub mod header_infer;
+pub mod imports;
+pub mod info;
+pub mod inspect;
+pub mod objc;
 pub mod patch;
-pub mod view;
-
-pub use analysis::{audit, container, snapshot};
-pub use compare::diff;
-pub use extract::{c, cpp, dwarf, header_infer, objc, swift};
-pub use view::{
-    codesign, data_surface, deps, exports, fixups, imports, inspect, relocations, symbols,
-};
+pub mod relocations;
+pub mod snapshot;
+pub mod swift;
+pub mod symbols;

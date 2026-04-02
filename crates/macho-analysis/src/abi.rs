@@ -112,20 +112,69 @@ pub fn check_symbol_compat(
         }
     }
 
-    // --- 3. Both symbols exist but no further ABI info (low confidence) ---
+    // --- 3. Try body analysis heuristic (low confidence) ---
+    let t_sym_ref = t_sym.unwrap();
+    let p_sym_ref = p_sym.unwrap();
+
+    let t_body = crate::reconstruct::cpp::abi::analyze_symbol_body(target, &t_symtab, t_sym_ref);
+    let p_body = crate::reconstruct::cpp::abi::analyze_symbol_body(provider, &p_symtab, p_sym_ref);
+
+    if let (Some(tb), Some(pb)) = (&t_body, &p_body) {
+        // Compare parameter counts if both were inferred.
+        if let (Some(t_params), Some(p_params)) = (tb.param_count, pb.param_count) {
+            if t_params != p_params {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Warning,
+                    message: format!(
+                        "inferred parameter count mismatch: target ~{t_params}, provider ~{p_params} (heuristic)"
+                    ),
+                });
+            } else {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Info,
+                    message: format!("inferred parameter count matches: ~{t_params} (heuristic)"),
+                });
+            }
+        }
+
+        // Compare return channels if both were inferred.
+        use crate::reconstruct::cpp::types::CppReturnChannel;
+        match (&tb.return_channel, &pb.return_channel) {
+            (CppReturnChannel::Unknown, _) | (_, CppReturnChannel::Unknown) => {}
+            (t_rc, p_rc) if t_rc != p_rc => {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Warning,
+                    message: format!(
+                        "inferred return channel mismatch: target {:?}, provider {:?} (heuristic)",
+                        t_rc, p_rc
+                    ),
+                });
+            }
+            _ => {}
+        }
+
+        let compatible = !findings.iter().any(|f| f.severity == AbiSeverity::Error);
+        return Ok(AbiCompatResult {
+            compatible,
+            confidence: AbiConfidence::Low,
+            findings,
+        });
+    }
+
+    // --- 4. Both symbols exist but no further ABI info ---
     findings.push(AbiFinding {
         severity: AbiSeverity::Info,
         message: format!(
             "both symbols exist; target at {:#x}, provider at {:#x}",
-            t_sym.unwrap().value,
-            p_sym.unwrap().value,
+            t_sym_ref.value,
+            p_sym_ref.value,
         ),
     });
 
     let compatible = !findings.iter().any(|f| f.severity == AbiSeverity::Error);
     Ok(AbiCompatResult {
         compatible,
-        confidence: AbiConfidence::Low,
+        confidence: AbiConfidence::Unknown,
         findings,
     })
 }

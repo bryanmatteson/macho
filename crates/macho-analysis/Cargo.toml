@@ -10,6 +10,7 @@ description = "Mach-O analysis helpers"
 
 [dependencies]
 macho-core.workspace = true
+macho-insn.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 cpp_demangle.workspace = true

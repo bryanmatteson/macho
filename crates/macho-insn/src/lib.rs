@@ -16,6 +16,57 @@ use std::fmt;
 
 // ───────────────────────────────────────────── types ─────
 
+/// Register class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RegClass {
+    /// General-purpose register (x0-x30 on ARM64, rax-r15 on x86_64).
+    Gpr,
+    /// Floating-point / SIMD register (d0-d31 on ARM64, xmm0-xmm15 on x86_64).
+    Fp,
+}
+
+/// A register operand.
+///
+/// `num` is the raw encoding number: 0-30 for ARM64 GPRs, 0-15 for x86_64 GPRs.
+/// ARM64 register 31 encodes SP or ZR depending on instruction context.
+/// x86_64 numbering: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7, r8-r15=8-15.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Reg {
+    pub class: RegClass,
+    pub num: u8,
+}
+
+impl Reg {
+    pub fn gpr(num: u8) -> Self {
+        Self { class: RegClass::Gpr, num }
+    }
+    pub fn fp(num: u8) -> Self {
+        Self { class: RegClass::Fp, num }
+    }
+}
+
+impl fmt::Display for Reg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.class {
+            RegClass::Gpr => write!(f, "gpr{}", self.num),
+            RegClass::Fp => write!(f, "fp{}", self.num),
+        }
+    }
+}
+
+/// An instruction operand.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Operand {
+    /// Register operand.
+    Reg(Reg),
+    /// Immediate value.
+    Imm(i64),
+    /// Memory operand with base register and displacement.
+    Mem { base: Reg, disp: i64 },
+}
+
+const MAX_OPERANDS: usize = 4;
+
 /// Target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arch {
@@ -50,6 +101,25 @@ pub struct Insn {
     pub len: usize,
     /// Semantic classification.
     pub kind: InsnKind,
+    ops: [Operand; MAX_OPERANDS],
+    op_count: u8,
+}
+
+impl Insn {
+    /// The instruction's operands (registers, immediates, memory references).
+    pub fn operands(&self) -> &[Operand] {
+        &self.ops[..self.op_count as usize]
+    }
+
+    pub(crate) fn with_ops(len: usize, kind: InsnKind, ops: [Operand; MAX_OPERANDS], op_count: u8) -> Self {
+        Self {
+            offset: 0,
+            len,
+            kind,
+            ops,
+            op_count,
+        }
+    }
 }
 
 /// High-level classification of an instruction.
@@ -722,5 +792,99 @@ mod tests {
 
         let ee = EncodeError { message: "test".into() };
         assert_eq!(format!("{ee}"), "encode: test");
+    }
+
+    // ── operand extraction: x86_64 ──
+
+    #[test]
+    fn x86_64_push_rdi_operands() {
+        // PUSH rdi = 0x57
+        let insn = decode_one(&[0x57], 0x1000, Arch::X86_64).unwrap();
+        let ops = insn.operands();
+        assert!(
+            ops.iter().any(|op| *op == Operand::Reg(Reg::gpr(7))),
+            "expected rdi (gpr7) in operands, got: {ops:?}"
+        );
+    }
+
+    #[test]
+    fn x86_64_add_rdi_imm8_operands() {
+        // ADD rdi, 8 = 48 83 C7 08
+        let insn = decode_one(&[0x48, 0x83, 0xC7, 0x08], 0x1000, Arch::X86_64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 2, "expected 2 operands, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::gpr(7))); // rdi
+        assert_eq!(ops[1], Operand::Imm(8));
+    }
+
+    #[test]
+    fn x86_64_mov_rsp_disp_rdi_operands() {
+        // MOV [rsp+0x08], rdi = 48 89 7C 24 08
+        let insn = decode_one(&[0x48, 0x89, 0x7C, 0x24, 0x08], 0x1000, Arch::X86_64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 2, "expected 2 operands, got: {ops:?}");
+        assert!(matches!(ops[0], Operand::Mem { base: Reg { num: 4, .. }, disp: 8 })); // [rsp+8]
+        assert_eq!(ops[1], Operand::Reg(Reg::gpr(7))); // rdi
+    }
+
+    #[test]
+    fn x86_64_movsd_xmm0_operands() {
+        // MOVSD xmm0, xmm1 = F2 0F 10 C1
+        let insn = decode_one(&[0xF2, 0x0F, 0x10, 0xC1], 0x1000, Arch::X86_64).unwrap();
+        let ops = insn.operands();
+        assert!(ops.len() >= 2, "expected >=2 operands, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::fp(0))); // xmm0
+        assert_eq!(ops[1], Operand::Reg(Reg::fp(1))); // xmm1
+    }
+
+    // ── operand extraction: ARM64 ──
+
+    #[test]
+    fn arm64_stp_x0_x1_sp_operands() {
+        // STP x0, x1, [sp, #-16]! = A9 BF 07 E0
+        // sf=1, opc=10, V=0, pre-index, imm7=-2 (scaled by 8 → -16), Rt2=1, Rn=31(sp), Rt=0
+        let word: u32 = 0xA9BF_07E0;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 3, "expected 3 operands for STP, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::gpr(0))); // x0
+        assert_eq!(ops[1], Operand::Reg(Reg::gpr(1))); // x1
+        assert!(matches!(ops[2], Operand::Mem { base: Reg { num: 31, .. }, disp: -16 }));
+    }
+
+    #[test]
+    fn arm64_str_x8_sp_operands() {
+        // STR x8, [sp] = F9 00 03 E8
+        // sf=1, size=11, V=0, opc=00, imm12=0, Rn=31(sp), Rt=8
+        let word: u32 = 0xF900_03E8;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 2, "expected 2 operands for STR, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::gpr(8))); // x8
+        assert!(matches!(ops[2 - 1], Operand::Mem { base: Reg { num: 31, .. }, disp: 0 }));
+    }
+
+    #[test]
+    fn arm64_add_x0_x1_imm_operands() {
+        // ADD x0, x1, #42 = 91 00 A8 20
+        // sf=1, op=0, S=0, 100010, sh=0, imm12=42, Rn=1, Rd=0
+        let word: u32 = 0x9100_A820;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 3, "expected 3 operands for ADD, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::gpr(0))); // x0
+        assert_eq!(ops[1], Operand::Reg(Reg::gpr(1))); // x1
+        assert_eq!(ops[2], Operand::Imm(42));
+    }
+
+    #[test]
+    fn arm64_fmov_d0_d1_operands() {
+        // FMOV d0, d1 = 1E 60 40 20
+        let word: u32 = 0x1E60_4020;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 2, "expected 2 operands for FMOV, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::fp(0)));  // d0
+        assert_eq!(ops[1], Operand::Reg(Reg::fp(1)));  // d1
     }
 }

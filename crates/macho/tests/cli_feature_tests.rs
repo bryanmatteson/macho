@@ -384,7 +384,6 @@ fn swift_json_kind_filter_applies_to_output() {
     let expected_kind = serde_json::to_value(selected_kind).expect("serialize kind");
 
     let output = run_cli([
-        "extract",
         "swift",
         fixture_path,
         "--arch",
@@ -428,7 +427,6 @@ fn objc_graph_json_returns_null_for_slice_without_metadata() {
         .clone();
 
     let output = run_cli([
-        "extract",
         "objc",
         "graph",
         fixture_path,
@@ -462,7 +460,6 @@ fn objc_selectors_json_reports_owners() {
         .expect("expected at least one selector");
 
     let output = run_cli([
-        "extract",
         "objc",
         "selectors",
         fixture_path,
@@ -523,7 +520,6 @@ fn objc_xrefs_json_reports_symbol_links() {
     };
 
     let output = run_cli([
-        "extract",
         "objc",
         "xrefs",
         fixture_path,
@@ -565,7 +561,6 @@ fn objc_headers_render_class_dump_style_property_accessors() {
         .clone();
 
     let output = run_cli([
-        "extract",
         "objc",
         fixture_path,
         "--arch",

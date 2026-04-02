@@ -188,6 +188,78 @@ impl VtableIndex {
     pub fn vtables(&self) -> &[VtableEntry] {
         &self.vtables
     }
+
+    /// Find a vtable function slot by class name and method name.
+    ///
+    /// The method name is matched against the demangled target function name
+    /// of each slot. The match is substring-based: `"check"` matches a slot
+    /// targeting `"Foo::check()"`.
+    ///
+    /// Returns the vtable entry, the matching slot, and its function-slot
+    /// index (0-based, excluding the header slots).
+    pub fn find_slot_by_method(
+        &self,
+        class_name: &str,
+        method_name: &str,
+    ) -> Option<(&VtableEntry, &VtableSlot, usize)> {
+        let entry = self.find_by_class(class_name)?;
+        entry
+            .find_slot_by_name(method_name)
+            .map(|(slot, idx)| (entry, slot, idx))
+    }
+}
+
+impl VtableEntry {
+    /// Return only the function slots (excluding offset-to-top and typeinfo header slots).
+    pub fn function_slots(&self) -> impl Iterator<Item = (usize, &VtableSlot)> {
+        self.slots
+            .iter()
+            .filter(|s| matches!(s.target, SlotTarget::Function { .. } | SlotTarget::PureVirtual))
+            .enumerate()
+    }
+
+    /// Number of function slots (excluding header slots).
+    pub fn function_slot_count(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|s| matches!(s.target, SlotTarget::Function { .. } | SlotTarget::PureVirtual))
+            .count()
+    }
+
+    /// Find a function slot by matching the demangled target name.
+    ///
+    /// Returns the slot and its function-slot index (0-based, excluding header slots).
+    /// The match checks whether the demangled function name contains `method_name`.
+    pub fn find_slot_by_name(&self, method_name: &str) -> Option<(&VtableSlot, usize)> {
+        for (func_idx, slot) in self.function_slots() {
+            if let SlotTarget::Function { name, .. } = &slot.target {
+                // Try exact leaf match first, then substring.
+                if extract_method_leaf(name) == method_name || name.contains(method_name) {
+                    return Some((slot, func_idx));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get a function slot by its 0-based function-slot index
+    /// (excluding header slots like offset-to-top and typeinfo).
+    pub fn function_slot_at(&self, index: usize) -> Option<&VtableSlot> {
+        self.function_slots()
+            .find(|(i, _)| *i == index)
+            .map(|(_, slot)| slot)
+    }
+}
+
+/// Extract the leaf method name from a demangled C++ name.
+///
+/// `"Foo::Bar::check(int)"` → `"check"`
+/// `"check"` → `"check"`
+fn extract_method_leaf(demangled: &str) -> &str {
+    // Strip everything from '(' onward (parameters).
+    let base = demangled.split('(').next().unwrap_or(demangled);
+    // Take the part after the last "::".
+    base.rsplit("::").next().unwrap_or(base)
 }
 
 /// Resolved fixup at a file offset.

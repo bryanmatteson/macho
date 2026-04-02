@@ -445,6 +445,7 @@ dependencies = [
  "cpp_demangle",
  "gimli",
  "macho-core",
+ "macho-insn",
  "serde",
  "serde_json",
 ]

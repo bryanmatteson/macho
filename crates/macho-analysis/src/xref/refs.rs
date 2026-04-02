@@ -342,25 +342,24 @@ fn collect_relocation_refs(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
 fn collect_direct_branches(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
     let cpu_type = macho.header().cpu_type.0;
 
-    if cpu_type == CPU_TYPE_ARM64 {
-        collect_arm64_branches(macho, refs);
+    let arch = if cpu_type == CPU_TYPE_ARM64 {
+        macho_insn::Arch::Arm64
     } else if cpu_type == CPU_TYPE_X86_64 {
-        collect_x86_64_calls(macho, refs);
-    }
-}
+        macho_insn::Arch::X86_64
+    } else {
+        return;
+    };
 
-fn collect_arm64_branches(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
-    let endian = macho.endian();
+    let min_insn_size: u64 = if arch.is_arm64() { 4 } else { 5 };
 
     for sect in macho.all_sections() {
-        // Only scan executable sections
         if !sect
             .attributes
             .contains(SectionAttributes::PURE_INSTRUCTIONS)
         {
             continue;
         }
-        if sect.size < 4 {
+        if sect.size < min_insn_size {
             continue;
         }
 
@@ -369,91 +368,22 @@ fn collect_arm64_branches(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
             Err(_) => continue,
         };
 
-        let n_instrs = sect_bytes.len() / 4;
-        for i in 0..n_instrs {
-            let off = i * 4;
-            let instr = endian.interpret_u32(u32::from_ne_bytes([
-                sect_bytes[off],
-                sect_bytes[off + 1],
-                sect_bytes[off + 2],
-                sect_bytes[off + 3],
-            ]));
+        for insn in macho_insn::decode_iter(sect_bytes, sect.addr.0, arch) {
+            let insn_va = sect.addr.0 + insn.offset as u64;
 
-            // BL instruction: bits[31:26] = 100101 (0x94000000 mask 0xFC000000)
-            // B instruction:  bits[31:26] = 000101 (0x14000000 mask 0xFC000000)
-            let is_bl = instr & 0xFC000000 == 0x94000000;
-            let is_b = instr & 0xFC000000 == 0x14000000;
-            if !is_bl && !is_b {
-                continue;
+            // Only collect direct branches and calls (not register-indirect).
+            match &insn.kind {
+                macho_insn::InsnKind::Branch(_) | macho_insn::InsnKind::Call(_) => {}
+                _ => continue,
             }
 
-            // imm26 is a signed offset * 4
-            let imm26 = instr & 0x03FF_FFFF;
-            let signed_offset = if imm26 & 0x0200_0000 != 0 {
-                // Sign-extend 26-bit to i64
-                ((imm26 | 0xFC00_0000) as i32 as i64) * 4
-            } else {
-                (imm26 as i64) * 4
-            };
-
-            let source_va = Va(sect.addr.0 + off as u64);
-            let target_va = Va((source_va.0 as i64 + signed_offset) as u64);
-
-            refs.push(Xref {
-                source: source_va,
-                target: XrefTarget::Internal { va: target_va },
-                kind: XrefKind::DirectBranch,
-            });
-        }
-    }
-}
-
-fn collect_x86_64_calls(macho: &MachoFile<'_>, refs: &mut Vec<Xref>) {
-    for sect in macho.all_sections() {
-        if !sect
-            .attributes
-            .contains(SectionAttributes::PURE_INSTRUCTIONS)
-        {
-            continue;
-        }
-        if sect.size < 5 {
-            continue;
-        }
-
-        let sect_bytes = match macho.read_bytes_at(sect.offset, sect.size as usize) {
-            Ok(b) => b,
-            Err(_) => continue,
-        };
-
-        let len = sect_bytes.len();
-        let mut i = 0;
-        while i + 5 <= len {
-            let opcode = sect_bytes[i];
-
-            // E8 = CALL rel32, E9 = JMP rel32
-            if opcode == 0xE8 || opcode == 0xE9 {
-                let rel32 = i32::from_le_bytes([
-                    sect_bytes[i + 1],
-                    sect_bytes[i + 2],
-                    sect_bytes[i + 3],
-                    sect_bytes[i + 4],
-                ]);
-                let source_va = Va(sect.addr.0 + i as u64);
-                // rel32 is relative to the next instruction (i + 5)
-                let next_ip = sect.addr.0 + i as u64 + 5;
-                let target_va = Va((next_ip as i64 + rel32 as i64) as u64);
-
+            if let Some(target) = macho_insn::resolve_branch_target(&insn, insn_va) {
                 refs.push(Xref {
-                    source: source_va,
-                    target: XrefTarget::Internal { va: target_va },
+                    source: Va(insn_va),
+                    target: XrefTarget::Internal { va: Va(target) },
                     kind: XrefKind::DirectBranch,
                 });
-
-                i += 5;
-                continue;
             }
-
-            i += 1;
         }
     }
 }

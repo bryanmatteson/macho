@@ -1,6 +1,8 @@
 //! AArch64 instruction decoding and disassembly via `bad64`.
 
-use crate::{BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, PcRelInfo};
+use crate::{
+    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, Operand, PcRelInfo, Reg, MAX_OPERANDS,
+};
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     if bytes.len() < 4 {
@@ -11,12 +13,9 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
 
     let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let kind = classify(word, va);
+    let (ops, op_count) = extract_operands(word);
 
-    Ok(Insn {
-        offset: 0,
-        len: 4,
-        kind,
-    })
+    Ok(Insn::with_ops(4, kind, ops, op_count))
 }
 
 fn classify(word: u32, va: u64) -> InsnKind {
@@ -26,9 +25,6 @@ fn classify(word: u32, va: u64) -> InsnKind {
     }
 
     // RET (and variants): 1101011 0010 11111 0000 00 Rn 00000
-    // RET: 0xD65F03C0 (Rn=x30)
-    // The general RET mask: bits[31:25]=1101011, bits[24:21]=0010, bits[20:16]=11111,
-    //                       bits[15:10]=000000, bits[4:0]=00000
     if word & 0xFFFF_FC1F == 0xD65F_0000 {
         return InsnKind::Return;
     }
@@ -92,11 +88,8 @@ fn classify(word: u32, va: u64) -> InsnKind {
         });
     }
 
-    // BRAA/BRAB/BLRAA/BLRAB and other unconditional-branch-register variants
-    // not caught above (authenticated branches, ERET, etc.).
-    // Mask 0xFE00_0000 matches both 0xD6xx and 0xD7xx top bytes.
+    // BRAA/BRAB/BLRAA/BLRAB and other unconditional-branch-register variants.
     if word & 0xFE00_0000 == 0xD600_0000 {
-        // Check if it's a link variant.
         let is_link = word & 0x0020_0000 != 0;
         if is_link {
             return InsnKind::Call(BranchInfo {
@@ -125,7 +118,6 @@ fn classify(word: u32, va: u64) -> InsnKind {
         let immlo = ((word >> 29) & 0x3) as i32;
         let imm = (immhi << 2) | immlo;
         let offset = sign_extend_21(imm) as i64 * 4096;
-        // ADRP target is page-relative: (page_of(va) + imm * 4096) - va
         let page_va = va & !0xFFF;
         let target = (page_va as i64 + offset) - va as i64;
         return InsnKind::PcRelative(PcRelInfo {
@@ -133,14 +125,7 @@ fn classify(word: u32, va: u64) -> InsnKind {
         });
     }
 
-    // LDR (literal) variants:
-    // LDR Wt:  00 011 000 imm19 Rt
-    // LDR Xt:  01 011 000 imm19 Rt
-    // LDRSW:   10 011 000 imm19 Rt
-    // LDR St:  00 011 100 imm19 Rt
-    // LDR Dt:  01 011 100 imm19 Rt
-    // LDR Qt:  10 011 100 imm19 Rt
-    // PRFM:    11 011 000 imm19 Rt
+    // LDR (literal) variants
     if word & 0x3B00_0000 == 0x1800_0000 {
         let imm19 = ((word >> 5) & 0x7FFFF) as i32;
         let offset = sign_extend_19(imm19) as i64 * 4;
@@ -150,6 +135,145 @@ fn classify(word: u32, va: u64) -> InsnKind {
     }
 
     InsnKind::Other
+}
+
+// ───────────────── operand extraction ─────────────────
+
+/// Extract operands from an ARM64 instruction word.
+///
+/// Handles the major instruction formats needed by ABI analysis:
+/// load/store pairs, load/store single, data processing, FP moves,
+/// and register branches.
+fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
+    let mut ops = [Operand::Imm(0); MAX_OPERANDS];
+
+    let rt = (word & 0x1F) as u8;
+    let rn = ((word >> 5) & 0x1F) as u8;
+    let rt2 = ((word >> 10) & 0x1F) as u8;
+    let rm = ((word >> 16) & 0x1F) as u8;
+    let rd = rt; // alias — same bit position
+
+    // ── STP/LDP GPR (post-index, signed offset, pre-index) ──
+    // Post-index:    x0 101 000 1x imm7 Rt2 Rn Rt  → 0x2880_0000
+    // Signed offset: x0 101 001 0x imm7 Rt2 Rn Rt  → 0x2900_0000
+    // Pre-index:     x0 101 001 1x imm7 Rt2 Rn Rt  → 0x2980_0000
+    if word & 0x7FC0_0000 == 0x2880_0000
+        || word & 0x7FC0_0000 == 0x2900_0000
+        || word & 0x7FC0_0000 == 0x2980_0000
+    {
+        let sf = (word >> 31) & 1;
+        let scale = if sf == 1 { 8i64 } else { 4 };
+        let imm7 = ((word >> 15) & 0x7F) as i32;
+        let disp = sign_extend_7(imm7) as i64 * scale;
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        ops[1] = Operand::Reg(Reg::gpr(rt2));
+        ops[2] = Operand::Mem { base: Reg::gpr(rn), disp };
+        return (ops, 3);
+    }
+
+    // ── STP/LDP FP (post-index, signed offset, pre-index) ──
+    // opc=01: 32-bit (S), opc=10: 64-bit (D), opc=11: 128-bit (Q)
+    if word & 0x7FC0_0000 == 0x6C80_0000
+        || word & 0x7FC0_0000 == 0x6D00_0000
+        || word & 0x7FC0_0000 == 0x6D80_0000
+    {
+        let opc = (word >> 30) & 0x3;
+        let scale = match opc {
+            0b01 => 4i64,
+            0b10 => 8,
+            0b11 => 16,
+            _ => 8,
+        };
+        let imm7 = ((word >> 15) & 0x7F) as i32;
+        let disp = sign_extend_7(imm7) as i64 * scale;
+        ops[0] = Operand::Reg(Reg::fp(rt));
+        ops[1] = Operand::Reg(Reg::fp(rt2));
+        ops[2] = Operand::Mem { base: Reg::gpr(rn), disp };
+        return (ops, 3);
+    }
+
+    // ── STR/LDR GPR (unsigned offset) ──
+    // 1x 111 001 00 imm12 Rn Rt (STR)  /  1x 111 001 01 imm12 Rn Rt (LDR)
+    if word & 0xBFC0_0000 == 0xB900_0000 || word & 0xBFC0_0000 == 0xB940_0000 {
+        let sf = (word >> 30) & 1;
+        let scale = if sf == 1 { 8i64 } else { 4 };
+        let imm12 = ((word >> 10) & 0xFFF) as i64;
+        let disp = imm12 * scale;
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        ops[1] = Operand::Mem { base: Reg::gpr(rn), disp };
+        return (ops, 2);
+    }
+
+    // ── ADD/SUB (immediate) ──
+    // sf 0 0 100010 sh imm12 Rn Rd (ADD)
+    // sf 1 0 100010 sh imm12 Rn Rd (SUB)
+    if word & 0x1F00_0000 == 0x1100_0000 {
+        let is_sub = (word >> 30) & 1 == 1;
+        let sh = ((word >> 22) & 1) as i64;
+        let imm12 = ((word >> 10) & 0xFFF) as i64;
+        let imm = if sh == 1 { imm12 << 12 } else { imm12 };
+        let imm = if is_sub { -imm } else { imm };
+        ops[0] = Operand::Reg(Reg::gpr(rd));
+        ops[1] = Operand::Reg(Reg::gpr(rn));
+        ops[2] = Operand::Imm(imm);
+        return (ops, 3);
+    }
+
+    // ── ADD/SUB (shifted register) ──
+    // sf 0 0 01011 shift 0 Rm imm6 Rn Rd (ADD)
+    // sf 1 0 01011 shift 0 Rm imm6 Rn Rd (SUB)
+    if word & 0x1F20_0000 == 0x0B00_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rd));
+        ops[1] = Operand::Reg(Reg::gpr(rn));
+        ops[2] = Operand::Reg(Reg::gpr(rm));
+        return (ops, 3);
+    }
+
+    // ── FMOV (register, single/double) ──
+    // 000 11110 xx 1 0000 00 10000 Rn Rd
+    if word & 0xFF20_FC00 == 0x1E20_4000 {
+        ops[0] = Operand::Reg(Reg::fp(rd));
+        ops[1] = Operand::Reg(Reg::fp(rn));
+        return (ops, 2);
+    }
+
+    // ── BR / BLR (register) ──
+    if word & 0xFFFF_FC1F == 0xD61F_0000 || word & 0xFFFF_FC1F == 0xD63F_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rn));
+        return (ops, 1);
+    }
+
+    // ── CBZ / CBNZ ──
+    if word & 0x7E00_0000 == 0x3400_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        return (ops, 1);
+    }
+
+    // ── TBZ / TBNZ ──
+    if word & 0x7E00_0000 == 0x3600_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        return (ops, 1);
+    }
+
+    // ── ADR / ADRP ──
+    if word & 0x1F00_0000 == 0x1000_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rd));
+        return (ops, 1);
+    }
+
+    // ── LDR literal ──
+    if word & 0x3B00_0000 == 0x1800_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        return (ops, 1);
+    }
+
+    // ── RET ──
+    if word & 0xFFFF_FC1F == 0xD65F_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rn));
+        return (ops, 1);
+    }
+
+    (ops, 0)
 }
 
 // ───────────────── sign extension helpers ─────────────────
@@ -186,9 +310,16 @@ fn sign_extend_14(val: i32) -> i32 {
     }
 }
 
+fn sign_extend_7(val: i32) -> i32 {
+    if val & (1 << 6) != 0 {
+        val | !0x0000_007F
+    } else {
+        val
+    }
+}
+
 // ───────────────── encoding ─────────────────
 
-/// Encode a B or BL instruction targeting `to_va` from `from_va`.
 pub(crate) fn encode_branch_insn(
     from_va: u64,
     to_va: u64,
@@ -218,7 +349,6 @@ pub(crate) fn encode_branch_insn(
     Ok(word.to_le_bytes().to_vec())
 }
 
-/// Relocate an arm64 instruction from `old_va` to `new_va`.
 pub(crate) fn relocate(
     bytes: &[u8],
     old_va: u64,
@@ -232,7 +362,7 @@ pub(crate) fn relocate(
 
     let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
 
-    // B / BL: recompute imm26
+    // B / BL
     if word & 0xFC00_0000 == 0x1400_0000 || word & 0xFC00_0000 == 0x9400_0000 {
         let imm26 = (word & 0x03FF_FFFF) as i32;
         let old_offset = sign_extend_26(imm26) as i64 * 4;
@@ -240,7 +370,7 @@ pub(crate) fn relocate(
         return encode_branch_insn(new_va, old_target as u64, word & 0xFC00_0000 == 0x9400_0000);
     }
 
-    // B.cond: recompute imm19
+    // B.cond
     if word & 0xFF00_0010 == 0x5400_0000 {
         let imm19 = ((word >> 5) & 0x7FFFF) as i32;
         let old_offset = sign_extend_19(imm19) as i64 * 4;
@@ -261,7 +391,7 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // CBZ / CBNZ: recompute imm19
+    // CBZ / CBNZ
     if word & 0x7E00_0000 == 0x3400_0000 {
         let imm19 = ((word >> 5) & 0x7FFFF) as i32;
         let old_offset = sign_extend_19(imm19) as i64 * 4;
@@ -282,7 +412,7 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // TBZ / TBNZ: recompute imm14
+    // TBZ / TBNZ
     if word & 0x7E00_0000 == 0x3600_0000 {
         let imm14 = ((word >> 5) & 0x3FFF) as i32;
         let old_offset = sign_extend_14(imm14) as i64 * 4;
@@ -303,7 +433,7 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // ADR: recompute immhi:immlo
+    // ADR
     if word & 0x9F00_0000 == 0x1000_0000 {
         let immhi = ((word >> 5) & 0x7FFFF) as i32;
         let immlo = ((word >> 29) & 0x3) as i32;
@@ -323,7 +453,7 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // ADRP: recompute page-relative
+    // ADRP
     if word & 0x9F00_0000 == 0x9000_0000 {
         let immhi = ((word >> 5) & 0x7FFFF) as i32;
         let immlo = ((word >> 29) & 0x3) as i32;
@@ -351,7 +481,7 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // LDR literal: recompute imm19
+    // LDR literal
     if word & 0x3B00_0000 == 0x1800_0000 {
         let imm19 = ((word >> 5) & 0x7FFFF) as i32;
         let old_offset = sign_extend_19(imm19) as i64 * 4;
@@ -372,7 +502,6 @@ pub(crate) fn relocate(
         return Ok(new_word.to_le_bytes().to_vec());
     }
 
-    // Register branches and non-PC-relative: no relocation needed, copy as-is.
     Ok(bytes[..4].to_vec())
 }
 
@@ -389,10 +518,7 @@ pub(crate) fn disassemble_one(bytes: &[u8], va: u64) -> Result<String, DecodeErr
 
     match bad64::decode(word, va) {
         Ok(decoded) => Ok(format!("{decoded}")),
-        Err(_) => {
-            // Fallback: show raw encoding.
-            Ok(format!(".inst 0x{word:08x}"))
-        }
+        Err(_) => Ok(format!(".inst 0x{word:08x}")),
     }
 }
 

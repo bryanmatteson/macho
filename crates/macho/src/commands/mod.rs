@@ -6,69 +6,154 @@ use clap::Parser;
 pub mod output;
 pub mod subcommands;
 
+const GROUPED_HELP: &str = "\
+Structure:
+  info           Mach-O structure (header, segments, sections, load commands)
+  deps           Linked libraries and compatibility versions
+  codesign       Code signature, entitlements, and CMS info
+  dwarf          DWARF debug sections (view or extract with --output-dir)
+
+Symbols:
+  symbols        Symbol table with filtering
+  imports        Imported symbols
+  exports        Exported symbols
+  fixups         Chained fixup entries
+  relocations    Relocation entries
+  ranges         Function and symbol address ranges
+
+Data:
+  strings        String literals with heuristic scanning
+  xrefs          Cross-references between addresses
+  vtables        C++ virtual tables
+
+Language:
+  objc           Objective-C classes, protocols, selectors
+  swift          Swift type metadata
+  cpp            C++ RTTI type hierarchies
+  c              C type declarations from debug info
+
+Analysis:
+  diff           Compare two binaries semantically
+  audit          Security and configuration audit
+  container      Multi-architecture container analysis
+  snapshot       JSON structural snapshot
+
+Mutation:
+  patch          Apply structural patches (rpaths, dylibs, signatures, bytes)
+  header-infer   Reconstruct Mach-O headers from evidence
+
+Special:
+  fileset        Inspect fileset entries
+  cache          Inspect dyld shared cache";
+
 #[derive(Parser)]
-#[command(name = "macho", version, about = "Mach-O binary inspection tool")]
+#[command(
+    name = "macho",
+    version,
+    about = "Mach-O binary inspection tool",
+    override_usage = "macho <COMMAND> [OPTIONS]",
+    after_help = GROUPED_HELP,
+    subcommand_required = true,
+    arg_required_else_help = true,
+)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
 }
 
+// All variants use `hide = true` to suppress clap's auto-generated alphabetical
+// subcommand list. The grouped layout in GROUPED_HELP replaces it.
+// Every command is fully functional — `hide` is cosmetic only.
 #[derive(clap::Subcommand)]
 enum Commands {
-    /// Inspect Mach-O structures and metadata
-    View(subcommands::view::ViewArgs),
-    /// Apply one or more structural or raw patches in a single transaction
-    Patch(subcommands::patch::PatchArgs),
-    /// Compare two Mach-O binaries semantically
-    Compare(subcommands::compare::CompareArgs),
-    /// Recover or materialize higher-level artifacts from a Mach-O input
-    Extract(subcommands::extract::ExtractArgs),
-    /// List and inspect fileset entries
-    Fileset(subcommands::fileset::FilesetArgs),
-    /// Inspect a dyld shared cache (list images, extract, info)
-    DyldCache(subcommands::dyld_cache::DyldCacheArgs),
-    #[command(name = "audit", hide = true)]
-    Audit(subcommands::audit::AuditArgs),
-    #[command(name = "c", hide = true)]
-    C(subcommands::c::CArgs),
-    #[command(name = "codesign", hide = true)]
-    Codesign(subcommands::codesign::CodesignArgs),
-    #[command(name = "container", hide = true)]
-    Container(subcommands::container::ContainerArgs),
-    #[command(name = "cpp", hide = true)]
-    Cpp(subcommands::cpp::CppArgs),
-    #[command(name = "deps", hide = true)]
+    // ── Structure ───────────────────────────────────────────────────────
+    /// Mach-O structure (header, segments, sections, load commands)
+    #[command(hide = true)]
+    Info(subcommands::info::InfoArgs),
+    /// Linked libraries and compatibility versions
+    #[command(hide = true)]
     Deps(subcommands::deps::DepsArgs),
-    #[command(name = "diff", hide = true)]
-    Diff(subcommands::diff::DiffArgs),
-    #[command(name = "exports", hide = true)]
+    /// Code signature, entitlements, and CMS info
+    #[command(hide = true)]
+    Codesign(subcommands::codesign::CodesignArgs),
+    /// DWARF debug sections (view or extract with --output-dir)
+    #[command(hide = true)]
+    Dwarf(subcommands::dwarf::DwarfArgs),
+
+    // ── Symbols ────────────────────────────────────────────────────────
+    /// Symbol table with filtering
+    #[command(hide = true)]
+    Symbols(subcommands::symbols::SymbolsArgs),
+    /// Imported symbols
+    #[command(hide = true)]
+    Imports(subcommands::imports::ImportsArgs),
+    /// Exported symbols
+    #[command(hide = true)]
     Exports(subcommands::exports::ExportsArgs),
-    #[command(name = "fixups", hide = true)]
+    /// Chained fixup entries
+    #[command(hide = true)]
     Fixups(subcommands::fixups::FixupsArgs),
+    /// Relocation entries
+    #[command(hide = true)]
+    Relocations(subcommands::relocations::RelocationsArgs),
+    /// Function and symbol address ranges
+    #[command(hide = true)]
+    Ranges(subcommands::data_surface::RangesArgs),
+
+    // ── Data ───────────────────────────────────────────────────────────
+    /// String literals with heuristic scanning
+    #[command(hide = true)]
+    Strings(subcommands::data_surface::StringsArgs),
+    /// Cross-references between addresses
+    #[command(hide = true)]
+    Xrefs(subcommands::data_surface::XrefsArgs),
+    /// C++ virtual tables
+    #[command(hide = true)]
+    Vtables(subcommands::data_surface::VtablesArgs),
+
+    // ── Language ───────────────────────────────────────────────────────
+    /// Objective-C classes, protocols, selectors
+    #[command(hide = true)]
+    Objc(subcommands::objc::ObjCArgs),
+    /// Swift type metadata
+    #[command(hide = true)]
+    Swift(subcommands::swift::SwiftArgs),
+    /// C++ RTTI type hierarchies
+    #[command(hide = true)]
+    Cpp(subcommands::cpp::CppArgs),
+    /// C type declarations from debug info
+    #[command(hide = true)]
+    C(subcommands::c::CArgs),
+
+    // ── Analysis ───────────────────────────────────────────────────────
+    /// Compare two binaries semantically
+    #[command(hide = true)]
+    Diff(subcommands::diff::DiffArgs),
+    /// Security and configuration audit
+    #[command(hide = true)]
+    Audit(subcommands::audit::AuditArgs),
+    /// Multi-architecture container analysis
+    #[command(hide = true)]
+    Container(subcommands::container::ContainerArgs),
+    /// JSON structural snapshot
+    #[command(hide = true)]
+    Snapshot(subcommands::snapshot::SnapshotArgs),
+
+    // ── Mutation ───────────────────────────────────────────────────────
+    /// Apply structural patches (rpaths, dylibs, signatures, bytes)
+    #[command(hide = true)]
+    Patch(subcommands::patch::PatchArgs),
+    /// Reconstruct Mach-O headers from evidence
     #[command(name = "header-infer", hide = true)]
     HeaderInfer(subcommands::header_infer::HeaderInferArgs),
-    #[command(name = "imports", hide = true)]
-    Imports(subcommands::imports::ImportsArgs),
-    #[command(name = "inspect", hide = true)]
-    Inspect(subcommands::inspect::InspectArgs),
-    #[command(name = "objc", hide = true)]
-    Objc(subcommands::objc::ObjCArgs),
-    #[command(name = "ranges", hide = true)]
-    Ranges(subcommands::data_surface::RangesArgs),
-    #[command(name = "relocations", hide = true)]
-    Relocations(subcommands::relocations::RelocationsArgs),
-    #[command(name = "snapshot", hide = true)]
-    Snapshot(subcommands::snapshot::SnapshotArgs),
-    #[command(name = "strings", hide = true)]
-    Strings(subcommands::data_surface::StringsArgs),
-    #[command(name = "swift", hide = true)]
-    Swift(subcommands::swift::SwiftArgs),
-    #[command(name = "symbols", hide = true)]
-    Symbols(subcommands::symbols::SymbolsArgs),
-    #[command(name = "vtables", hide = true)]
-    Vtables(subcommands::data_surface::VtablesArgs),
-    #[command(name = "xrefs", hide = true)]
-    Xrefs(subcommands::data_surface::XrefsArgs),
+
+    // ── Special ────────────────────────────────────────────────────────
+    /// Inspect fileset entries
+    #[command(hide = true)]
+    Fileset(subcommands::fileset::FilesetArgs),
+    /// Inspect dyld shared cache
+    #[command(hide = true)]
+    Cache(subcommands::dyld_cache::DyldCacheArgs),
 }
 
 pub fn run_env() -> u8 {
@@ -128,32 +213,37 @@ where
 
 fn dispatch(command: Commands) -> anyhow::Result<()> {
     match command {
-        Commands::View(args) => subcommands::view::run(args),
-        Commands::Patch(args) => subcommands::patch::run(args),
-        Commands::Compare(args) => subcommands::compare::run(args),
-        Commands::Extract(args) => subcommands::extract::run(args),
-        Commands::Fileset(args) => subcommands::fileset::run(args),
-        Commands::DyldCache(args) => subcommands::dyld_cache::run(args),
-        Commands::Audit(args) => subcommands::audit::run(args),
-        Commands::C(args) => subcommands::c::run(args),
-        Commands::Codesign(args) => subcommands::codesign::run(args),
-        Commands::Container(args) => subcommands::container::run(args),
-        Commands::Cpp(args) => subcommands::cpp::run(args),
+        // Structure
+        Commands::Info(args) => subcommands::info::run(args),
         Commands::Deps(args) => subcommands::deps::run(args),
-        Commands::Diff(args) => subcommands::diff::run(args),
+        Commands::Codesign(args) => subcommands::codesign::run(args),
+        Commands::Dwarf(args) => subcommands::dwarf::run(args),
+        // Symbols
+        Commands::Symbols(args) => subcommands::symbols::run(args),
+        Commands::Imports(args) => subcommands::imports::run(args),
         Commands::Exports(args) => subcommands::exports::run(args),
         Commands::Fixups(args) => subcommands::fixups::run(args),
-        Commands::HeaderInfer(args) => subcommands::header_infer::run(args),
-        Commands::Imports(args) => subcommands::imports::run(args),
-        Commands::Inspect(args) => subcommands::inspect::run(args),
-        Commands::Objc(args) => subcommands::objc::run(args),
-        Commands::Ranges(args) => subcommands::data_surface::run_ranges(args),
         Commands::Relocations(args) => subcommands::relocations::run(args),
-        Commands::Snapshot(args) => subcommands::snapshot::run(args),
+        Commands::Ranges(args) => subcommands::data_surface::run_ranges(args),
+        // Data
         Commands::Strings(args) => subcommands::data_surface::run_strings(args),
-        Commands::Swift(args) => subcommands::swift::run(args),
-        Commands::Symbols(args) => subcommands::symbols::run(args),
-        Commands::Vtables(args) => subcommands::data_surface::run_vtables(args),
         Commands::Xrefs(args) => subcommands::data_surface::run_xrefs(args),
+        Commands::Vtables(args) => subcommands::data_surface::run_vtables(args),
+        // Language
+        Commands::Objc(args) => subcommands::objc::run(args),
+        Commands::Swift(args) => subcommands::swift::run(args),
+        Commands::Cpp(args) => subcommands::cpp::run(args),
+        Commands::C(args) => subcommands::c::run(args),
+        // Analysis
+        Commands::Diff(args) => subcommands::diff::run(args),
+        Commands::Audit(args) => subcommands::audit::run(args),
+        Commands::Container(args) => subcommands::container::run(args),
+        Commands::Snapshot(args) => subcommands::snapshot::run(args),
+        // Mutation
+        Commands::Patch(args) => subcommands::patch::run(args),
+        Commands::HeaderInfer(args) => subcommands::header_infer::run(args),
+        // Special
+        Commands::Fileset(args) => subcommands::fileset::run(args),
+        Commands::Cache(args) => subcommands::dyld_cache::run(args),
     }
 }

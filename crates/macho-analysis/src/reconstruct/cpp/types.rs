@@ -286,7 +286,7 @@ pub struct CppVtableGroup {
     pub evidence: Vec<CppEvidence>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CppReturnChannel {
     Unknown,
@@ -312,6 +312,9 @@ pub struct CppBodyAnalysis {
     pub return_channel: CppReturnChannel,
     pub this_adjustment: Option<i64>,
     pub likely_wrapper: bool,
+    /// Estimated parameter count from prologue register analysis.
+    /// `None` if no heuristic could be applied.
+    pub param_count: Option<u32>,
     pub evidence: Vec<CppEvidence>,
 }
 
