@@ -185,7 +185,7 @@ macho patch input.bin \
 | Command | What it does | Notable options |
 | --- | --- | --- |
 | `view` | Inspect headers, load commands, segments, sections, symbols, relocations, imports, exports, fixups, strings, xrefs, code signatures, DWARF sections, or dependency summaries. | subcommands such as `header`, `symbols`, `imports`, `code-signature`, `dwarf`, `dependencies`; most accept `--arch` |
-| `patch` | Apply one or more structural or raw binary edits in a single transaction. | `--add-rpath`, `--remove-rpath`, `--add-dylib`, `--strip-signature`, `--patch-bytes`, `--arch`, `--dry-run`, `--output`, `--in-place`, `--backup`, `--force` |
+| `patch` | Apply one or more structural or raw binary edits in a single transaction. | `--add-rpath`, `--remove-rpath`, `--add-dylib`, `--strip-signature`, `--bytes`, `--arch`, `--dry-run`, `--output`, `--in-place`, `--backup`, `--force` |
 | `compare` | Compare two binaries semantically and optionally fail on severity. | `--mode`, `--arch`, `--json`, `--fail-on`, `--ignore-codesign`, `--ignore-objc`, `--ignore-symbols` |
 | `extract` | Recover higher-level artifacts such as ObjC metadata, Swift types, C++ RTTI, DWARF payloads, raw sections, or code-signature material. | subcommands `objc`, `swift`, `rtti`, `dwarf`, `section`, `code-signature` |
 | `fileset` | List or inspect `MH_FILESET` entries. | `list`, `inspect` |
@@ -204,7 +204,7 @@ macho patch input.bin \
 - `--remove-rpath`
 - `--add-dylib`
 - `--strip-signature`
-- `--patch-bytes`
+- `--bytes`
 
 ## Library Usage
 

@@ -15,7 +15,7 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     let kind = classify(word, va);
     let (ops, op_count) = extract_operands(word);
 
-    Ok(Insn::with_ops(4, kind, ops, op_count))
+    Ok(Insn::with_ops(4, kind, ops, op_count, false))
 }
 
 fn classify(word: u32, va: u64) -> InsnKind {
@@ -25,7 +25,11 @@ fn classify(word: u32, va: u64) -> InsnKind {
     }
 
     // RET (and variants): 1101011 0010 11111 0000 00 Rn 00000
-    if word & 0xFFFF_FC1F == 0xD65F_0000 {
+    // Also RETAA (0xD65F_0BFF) and RETAB (0xD65F_0FFF) — pointer-authentication returns.
+    if word & 0xFFFF_FC1F == 0xD65F_0000
+        || word == 0xD65F_0BFF
+        || word == 0xD65F_0FFF
+    {
         return InsnKind::Return;
     }
 
@@ -267,8 +271,11 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         return (ops, 1);
     }
 
-    // ── RET ──
-    if word & 0xFFFF_FC1F == 0xD65F_0000 {
+    // ── RET / RETAA / RETAB ──
+    if word & 0xFFFF_FC1F == 0xD65F_0000
+        || word == 0xD65F_0BFF
+        || word == 0xD65F_0FFF
+    {
         ops[0] = Operand::Reg(Reg::gpr(rn));
         return (ops, 1);
     }

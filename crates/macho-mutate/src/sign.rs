@@ -21,11 +21,11 @@ use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::{MachoEditor, Result};
 
-use macho_core::codesign::types::{
-    CSMAGIC_CODEDIRECTORY, CSMAGIC_EMBEDDED_SIGNATURE, CSMAGIC_ENTITLEMENTS, CS_HASHTYPE_SHA256,
-    CS_SLOT_CODEDIRECTORY, CS_SLOT_ENTITLEMENTS,
-};
 use crate::format::parse_macho_file;
+use macho_core::codesign::types::{
+    CS_HASHTYPE_SHA256, CS_SLOT_CODEDIRECTORY, CS_SLOT_ENTITLEMENTS, CSMAGIC_CODEDIRECTORY,
+    CSMAGIC_EMBEDDED_SIGNATURE, CSMAGIC_ENTITLEMENTS,
+};
 
 /// Options for ad-hoc signing.
 #[derive(Debug, Clone, Default)]
@@ -197,7 +197,7 @@ fn strip_code_signature(binary: &[u8], mach: &MachoFile<'_>) -> Result<Vec<u8>> 
         return Ok(binary.to_vec());
     }
 
-    let mut stripped = binary[..sig_offset].to_vec();
+    let stripped = binary[..sig_offset].to_vec();
 
     // Remove the LC_CODE_SIGNATURE load command by rebuilding via editor.
     let mach2 = parse_macho_file(&stripped)?;
@@ -418,7 +418,10 @@ mod tests {
             CSMAGIC_CODEDIRECTORY
         );
         // Version.
-        assert_eq!(u32::from_be_bytes(cd[8..12].try_into().unwrap()), CD_VERSION);
+        assert_eq!(
+            u32::from_be_bytes(cd[8..12].try_into().unwrap()),
+            CD_VERSION
+        );
         // Flags = CS_ADHOC.
         assert_eq!(u32::from_be_bytes(cd[12..16].try_into().unwrap()), CS_ADHOC);
         // nCodeSlots.

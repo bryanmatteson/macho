@@ -290,10 +290,14 @@ pub struct CppVtableGroup {
 #[serde(rename_all = "snake_case")]
 pub enum CppReturnChannel {
     Unknown,
+    /// Returns via GPR (rax/x0).
     GeneralPurpose,
+    /// Returns via FP/SIMD register (xmm0/d0).
     FloatingPoint,
+    /// Returns a large aggregate via hidden pointer (sret).
     AggregateIndirect,
-    PointerLike,
+    /// Returns nothing.
+    Void,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -303,6 +307,29 @@ pub enum CppBodyKind {
     Thunk,
     Stub,
     Unknown,
+}
+
+/// Heuristic type hint for a function argument inferred from instruction-level
+/// usage patterns (pointer dereference, call target correlation, vtable loads).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "hint", rename_all = "snake_case")]
+pub enum ArgumentTypeHint {
+    /// Register class known only.
+    Unknown,
+    /// Scalar integer value — never dereferenced.
+    Scalar,
+    /// Floating-point value (from FP register class).
+    FloatingPoint,
+    /// Pointer to unknown data (dereferenced but target unclassified).
+    Pointer,
+    /// Pointer to C string (passed to a known string function).
+    CString,
+    /// Pointer to C++ object with vtable.
+    ClassPointer { class_name: String },
+    /// ObjC object pointer (passed to `objc_msgSend` or similar).
+    ObjcObject,
+    /// Pointer to struct (dereferenced at multiple field offsets, no vtable pattern).
+    StructPointer,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -315,6 +342,9 @@ pub struct CppBodyAnalysis {
     /// Estimated parameter count from prologue register analysis.
     /// `None` if no heuristic could be applied.
     pub param_count: Option<u32>,
+    /// Per-argument type hints inferred from body analysis.
+    /// Index corresponds to ABI argument position (0 = first arg).
+    pub argument_hints: Vec<ArgumentTypeHint>,
     pub evidence: Vec<CppEvidence>,
 }
 

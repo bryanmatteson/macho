@@ -8,6 +8,7 @@ pub mod unify;
 
 use std::collections::BTreeMap;
 
+use crate::core::dwarf::DwarfFunctionIndex;
 use crate::core::{MachoFile, SymbolTable};
 use abi::analyze_symbol_body;
 use rtti::build_typeinfo_index;
@@ -24,6 +25,7 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
     let symtab = macho.ext::<SymbolTable<'_>>()?;
     let typeinfos = build_typeinfo_index(macho)?;
     let vtables = VtableIndex::build(macho)?;
+    let dwarf_index = DwarfFunctionIndex::build(macho).ok();
 
     let mut symbols = Vec::new();
     let mut classes: BTreeMap<String, types::CppClass> = BTreeMap::new();
@@ -42,12 +44,15 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
     }
 
     for symbol in symtab.symbols() {
-        let Some(mut record) = parse_symbol(symbol.name, Some(symbol.value)) else {
+        let Some(mut record) =
+            parse_symbol(symbol.name, Some(symbol.value), dwarf_index.as_ref())
+        else {
             continue;
         };
 
         if let types::CppSymbolKind::Function { ref mut decl } = record.kind {
-            decl.body_analysis = analyze_symbol_body(macho, &symtab, symbol);
+            decl.body_analysis =
+                analyze_symbol_body(macho, &symtab, symbol, Some(&vtables));
             if let Some(parent) = decl.name.parent() {
                 if decl.is_constructor || decl.is_destructor {
                     probable_classes.insert(parent.as_string());

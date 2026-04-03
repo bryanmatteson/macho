@@ -5,9 +5,15 @@ use super::types::{
     CppParameter, CppRefQualifier, CppSpecialSymbol, CppSymbolKind, CppSymbolRecord, CppThunkKind,
     CppType, QualifiedName,
 };
+use crate::core::dwarf::types::{DwarfFunctionInfo, DwarfType};
+use crate::core::dwarf::DwarfFunctionIndex;
 use crate::core::symbols::demangle::{demangle_cpp_symbol_with_options, demangle_symbol};
 
-pub fn parse_symbol(mangled_name: &str, address: Option<u64>) -> Option<CppSymbolRecord> {
+pub fn parse_symbol(
+    mangled_name: &str,
+    address: Option<u64>,
+    dwarf_index: Option<&DwarfFunctionIndex>,
+) -> Option<CppSymbolRecord> {
     let demangled_name = demangle_symbol(mangled_name)?;
 
     if let Some(detail) = parse_special_symbol(&demangled_name) {
@@ -32,7 +38,8 @@ pub fn parse_symbol(mangled_name: &str, address: Option<u64>) -> Option<CppSymbo
         });
     }
 
-    parse_function(mangled_name, &demangled_name, address).map(|decl| CppSymbolRecord {
+    let dwarf_func = dwarf_index.and_then(|idx| idx.find_by_linkage_name(mangled_name));
+    parse_function(mangled_name, &demangled_name, address, dwarf_func).map(|decl| CppSymbolRecord {
         mangled_name: mangled_name.to_string(),
         demangled_name: Some(demangled_name),
         address,
@@ -94,6 +101,7 @@ fn parse_function(
     mangled_name: &str,
     demangled_name: &str,
     address: Option<u64>,
+    dwarf_func: Option<&DwarfFunctionInfo>,
 ) -> Option<CppFunctionDecl> {
     let no_return =
         demangle_cpp_symbol_with_options(mangled_name, DemangleOptions::default().no_return_type())
@@ -102,7 +110,6 @@ fn parse_function(
         .unwrap_or_else(|| demangled_name.to_string());
 
     let (name_text, args_text, suffix) = split_signature(&no_return)?;
-    let return_type = extract_return_type(&full, &no_return).map(|ty| parse_type(&ty));
     let name = QualifiedName::from_text(name_text);
     let leaf = name.leaf().unwrap_or_default().to_string();
     let class_leaf = name
@@ -114,14 +121,67 @@ fn parse_function(
         .is_some_and(|class_name| leaf == format!("~{class_name}"));
     let is_operator = leaf.starts_with("operator");
     let (is_const, is_volatile, ref_qualifier, noexcept) = parse_suffix_qualifiers(suffix);
-    let params = split_top_level_args(args_text)
-        .into_iter()
-        .enumerate()
-        .map(|(index, arg)| CppParameter {
-            name: format!("arg{index}"),
-            ty: parse_type(&arg),
-        })
-        .collect();
+
+    // Build parameters and return type.
+    // When DWARF is available, use it for exact names and types; fall back to
+    // demangled-string parsing otherwise.
+    let (return_type, params, evidence) = if let Some(df) = dwarf_func {
+        let rt = dwarf_type_to_cpp(&df.return_type);
+        let ps: Vec<CppParameter> = df
+            .parameters
+            .iter()
+            .filter(|p| !p.is_artificial)
+            .enumerate()
+            .map(|(i, dp)| CppParameter {
+                name: dp
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("arg{i}")),
+                ty: dwarf_type_to_cpp(&dp.ty),
+            })
+            .collect();
+        let ev = vec![
+            CppEvidence {
+                kind: CppEvidenceKind::MangledSymbol,
+                confidence: CppConfidence::Exact,
+                detail: mangled_name.to_string(),
+            },
+            CppEvidence {
+                kind: CppEvidenceKind::DemangledSymbol,
+                confidence: CppConfidence::High,
+                detail: demangled_name.to_string(),
+            },
+            CppEvidence {
+                kind: CppEvidenceKind::BodyAnalysis, // closest variant for "DWARF"
+                confidence: CppConfidence::Exact,
+                detail: "DWARF debug info".to_string(),
+            },
+        ];
+        (Some(rt), ps, ev)
+    } else {
+        let rt = extract_return_type(&full, &no_return).map(|ty| parse_type(&ty));
+        let ps = split_top_level_args(args_text)
+            .into_iter()
+            .enumerate()
+            .map(|(index, arg)| CppParameter {
+                name: format!("arg{index}"),
+                ty: parse_type(&arg),
+            })
+            .collect();
+        let ev = vec![
+            CppEvidence {
+                kind: CppEvidenceKind::MangledSymbol,
+                confidence: CppConfidence::Exact,
+                detail: mangled_name.to_string(),
+            },
+            CppEvidence {
+                kind: CppEvidenceKind::DemangledSymbol,
+                confidence: CppConfidence::High,
+                detail: demangled_name.to_string(),
+            },
+        ];
+        (rt, ps, ev)
+    };
 
     Some(CppFunctionDecl {
         mangled_name: mangled_name.to_string(),
@@ -142,20 +202,66 @@ fn parse_function(
         is_operator,
         is_virtual: false,
         is_thunk: demangled_name.contains("thunk"),
-        evidence: vec![
-            CppEvidence {
-                kind: CppEvidenceKind::MangledSymbol,
-                confidence: CppConfidence::Exact,
-                detail: mangled_name.to_string(),
-            },
-            CppEvidence {
-                kind: CppEvidenceKind::DemangledSymbol,
-                confidence: CppConfidence::High,
-                detail: demangled_name.to_string(),
-            },
-        ],
+        evidence,
         body_analysis: None,
     })
+}
+
+/// Convert a DWARF type to the C++ type representation.
+fn dwarf_type_to_cpp(dt: &DwarfType) -> CppType {
+    match dt {
+        DwarfType::Void => CppType::Builtin {
+            spelling: "void".to_string(),
+        },
+        DwarfType::Base { name, .. } => CppType::Builtin {
+            spelling: name.clone(),
+        },
+        DwarfType::Pointer { pointee, .. } => CppType::Pointer {
+            inner: Box::new(dwarf_type_to_cpp(pointee)),
+        },
+        DwarfType::Reference { referent } => CppType::LvalueRef {
+            inner: Box::new(dwarf_type_to_cpp(referent)),
+        },
+        DwarfType::RvalueReference { referent } => CppType::RvalueRef {
+            inner: Box::new(dwarf_type_to_cpp(referent)),
+        },
+        DwarfType::Const(inner) => CppType::Qualified {
+            is_const: true,
+            is_volatile: false,
+            inner: Box::new(dwarf_type_to_cpp(inner)),
+        },
+        DwarfType::Volatile(inner) => CppType::Qualified {
+            is_const: false,
+            is_volatile: true,
+            inner: Box::new(dwarf_type_to_cpp(inner)),
+        },
+        DwarfType::Restrict(inner) => dwarf_type_to_cpp(inner),
+        DwarfType::Typedef { name, .. } => CppType::Named {
+            name: QualifiedName::from_text(name),
+        },
+        DwarfType::Structure { name, .. } => CppType::Named {
+            name: QualifiedName::from_text(name.as_deref().unwrap_or("<anon>")),
+        },
+        DwarfType::Union { name, .. } => CppType::Named {
+            name: QualifiedName::from_text(name.as_deref().unwrap_or("<anon>")),
+        },
+        DwarfType::Enumeration { name, .. } => CppType::Named {
+            name: QualifiedName::from_text(name.as_deref().unwrap_or("<anon>")),
+        },
+        DwarfType::Array { .. } => CppType::Spelled {
+            spelling: format!("{dt}"),
+        },
+        DwarfType::Subroutine {
+            return_type,
+            params,
+        } => CppType::FunctionPointer {
+            result: Box::new(dwarf_type_to_cpp(return_type)),
+            params: params.iter().map(dwarf_type_to_cpp).collect(),
+        },
+        DwarfType::Unresolved => CppType::Unknown {
+            label: "<unresolved>".to_string(),
+        },
+    }
 }
 
 fn extract_return_type(full: &str, no_return: &str) -> Option<String> {
@@ -390,7 +496,7 @@ mod tests {
 
     #[test]
     fn parses_simple_function_symbol() {
-        let record = parse_symbol("__ZN5space3fooEii", Some(0x1000)).expect("record");
+        let record = parse_symbol("__ZN5space3fooEii", Some(0x1000), None).expect("record");
         match record.kind {
             CppSymbolKind::Function { decl } => {
                 assert_eq!(decl.name.as_string(), "space::foo");
@@ -402,7 +508,7 @@ mod tests {
 
     #[test]
     fn parses_special_symbols() {
-        let record = parse_symbol("__ZTVN10__cxxabiv117__class_type_infoE", None)
+        let record = parse_symbol("__ZTVN10__cxxabiv117__class_type_infoE", None, None)
             .expect("vtable special symbol");
         match record.kind {
             CppSymbolKind::Special { .. } => {}
@@ -416,6 +522,237 @@ mod tests {
         match ty {
             CppType::LvalueRef { .. } => {}
             other => panic!("expected lvalue ref, got {other:?}"),
+        }
+    }
+
+    // ── DWARF type conversion tests ──
+
+    use super::dwarf_type_to_cpp;
+    use crate::core::dwarf::types::{BaseTypeEncoding, DwarfType};
+
+    #[test]
+    fn dwarf_void_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Void);
+        assert!(matches!(ty, CppType::Builtin { spelling } if spelling == "void"));
+    }
+
+    #[test]
+    fn dwarf_base_int_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Base {
+            name: "int".to_string(),
+            byte_size: 4,
+            encoding: BaseTypeEncoding::Signed,
+        });
+        assert!(matches!(ty, CppType::Builtin { spelling } if spelling == "int"));
+    }
+
+    #[test]
+    fn dwarf_base_float_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Base {
+            name: "double".to_string(),
+            byte_size: 8,
+            encoding: BaseTypeEncoding::Float,
+        });
+        assert!(matches!(ty, CppType::Builtin { spelling } if spelling == "double"));
+    }
+
+    #[test]
+    fn dwarf_pointer_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Pointer {
+            pointee: Box::new(DwarfType::Base {
+                name: "char".to_string(),
+                byte_size: 1,
+                encoding: BaseTypeEncoding::Char,
+            }),
+            byte_size: 8,
+        });
+        match ty {
+            CppType::Pointer { inner } => {
+                assert!(matches!(*inner, CppType::Builtin { spelling } if spelling == "char"));
+            }
+            other => panic!("expected Pointer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_reference_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Reference {
+            referent: Box::new(DwarfType::Base {
+                name: "int".to_string(),
+                byte_size: 4,
+                encoding: BaseTypeEncoding::Signed,
+            }),
+        });
+        assert!(matches!(ty, CppType::LvalueRef { .. }));
+    }
+
+    #[test]
+    fn dwarf_rvalue_reference_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::RvalueReference {
+            referent: Box::new(DwarfType::Void),
+        });
+        assert!(matches!(ty, CppType::RvalueRef { .. }));
+    }
+
+    #[test]
+    fn dwarf_const_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Const(Box::new(DwarfType::Base {
+            name: "int".to_string(),
+            byte_size: 4,
+            encoding: BaseTypeEncoding::Signed,
+        })));
+        match ty {
+            CppType::Qualified { is_const, is_volatile, .. } => {
+                assert!(is_const);
+                assert!(!is_volatile);
+            }
+            other => panic!("expected Qualified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_volatile_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Volatile(Box::new(DwarfType::Void)));
+        match ty {
+            CppType::Qualified { is_const, is_volatile, .. } => {
+                assert!(!is_const);
+                assert!(is_volatile);
+            }
+            other => panic!("expected Qualified, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_typedef_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Typedef {
+            name: "size_t".to_string(),
+            underlying: Box::new(DwarfType::Base {
+                name: "unsigned long".to_string(),
+                byte_size: 8,
+                encoding: BaseTypeEncoding::Unsigned,
+            }),
+        });
+        match ty {
+            CppType::Named { name } => assert_eq!(name.as_string(), "size_t"),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_structure_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Structure {
+            name: Some("MyClass".to_string()),
+            byte_size: Some(16),
+        });
+        match ty {
+            CppType::Named { name } => assert_eq!(name.as_string(), "MyClass"),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_anonymous_struct_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Structure {
+            name: None,
+            byte_size: Some(8),
+        });
+        match ty {
+            CppType::Named { name } => assert_eq!(name.as_string(), "<anon>"),
+            other => panic!("expected Named for anon struct, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_union_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Union {
+            name: Some("MyUnion".to_string()),
+            byte_size: Some(8),
+        });
+        match ty {
+            CppType::Named { name } => assert_eq!(name.as_string(), "MyUnion"),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_enum_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Enumeration {
+            name: Some("Color".to_string()),
+            byte_size: Some(4),
+        });
+        match ty {
+            CppType::Named { name } => assert_eq!(name.as_string(), "Color"),
+            other => panic!("expected Named, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_array_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Array {
+            element: Box::new(DwarfType::Base {
+                name: "int".to_string(),
+                byte_size: 4,
+                encoding: BaseTypeEncoding::Signed,
+            }),
+            count: Some(10),
+        });
+        match ty {
+            CppType::Spelled { spelling } => assert!(spelling.contains("[10]"), "got: {spelling}"),
+            other => panic!("expected Spelled array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_subroutine_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Subroutine {
+            return_type: Box::new(DwarfType::Void),
+            params: vec![DwarfType::Base {
+                name: "int".to_string(),
+                byte_size: 4,
+                encoding: BaseTypeEncoding::Signed,
+            }],
+        });
+        match ty {
+            CppType::FunctionPointer { result, params } => {
+                assert!(matches!(*result, CppType::Builtin { spelling } if spelling == "void"));
+                assert_eq!(params.len(), 1);
+            }
+            other => panic!("expected FunctionPointer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dwarf_unresolved_to_cpp() {
+        let ty = dwarf_type_to_cpp(&DwarfType::Unresolved);
+        assert!(matches!(ty, CppType::Unknown { .. }));
+    }
+
+    #[test]
+    fn dwarf_restrict_to_cpp() {
+        // restrict is dropped (not representable in C++ types), inner preserved
+        let ty = dwarf_type_to_cpp(&DwarfType::Restrict(Box::new(DwarfType::Pointer {
+            pointee: Box::new(DwarfType::Void),
+            byte_size: 8,
+        })));
+        assert!(matches!(ty, CppType::Pointer { .. }));
+    }
+
+    #[test]
+    fn dwarf_nested_const_pointer_to_cpp() {
+        // const char* → Pointer { inner: Qualified { const, Builtin "char" } }
+        let ty = dwarf_type_to_cpp(&DwarfType::Pointer {
+            pointee: Box::new(DwarfType::Const(Box::new(DwarfType::Base {
+                name: "char".to_string(),
+                byte_size: 1,
+                encoding: BaseTypeEncoding::Char,
+            }))),
+            byte_size: 8,
+        });
+        match ty {
+            CppType::Pointer { inner } => {
+                assert!(matches!(*inner, CppType::Qualified { is_const: true, .. }));
+            }
+            other => panic!("expected Pointer to Qualified, got {other:?}"),
         }
     }
 }

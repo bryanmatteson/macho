@@ -28,7 +28,18 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     let kind = classify(&insn, va);
     let (ops, op_count) = extract_operands(&insn);
 
-    Ok(Insn::with_ops(insn.len(), kind, ops, op_count))
+    // Flag instructions that write rax as an implicit side effect (not
+    // reflected in the operand list). Consumers use this to avoid treating
+    // DIV/MUL results as intentional return values.
+    let writes_implicit_gpr0 = match insn.mnemonic() {
+        Mnemonic::Div | Mnemonic::Idiv | Mnemonic::Mul => true,
+        Mnemonic::Imul => insn.op_count() == 1, // single-operand form only
+        Mnemonic::Cwd | Mnemonic::Cdq | Mnemonic::Cqo
+        | Mnemonic::Cdqe | Mnemonic::Cbw | Mnemonic::Cwde => true,
+        _ => false,
+    };
+
+    Ok(Insn::with_ops(insn.len(), kind, ops, op_count, writes_implicit_gpr0))
 }
 
 fn classify(insn: &Instruction, _va: u64) -> InsnKind {
@@ -129,7 +140,10 @@ fn map_operand(insn: &Instruction, idx: u32) -> Option<Operand> {
             // operand positions — consumers checking for specific bases like
             // Gpr(4)/RSP naturally skip the sentinel.
             let base = map_register(insn.memory_base()).unwrap_or(Reg::gpr(255));
-            let disp = insn.memory_displacement64() as i64;
+            // Sign-extend the displacement correctly based on its encoded width.
+            // memory_displacement64() returns the raw value without sign extension,
+            // so [rbp-8] encoded as disp8=0xF8 would yield 248 instead of -8.
+            let disp = insn.memory_displacement32() as i32 as i64;
             Some(Operand::Mem { base, disp })
         }
         OpKind::Immediate8

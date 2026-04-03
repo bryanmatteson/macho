@@ -101,6 +101,11 @@ pub struct Insn {
     pub len: usize,
     /// Semantic classification.
     pub kind: InsnKind,
+    /// True when this instruction writes GPR0 (rax on x86_64) as a hidden
+    /// side effect not visible in the operand list. Set for DIV, IDIV, MUL,
+    /// single-operand IMUL, CWD/CDQ/CQO, and sign-extension instructions.
+    /// Always false on ARM64 (no implicit register side effects).
+    pub writes_implicit_gpr0: bool,
     ops: [Operand; MAX_OPERANDS],
     op_count: u8,
 }
@@ -111,11 +116,18 @@ impl Insn {
         &self.ops[..self.op_count as usize]
     }
 
-    pub(crate) fn with_ops(len: usize, kind: InsnKind, ops: [Operand; MAX_OPERANDS], op_count: u8) -> Self {
+    pub(crate) fn with_ops(
+        len: usize,
+        kind: InsnKind,
+        ops: [Operand; MAX_OPERANDS],
+        op_count: u8,
+        writes_implicit_gpr0: bool,
+    ) -> Self {
         Self {
             offset: 0,
             len,
             kind,
+            writes_implicit_gpr0,
             ops,
             op_count,
         }
@@ -886,5 +898,154 @@ mod tests {
         assert_eq!(ops.len(), 2, "expected 2 operands for FMOV, got: {ops:?}");
         assert_eq!(ops[0], Operand::Reg(Reg::fp(0)));  // d0
         assert_eq!(ops[1], Operand::Reg(Reg::fp(1)));  // d1
+    }
+
+    // ── writes_implicit_gpr0 flag ──
+
+    #[test]
+    fn x86_64_div_sets_implicit_gpr0() {
+        // DIV rcx = 48 F7 F1
+        let insn = decode_one(&[0x48, 0xF7, 0xF1], 0x1000, Arch::X86_64).unwrap();
+        assert!(insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn x86_64_idiv_sets_implicit_gpr0() {
+        // IDIV ecx = F7 F9
+        let insn = decode_one(&[0xF7, 0xF9], 0x1000, Arch::X86_64).unwrap();
+        assert!(insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn x86_64_mul_sets_implicit_gpr0() {
+        // MUL rcx = 48 F7 E1
+        let insn = decode_one(&[0x48, 0xF7, 0xE1], 0x1000, Arch::X86_64).unwrap();
+        assert!(insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn x86_64_cdq_sets_implicit_gpr0() {
+        // CDQ = 99
+        let insn = decode_one(&[0x99], 0x1000, Arch::X86_64).unwrap();
+        assert!(insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn x86_64_imul_two_operand_does_not_set_flag() {
+        // IMUL rax, rcx = 48 0F AF C1 (2-operand form, explicit dest)
+        let insn = decode_one(&[0x48, 0x0F, 0xAF, 0xC1], 0x1000, Arch::X86_64).unwrap();
+        assert!(!insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn x86_64_mov_does_not_set_implicit_gpr0() {
+        // MOV eax, 42 = B8 2A 00 00 00
+        let insn = decode_one(&[0xB8, 0x2A, 0x00, 0x00, 0x00], 0x1000, Arch::X86_64).unwrap();
+        assert!(!insn.writes_implicit_gpr0);
+    }
+
+    #[test]
+    fn arm64_never_sets_implicit_gpr0() {
+        // NOP
+        let insn = decode_one(&0xD503_201Fu32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        assert!(!insn.writes_implicit_gpr0);
+    }
+
+    // ── ARM64 RETAA/RETAB ──
+
+    #[test]
+    fn arm64_retaa_is_return() {
+        let insn = decode_one(&0xD65F_0BFFu32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        assert_eq!(insn.kind, InsnKind::Return);
+    }
+
+    #[test]
+    fn arm64_retab_is_return() {
+        let insn = decode_one(&0xD65F_0FFFu32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        assert_eq!(insn.kind, InsnKind::Return);
+    }
+
+    // ── x86_64 displacement sign extension ──
+
+    #[test]
+    fn x86_64_negative_disp8_sign_extends() {
+        // MOV rax, [rbp-8] = 48 8B 45 F8
+        let insn = decode_one(&[0x48, 0x8B, 0x45, 0xF8], 0x1000, Arch::X86_64).unwrap();
+        let ops = insn.operands();
+        assert!(ops.len() >= 2, "got: {ops:?}");
+        match &ops[1] {
+            Operand::Mem { disp, .. } => assert_eq!(*disp, -8, "disp8 0xF8 must sign-extend to -8"),
+            other => panic!("expected Mem, got {other:?}"),
+        }
+    }
+
+    // ── ARM64 STP FP pair ──
+
+    #[test]
+    fn arm64_stp_d0_d1_sp_operands() {
+        // STP d0, d1, [sp, #-16]! — FP pair store
+        // opc=01(64-bit D), V=1, pre-index, imm7=-2 (scaled by 8), Rt2=1, Rn=31, Rt=0
+        // Encoding: 0110_1101_1000_0000_0000_0111_1110_0000 = ...
+        // Actually: 6D BF 07 E0 — let me compute:
+        // opc=01, 1011_01_1_0_imm7_Rt2_Rn_Rt
+        // For pre-index FP: 0x6DBF_07E0
+        let word: u32 = 0x6DBF_07E0;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 3, "expected 3 operands for FP STP, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::fp(0)));  // d0
+        assert_eq!(ops[1], Operand::Reg(Reg::fp(1)));  // d1
+        assert!(matches!(ops[2], Operand::Mem { base: Reg { num: 31, .. }, .. }));
+    }
+
+    // ── ARM64 SUB immediate ──
+
+    #[test]
+    fn arm64_sub_imm_negates() {
+        // SUB x0, x1, #10
+        // sf=1, op=1, S=0, 100010, sh=0, imm12=10, Rn=1, Rd=0
+        // = 1_10_100010_0_000000001010_00001_00000
+        // = 0xD100_2820
+        let word: u32 = 0xD100_2820;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 3, "got: {ops:?}");
+        assert_eq!(ops[2], Operand::Imm(-10)); // SUB → negative immediate
+    }
+
+    // ── ARM64 post-index STP ──
+
+    #[test]
+    fn arm64_stp_post_index_gpr_operands() {
+        // STP x0, x1, [sp], #16 — post-index GPR pair
+        // opc=10, 101000_10, imm7=2 (scaled by 8=16), Rt2=1, Rn=31, Rt=0
+        // = 0xA881_07E0
+        let word: u32 = 0xA881_07E0;
+        let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+        let ops = insn.operands();
+        assert_eq!(ops.len(), 3, "expected 3 operands for post-index STP, got: {ops:?}");
+        assert_eq!(ops[0], Operand::Reg(Reg::gpr(0)));
+        assert_eq!(ops[1], Operand::Reg(Reg::gpr(1)));
+    }
+
+    // ── x86_64 Gpr(255) sentinel for absolute addressing ──
+
+    #[test]
+    fn x86_64_absolute_addr_uses_sentinel_base() {
+        // MOV eax, [0x12345678] = A1 78 56 34 12 (32-bit address form)
+        // Actually on x86_64 this needs a specific encoding. Use MOV with SIB:
+        // MOV rax, [disp32] = 48 8B 04 25 78 56 34 12
+        let insn = decode_one(
+            &[0x48, 0x8B, 0x04, 0x25, 0x78, 0x56, 0x34, 0x12],
+            0x1000,
+            Arch::X86_64,
+        )
+        .unwrap();
+        let ops = insn.operands();
+        // Should have Mem with base = Gpr(255) sentinel (no base register)
+        assert!(
+            ops.iter().any(|op| matches!(op, Operand::Mem { base, .. } if base.num == 255)),
+            "expected Gpr(255) sentinel for absolute address, got: {ops:?}"
+        );
     }
 }

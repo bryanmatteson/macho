@@ -6,6 +6,7 @@
 //! 3. **Symbol table** (Low confidence): both symbols exist, size heuristics
 //! 4. **Export only** (Unknown confidence): provider exports the symbol, no ABI data
 
+use crate::Result;
 use crate::core::dwarf::DwarfFunctionIndex;
 use crate::core::dwarf::types::{DwarfFunctionInfo, DwarfType};
 use crate::core::model::macho_file::MachoFile;
@@ -14,7 +15,6 @@ use crate::core::objc::ObjCMetadata;
 use crate::core::objc::compat::{self, IssueSeverity as ObjCSeverity};
 use crate::core::objc::encoding::ObjCMethodSignature;
 use crate::core::rtti::VtableIndex;
-use crate::{Error, Result};
 
 /// Result of an ABI compatibility check.
 #[derive(Debug, Clone)]
@@ -76,7 +76,10 @@ pub fn check_symbol_compat(
     let p_symtab = provider.ext::<SymbolTable<'_>>()?;
 
     let t_sym = t_symtab.symbols().iter().find(|s| s.name == target_symbol);
-    let p_sym = p_symtab.symbols().iter().find(|s| s.name == provider_symbol);
+    let p_sym = p_symtab
+        .symbols()
+        .iter()
+        .find(|s| s.name == provider_symbol);
 
     if t_sym.is_none() {
         findings.push(AbiFinding {
@@ -116,8 +119,10 @@ pub fn check_symbol_compat(
     let t_sym_ref = t_sym.unwrap();
     let p_sym_ref = p_sym.unwrap();
 
-    let t_body = crate::reconstruct::cpp::abi::analyze_symbol_body(target, &t_symtab, t_sym_ref);
-    let p_body = crate::reconstruct::cpp::abi::analyze_symbol_body(provider, &p_symtab, p_sym_ref);
+    let t_body =
+        crate::reconstruct::cpp::abi::analyze_symbol_body(target, &t_symtab, t_sym_ref, None);
+    let p_body =
+        crate::reconstruct::cpp::abi::analyze_symbol_body(provider, &p_symtab, p_sym_ref, None);
 
     if let (Some(tb), Some(pb)) = (&t_body, &p_body) {
         // Compare parameter counts if both were inferred.
@@ -166,8 +171,7 @@ pub fn check_symbol_compat(
         severity: AbiSeverity::Info,
         message: format!(
             "both symbols exist; target at {:#x}, provider at {:#x}",
-            t_sym_ref.value,
-            p_sym_ref.value,
+            t_sym_ref.value, p_sym_ref.value,
         ),
     });
 
@@ -196,7 +200,12 @@ pub fn check_objc_compat(
     let p_meta = provider.ext::<ObjCMetadata>()?;
 
     let t_method = find_objc_method(&t_meta, target_class, target_selector, target_is_instance);
-    let p_method = find_objc_method(&p_meta, provider_class, provider_selector, provider_is_instance);
+    let p_method = find_objc_method(
+        &p_meta,
+        provider_class,
+        provider_selector,
+        provider_is_instance,
+    );
 
     let mut findings = Vec::new();
 
@@ -311,7 +320,9 @@ pub fn check_vtable_compat(
 
     findings.push(AbiFinding {
         severity: AbiSeverity::Info,
-        message: format!("vtable has {function_slots} function slots, {declared_slot_count} declared"),
+        message: format!(
+            "vtable has {function_slots} function slots, {declared_slot_count} declared"
+        ),
     });
 
     Ok(AbiCompatResult {
@@ -323,12 +334,23 @@ pub fn check_vtable_compat(
 
 // ───────────────────────────── DWARF comparison ─────────────────────────
 
-fn compare_dwarf_functions(target: &DwarfFunctionInfo, provider: &DwarfFunctionInfo) -> AbiCompatResult {
+fn compare_dwarf_functions(
+    target: &DwarfFunctionInfo,
+    provider: &DwarfFunctionInfo,
+) -> AbiCompatResult {
     let mut findings = Vec::new();
 
     // Filter out artificial params (implicit 'this').
-    let t_params: Vec<_> = target.parameters.iter().filter(|p| !p.is_artificial).collect();
-    let p_params: Vec<_> = provider.parameters.iter().filter(|p| !p.is_artificial).collect();
+    let t_params: Vec<_> = target
+        .parameters
+        .iter()
+        .filter(|p| !p.is_artificial)
+        .collect();
+    let p_params: Vec<_> = provider
+        .parameters
+        .iter()
+        .filter(|p| !p.is_artificial)
+        .collect();
 
     // Parameter count.
     if t_params.len() != p_params.len() {
@@ -350,7 +372,10 @@ fn compare_dwarf_functions(target: &DwarfFunctionInfo, provider: &DwarfFunctionI
                     } else {
                         AbiSeverity::Error
                     },
-                    message: format!("parameter {i} type mismatch: target '{}', provider '{}'", tp.ty, pp.ty),
+                    message: format!(
+                        "parameter {i} type mismatch: target '{}', provider '{}'",
+                        tp.ty, pp.ty
+                    ),
                 });
             }
         }
@@ -395,8 +420,16 @@ fn dwarf_types_compat(a: &DwarfType, b: &DwarfType) -> bool {
     match (a, b) {
         (DwarfType::Void, DwarfType::Void) => true,
         (
-            DwarfType::Base { encoding: ae, byte_size: as_, .. },
-            DwarfType::Base { encoding: be, byte_size: bs, .. },
+            DwarfType::Base {
+                encoding: ae,
+                byte_size: as_,
+                ..
+            },
+            DwarfType::Base {
+                encoding: be,
+                byte_size: bs,
+                ..
+            },
         ) => ae == be && as_ == bs,
         (DwarfType::Pointer { pointee: ap, .. }, DwarfType::Pointer { pointee: bp, .. }) => {
             dwarf_types_compat(ap, bp)
@@ -416,10 +449,20 @@ fn dwarf_types_compat(a: &DwarfType, b: &DwarfType) -> bool {
             dwarf_types_compat(inner, other)
         }
         (
-            DwarfType::Structure { name: an, byte_size: as_, .. },
-            DwarfType::Structure { name: bn, byte_size: bs, .. },
+            DwarfType::Structure {
+                name: an,
+                byte_size: as_,
+                ..
+            },
+            DwarfType::Structure {
+                name: bn,
+                byte_size: bs,
+                ..
+            },
         ) => an == bn && as_ == bs,
-        (DwarfType::Enumeration { name: an, .. }, DwarfType::Enumeration { name: bn, .. }) => an == bn,
+        (DwarfType::Enumeration { name: an, .. }, DwarfType::Enumeration { name: bn, .. }) => {
+            an == bn
+        }
         // Void pointer is compatible with any pointer.
         (DwarfType::Pointer { pointee, .. }, _) if matches!(**pointee, DwarfType::Void) => {
             matches!(b, DwarfType::Pointer { .. })
