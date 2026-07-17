@@ -29,8 +29,10 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Run the complete Plan 15 verification gate in contract order.
+    /// Run the stable Plan 15 verification gate in contract order.
     Verify,
+    /// Build every fuzz target with a nightly Rust toolchain.
+    VerifyFuzz,
 }
 
 fn main() -> Result<()> {
@@ -49,6 +51,7 @@ fn main() -> Result<()> {
             release::check(&root)
         }
         Command::Verify => verify::run(&root),
+        Command::VerifyFuzz => verify::run_fuzz(&root),
     }
 }
 

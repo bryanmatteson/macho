@@ -9,7 +9,7 @@ and CLI so library users pay only for the capabilities they select.
 
 ```bash
 cargo install --path crates/macho-cli
-cargo xtask verify
+mise run verify
 ```
 
 The CLI uses one flat command grammar. Every command accepts `--format text` or
@@ -89,7 +89,9 @@ documents use schema version 2 and preserve `not_requested`, `complete`,
 - `cargo xtask architecture` enforces dependency direction and source ownership.
 - `cargo xtask docs --check` binds this reference and diagnostic registry to code.
 - `cargo xtask release --check` binds workspace, CLI, changelog, lockfile, and tags.
-- `cargo xtask verify` runs the complete format, lint, docs, test, benchmark, and fuzz gate.
+- `cargo xtask verify` runs the stable format, lint, docs, test, and benchmark gate.
+- `cargo xtask verify-fuzz` builds all fuzz targets and requires nightly Rust.
+- `mise run verify` composes both gates while scoping nightly to fuzzing only.
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and
 [docs/diagnostic-codes.md](docs/diagnostic-codes.md) for stable machine codes.

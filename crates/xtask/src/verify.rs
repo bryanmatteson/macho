@@ -25,8 +25,13 @@ pub fn run(root: &Path) -> Result<()> {
     ] {
         run_command(root, "cargo", command, command.first() == Some(&"doc"))?;
     }
-    run_command(root, "cargo", &["fuzz", "build"], false)?;
     println!("verify: ok");
+    Ok(())
+}
+
+pub fn run_fuzz(root: &Path) -> Result<()> {
+    run_command(root, "cargo", &["fuzz", "build"], false)?;
+    println!("verify-fuzz: ok");
     Ok(())
 }
 
