@@ -1,7 +1,5 @@
-use macho_core::objc::encoding::{ObjCMethodArg, ObjCQualifiedType};
-use macho_core::objc::types::{
-    ObjCCategory, ObjCClass, ObjCMethod, ObjCProperty, ObjCProtocol,
-};
+use macho_objc::encoding::{ObjCMethodArg, ObjCQualifiedType};
+use macho_objc::types::{ObjCCategory, ObjCClass, ObjCMethod, ObjCProperty, ObjCProtocol};
 use std::collections::BTreeMap;
 
 /// Render a class-dump-style header for a class.
@@ -316,10 +314,10 @@ enum PropertyAccessorKind {
 
 #[cfg(test)]
 mod tests {
-    use macho_core::objc::types::{
+    use macho_core::model::addr::Va;
+    use macho_objc::types::{
         ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol,
     };
-    use macho_core::model::addr::Va;
 
     use super::{render_category_header, render_class_header, render_protocol_header};
 

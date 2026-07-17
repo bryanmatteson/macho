@@ -22,10 +22,66 @@ use crate::model::macho_file::MachoFile;
 use crate::{MachoEditor, Result};
 
 use crate::format::parse_macho_file;
-use macho_core::codesign::types::{
+use macho_codesign::types::{
     CS_HASHTYPE_SHA256, CS_SLOT_CODEDIRECTORY, CS_SLOT_ENTITLEMENTS, CSMAGIC_CODEDIRECTORY,
     CSMAGIC_EMBEDDED_SIGNATURE, CSMAGIC_ENTITLEMENTS,
 };
+
+/// Request passed to an injected signing capability.
+#[derive(Debug, Clone, Default)]
+pub struct SignatureRequest {
+    /// Optional signing identity. `None` requests an ad-hoc signature.
+    pub identity: Option<String>,
+    /// Optional bundle identifier override.
+    pub identifier: Option<String>,
+    /// Optional entitlements XML.
+    pub entitlements_xml: Option<String>,
+}
+
+/// Typed host-signing capability failure.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum SignatureProviderError {
+    /// The configured signing capability is unavailable.
+    #[error("signing capability unavailable: {0}")]
+    Unavailable(String),
+    /// Signing rejected the candidate bytes.
+    #[error("signing failed: {0}")]
+    Failed(String),
+}
+
+/// Injectable signing provider. Implementations never choose output paths.
+pub trait SignatureProvider: Send + Sync {
+    /// Return a signed replacement buffer without modifying the input.
+    fn sign(
+        &self,
+        bytes: &[u8],
+        request: &SignatureRequest,
+    ) -> std::result::Result<Vec<u8>, SignatureProviderError>;
+}
+
+/// Pure in-process ad-hoc signing provider.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AdhocSignatureProvider;
+
+impl SignatureProvider for AdhocSignatureProvider {
+    fn sign(
+        &self,
+        bytes: &[u8],
+        request: &SignatureRequest,
+    ) -> std::result::Result<Vec<u8>, SignatureProviderError> {
+        adhoc_sign(
+            bytes,
+            &AdhocSignOptions {
+                identifier: request.identifier.clone(),
+                entitlements_xml: request.entitlements_xml.clone(),
+                preserve_existing: true,
+                ..AdhocSignOptions::default()
+            },
+        )
+        .map_err(|error| SignatureProviderError::Failed(error.to_string()))
+    }
+}
 
 /// Options for ad-hoc signing.
 #[derive(Debug, Clone, Default)]
@@ -74,7 +130,7 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
     let mut entitlements_xml = options.entitlements_xml.clone();
 
     if options.preserve_existing {
-        if let Ok(sig) = mach.ext::<macho_core::codesign::CodeSignature<'_>>() {
+        if let Ok(sig) = mach.ext::<macho_codesign::CodeSignature<'_>>() {
             if identifier.is_none() {
                 identifier = sig.identifier().map(|s| s.to_string());
             }
@@ -89,7 +145,7 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
     // --- 2. Determine page size ---
     let page_size = options.page_size.unwrap_or_else(|| {
         // arm64/arm64e use 16K pages, x86_64 uses 4K.
-        if mach.header().cpu_type.0 == macho_core::format::constants::CPU_TYPE_ARM64 {
+        if mach.header().cpu_type().0 == macho_core::format::constants::CPU_TYPE_ARM64 {
             16384
         } else {
             4096
@@ -105,7 +161,12 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
     let (exec_seg_base, exec_seg_limit) = find_text_segment(&mach);
 
     // --- 5. Compute page hashes ---
-    let n_code_slots = (code_limit as u64 + page_size as u64 - 1) / page_size as u64;
+    // n_code_slots = ceil(code_limit / page_size). Guard against page_size == 0
+    // (caller could override it) to keep the division well-defined.
+    if page_size == 0 {
+        return Err(crate::Error::validation("page_size must be nonzero"));
+    }
+    let n_code_slots = (code_limit as u64).div_ceil(page_size as u64);
     let mut code_hashes = Vec::with_capacity(n_code_slots as usize);
 
     for i in 0..n_code_slots {
@@ -113,6 +174,18 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
         let end = (start + page_size as usize).min(stripped.len());
         let hash = sha256(&stripped[start..end]);
         code_hashes.push(hash);
+    }
+
+    // Invariant enforced as a hard contract on the CodeDirectory we're about
+    // to build: the number of emitted hashes must match the declared slot
+    // count. A mismatch here produces a binary that fails kernel validation
+    // with no indication of why, so surface it eagerly.
+    if code_hashes.len() as u64 != n_code_slots {
+        return Err(crate::Error::validation(format!(
+            "code hash count {} does not match declared slot count {}",
+            code_hashes.len(),
+            n_code_slots
+        )));
     }
 
     // --- 6. Build special slot hashes ---
@@ -133,17 +206,17 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
     }
 
     // --- 7. Build CodeDirectory ---
-    let cd_blob = build_code_directory(
-        &identifier,
+    let cd_blob = build_code_directory(CodeDirectoryInput {
+        identifier: &identifier,
         code_limit,
         page_size_log2,
-        n_code_slots as u32,
+        n_code_slots: n_code_slots as u32,
         n_special_slots,
-        &special_hashes,
-        &code_hashes,
+        special_hashes: &special_hashes,
+        code_hashes: &code_hashes,
         exec_seg_base,
         exec_seg_limit,
-    );
+    })?;
 
     // --- 8. Build SuperBlob ---
     let super_blob = build_super_blob(&cd_blob, entitlements_blob.as_deref());
@@ -183,7 +256,7 @@ pub fn adhoc_sign(binary: &[u8], options: &AdhocSignOptions) -> Result<Vec<u8>> 
 fn strip_code_signature(binary: &[u8], mach: &MachoFile<'_>) -> Result<Vec<u8>> {
     let sig_lc = mach
         .find_load_command(|lc| matches!(lc, LoadCommand::CodeSignature(_)))
-        .and_then(|lc| lc.kind.as_linkedit_data());
+        .and_then(|lc| lc.kind().as_linkedit_data());
 
     let Some(sig) = sig_lc else {
         // No existing signature; return as-is.
@@ -208,17 +281,46 @@ fn strip_code_signature(binary: &[u8], mach: &MachoFile<'_>) -> Result<Vec<u8>> 
 
 // ───────────────────────────── CodeDirectory ─────────────────────────────
 
-fn build_code_directory(
-    identifier: &str,
+struct CodeDirectoryInput<'a> {
+    identifier: &'a str,
     code_limit: u32,
     page_size_log2: u8,
     n_code_slots: u32,
     n_special_slots: u32,
-    special_hashes: &[[u8; 32]],
-    code_hashes: &[[u8; 32]],
+    special_hashes: &'a [[u8; 32]],
+    code_hashes: &'a [[u8; 32]],
     exec_seg_base: u64,
     exec_seg_limit: u64,
-) -> Vec<u8> {
+}
+
+fn build_code_directory(input: CodeDirectoryInput<'_>) -> Result<Vec<u8>> {
+    let CodeDirectoryInput {
+        identifier,
+        code_limit,
+        page_size_log2,
+        n_code_slots,
+        n_special_slots,
+        special_hashes,
+        code_hashes,
+        exec_seg_base,
+        exec_seg_limit,
+    } = input;
+    // Contract: the caller must supply exactly one hash per declared slot.
+    // A mismatch would silently truncate or over-read the buffer.
+    if code_hashes.len() != n_code_slots as usize {
+        return Err(crate::Error::validation(format!(
+            "build_code_directory: code_hashes.len()={} != n_code_slots={}",
+            code_hashes.len(),
+            n_code_slots
+        )));
+    }
+    if special_hashes.len() != n_special_slots as usize {
+        return Err(crate::Error::validation(format!(
+            "build_code_directory: special_hashes.len()={} != n_special_slots={}",
+            special_hashes.len(),
+            n_special_slots
+        )));
+    }
     let ident_bytes = identifier.as_bytes();
     let ident_len = ident_bytes.len() + 1; // +1 for null terminator
 
@@ -292,7 +394,7 @@ fn build_code_directory(
         buf[offset..offset + 32].copy_from_slice(hash);
     }
 
-    buf
+    Ok(buf)
 }
 
 // ───────────────────────────── entitlements blob ─────────────────────────
@@ -359,8 +461,8 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
 fn find_text_segment(mach: &MachoFile<'_>) -> (u64, u64) {
     for seg in mach.segments() {
-        if seg.name == "__TEXT" {
-            return (seg.file_offset.0, seg.file_size);
+        if seg.name() == "__TEXT" {
+            return (seg.file_offset().0, seg.file_size());
         }
     }
     (0, 0)
@@ -395,7 +497,19 @@ mod tests {
 
     #[test]
     fn super_blob_format() {
-        let cd = build_code_directory("test", 4096, 12, 1, 0, &[], &[sha256(b"hello")], 0, 0);
+        let code_hashes = [sha256(b"hello")];
+        let cd = build_code_directory(CodeDirectoryInput {
+            identifier: "test",
+            code_limit: 4096,
+            page_size_log2: 12,
+            n_code_slots: 1,
+            n_special_slots: 0,
+            special_hashes: &[],
+            code_hashes: &code_hashes,
+            exec_seg_base: 0,
+            exec_seg_limit: 0,
+        })
+        .expect("valid inputs");
         let sb = build_super_blob(&cd, None);
 
         // Check magic.
@@ -410,7 +524,18 @@ mod tests {
     #[test]
     fn code_directory_format() {
         let hashes = vec![sha256(b"page0"), sha256(b"page1")];
-        let cd = build_code_directory("com.test.app", 8192, 12, 2, 0, &[], &hashes, 0, 4096);
+        let cd = build_code_directory(CodeDirectoryInput {
+            identifier: "com.test.app",
+            code_limit: 8192,
+            page_size_log2: 12,
+            n_code_slots: 2,
+            n_special_slots: 0,
+            special_hashes: &[],
+            code_hashes: &hashes,
+            exec_seg_base: 0,
+            exec_seg_limit: 4096,
+        })
+        .expect("valid inputs");
 
         // Magic.
         assert_eq!(

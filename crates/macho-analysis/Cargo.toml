@@ -11,7 +11,16 @@ description = "Mach-O analysis helpers"
 [dependencies]
 macho-core.workspace = true
 macho-insn.workspace = true
+macho-symbols.workspace = true
+macho-dyld.workspace = true
+macho-codesign.workspace = true
+macho-dwarf.workspace = true
+macho-objc.workspace = true
+macho-swift.workspace = true
+macho-cpp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-cpp_demangle.workspace = true
 gimli.workspace = true
+
+[dev-dependencies]
+macho-test-support.workspace = true

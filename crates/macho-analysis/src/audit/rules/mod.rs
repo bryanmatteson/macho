@@ -5,6 +5,7 @@ mod memory;
 
 use super::AuditRule;
 
+/// Performs all_rules.
 pub fn all_rules() -> Vec<Box<dyn AuditRule>> {
     vec![
         Box::new(codesign::UnreadableCodeSignature),
@@ -17,6 +18,7 @@ pub fn all_rules() -> Vec<Box<dyn AuditRule>> {
         Box::new(load_paths::RelativeRpath),
         Box::new(load_paths::AbsoluteDylibPath),
         Box::new(load_paths::WritableLocationDylib),
+        Box::new(load_paths::RpathTraversal),
         Box::new(memory::WritableExecutableSegment),
         Box::new(memory::MissingPie),
         Box::new(memory::AllowStackExecution),
@@ -24,6 +26,7 @@ pub fn all_rules() -> Vec<Box<dyn AuditRule>> {
     ]
 }
 
+/// Performs all_rule_ids.
 pub fn all_rule_ids() -> Vec<&'static str> {
     all_rules().into_iter().map(|rule| rule.id()).collect()
 }

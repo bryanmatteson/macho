@@ -1,7 +1,7 @@
 //! AArch64 instruction decoding and disassembly via `bad64`.
 
 use crate::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, Operand, PcRelInfo, Reg, MAX_OPERANDS,
+    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo, Reg,
 };
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
@@ -14,8 +14,84 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     let word = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let kind = classify(word, va);
     let (ops, op_count) = extract_operands(word);
+    let writes_op0_reg = op0_is_written(word);
 
-    Ok(Insn::with_ops(4, kind, ops, op_count, false))
+    Ok(Insn::with_ops(
+        4,
+        kind,
+        ops,
+        op_count,
+        false,
+        writes_op0_reg,
+    ))
+}
+
+/// Whether the first operand of an ARM64 instruction is a register that the
+/// instruction writes.
+///
+/// Returns `false` for stores (`STR`, `STP`), compares (`CMP`/`CMN`/`TST`
+/// implemented as `SUBS`/`ADDS`/`ANDS` to `xzr`), branches that consume a
+/// register, and any pattern this decoder does not recognize. Returns `true`
+/// for loads (`LDR`, `LDP`, `LDR` literal), data-processing ops whose Rd is
+/// op0 (`ADD`/`SUB` immediate and shifted-register, `FMOV`), and the
+/// PC-relative address forms (`ADR`, `ADRP`).
+///
+/// The masks are derived from the ARM ARM "Data Processing" and
+/// "Loads and stores" encoding tables, with bit 22 acting as the load/store
+/// selector for the families that have one.
+fn op0_is_written(word: u32) -> bool {
+    // Load/store register pair (GPR) — bits 29:26 = 1010, V (bit 26) = 0.
+    // Covers post-indexed, signed offset, and pre-indexed variants.
+    // Bit 22 is the L bit: 1 = load (writes Rt/Rt2), 0 = store.
+    if word & 0x3E00_0000 == 0x2800_0000 && (word >> 31) & 1 == 1 {
+        return (word >> 22) & 1 == 1;
+    }
+
+    // Load/store register pair (SIMD/FP) — bits 29:26 = 1011.
+    if word & 0x3E00_0000 == 0x2C00_0000 && (word >> 31) & 1 == 1 {
+        return (word >> 22) & 1 == 1;
+    }
+
+    // Load/store register, unsigned immediate offset (GPR, 32- and 64-bit).
+    // Encoding: `size V 111 0 01 opc imm12 Rn Rt` with V=0 (integer),
+    // bits 25:24 = 01. Bit 23 distinguishes STR/LDR (opc[1]=0) from
+    // LDRSW/PRFM (opc[1]=1); we only handle the STR/LDR case here and let
+    // bit 22 act as the load/store selector (opc[0]=L).
+    if word & 0x3F80_0000 == 0x3900_0000 {
+        return (word >> 22) & 1 == 1;
+    }
+
+    // ADD/SUB immediate: Rd is op0, always written.
+    if word & 0x1F00_0000 == 0x1100_0000 {
+        return true;
+    }
+
+    // ADD/SUB shifted register: Rd is op0, always written. Note that this
+    // pattern also matches `SUBS`/`ADDS`, which the ABI layer may use as
+    // compare flags; those still write Rd (often xzr=31), so reporting true
+    // here is correct — the ABI layer filters by whether Rd is an arg
+    // register, and xzr is never one.
+    if word & 0x1F20_0000 == 0x0B00_0000 {
+        return true;
+    }
+
+    // FMOV register: Rd is op0, written.
+    if word & 0xFF20_FC00 == 0x1E20_4000 {
+        return true;
+    }
+
+    // ADR / ADRP: Rd is op0, written.
+    if word & 0x1F00_0000 == 0x1000_0000 {
+        return true;
+    }
+
+    // LDR literal: Rt is op0, written.
+    if word & 0x3B00_0000 == 0x1800_0000 {
+        return true;
+    }
+
+    // BR/BLR/CBZ/CBNZ/TBZ/TBNZ/RET: op0 is consumed, not written.
+    false
 }
 
 fn classify(word: u32, va: u64) -> InsnKind {
@@ -26,10 +102,7 @@ fn classify(word: u32, va: u64) -> InsnKind {
 
     // RET (and variants): 1101011 0010 11111 0000 00 Rn 00000
     // Also RETAA (0xD65F_0BFF) and RETAB (0xD65F_0FFF) — pointer-authentication returns.
-    if word & 0xFFFF_FC1F == 0xD65F_0000
-        || word == 0xD65F_0BFF
-        || word == 0xD65F_0FFF
-    {
+    if word & 0xFFFF_FC1F == 0xD65F_0000 || word == 0xD65F_0BFF || word == 0xD65F_0FFF {
         return InsnKind::Return;
     }
 
@@ -171,7 +244,10 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         let disp = sign_extend_7(imm7) as i64 * scale;
         ops[0] = Operand::Reg(Reg::gpr(rt));
         ops[1] = Operand::Reg(Reg::gpr(rt2));
-        ops[2] = Operand::Mem { base: Reg::gpr(rn), disp };
+        ops[2] = Operand::Mem {
+            base: Reg::gpr(rn),
+            disp,
+        };
         return (ops, 3);
     }
 
@@ -192,7 +268,10 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         let disp = sign_extend_7(imm7) as i64 * scale;
         ops[0] = Operand::Reg(Reg::fp(rt));
         ops[1] = Operand::Reg(Reg::fp(rt2));
-        ops[2] = Operand::Mem { base: Reg::gpr(rn), disp };
+        ops[2] = Operand::Mem {
+            base: Reg::gpr(rn),
+            disp,
+        };
         return (ops, 3);
     }
 
@@ -204,7 +283,10 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         let imm12 = ((word >> 10) & 0xFFF) as i64;
         let disp = imm12 * scale;
         ops[0] = Operand::Reg(Reg::gpr(rt));
-        ops[1] = Operand::Mem { base: Reg::gpr(rn), disp };
+        ops[1] = Operand::Mem {
+            base: Reg::gpr(rn),
+            disp,
+        };
         return (ops, 2);
     }
 
@@ -272,10 +354,7 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
     }
 
     // ── RET / RETAA / RETAB ──
-    if word & 0xFFFF_FC1F == 0xD65F_0000
-        || word == 0xD65F_0BFF
-        || word == 0xD65F_0FFF
-    {
+    if word & 0xFFFF_FC1F == 0xD65F_0000 || word == 0xD65F_0BFF || word == 0xD65F_0FFF {
         ops[0] = Operand::Reg(Reg::gpr(rn));
         return (ops, 1);
     }
@@ -343,7 +422,7 @@ pub(crate) fn encode_branch_insn(
     }
 
     let imm26 = delta / 4;
-    if imm26 < -(1 << 25) || imm26 >= (1 << 25) {
+    if !(-(1 << 25)..(1 << 25)).contains(&imm26) {
         return Err(crate::EncodeError {
             message: format!(
                 "arm64 branch target {to_va:#x} is out of ±128 MiB range from {from_va:#x}"
@@ -389,7 +468,7 @@ pub(crate) fn relocate(
             });
         }
         let new_imm19 = new_offset / 4;
-        if new_imm19 < -(1 << 18) || new_imm19 >= (1 << 18) {
+        if !(-(1 << 18)..(1 << 18)).contains(&new_imm19) {
             return Err(crate::EncodeError {
                 message: "conditional branch relocation out of ±1 MiB range".into(),
             });
@@ -410,7 +489,7 @@ pub(crate) fn relocate(
             });
         }
         let new_imm19 = new_offset / 4;
-        if new_imm19 < -(1 << 18) || new_imm19 >= (1 << 18) {
+        if !(-(1 << 18)..(1 << 18)).contains(&new_imm19) {
             return Err(crate::EncodeError {
                 message: "CBZ/CBNZ relocation out of ±1 MiB range".into(),
             });
@@ -431,7 +510,7 @@ pub(crate) fn relocate(
             });
         }
         let new_imm14 = new_offset / 4;
-        if new_imm14 < -(1 << 13) || new_imm14 >= (1 << 13) {
+        if !(-(1 << 13)..(1 << 13)).contains(&new_imm14) {
             return Err(crate::EncodeError {
                 message: "TBZ/TBNZ relocation out of ±32 KiB range".into(),
             });
@@ -448,7 +527,7 @@ pub(crate) fn relocate(
         let old_offset = sign_extend_21(imm) as i64;
         let target = old_va as i64 + old_offset;
         let new_offset = target - new_va as i64;
-        if new_offset < -(1 << 20) || new_offset >= (1 << 20) {
+        if !(-(1 << 20)..(1 << 20)).contains(&new_offset) {
             return Err(crate::EncodeError {
                 message: "ADR relocation out of ±1 MiB range".into(),
             });
@@ -476,7 +555,7 @@ pub(crate) fn relocate(
             });
         }
         let new_imm = new_offset / 4096;
-        if new_imm < -(1 << 20) || new_imm >= (1 << 20) {
+        if !(-(1 << 20)..(1 << 20)).contains(&new_imm) {
             return Err(crate::EncodeError {
                 message: "ADRP relocation out of ±4 GiB range".into(),
             });
@@ -500,7 +579,7 @@ pub(crate) fn relocate(
             });
         }
         let new_imm19 = new_offset / 4;
-        if new_imm19 < -(1 << 18) || new_imm19 >= (1 << 18) {
+        if !(-(1 << 18)..(1 << 18)).contains(&new_imm19) {
             return Err(crate::EncodeError {
                 message: "literal load relocation out of ±1 MiB range".into(),
             });
@@ -529,10 +608,7 @@ pub(crate) fn disassemble_one(bytes: &[u8], va: u64) -> Result<String, DecodeErr
     }
 }
 
-pub(crate) fn disassemble(
-    bytes: &[u8],
-    base_va: u64,
-) -> Result<Vec<(u64, String)>, DecodeError> {
+pub(crate) fn disassemble(bytes: &[u8], base_va: u64) -> Result<Vec<(u64, String)>, DecodeError> {
     if bytes.len() % 4 != 0 {
         return Err(DecodeError {
             message: "arm64 instruction stream must be 4-byte aligned".into(),

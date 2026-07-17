@@ -1,1 +1,1 @@
-pub use macho_core::rtti::vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};
+pub use macho_cpp::vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};

@@ -1,6 +1,7 @@
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
 
+/// The BinaryReader type.
 pub struct BinaryReader<'data> {
     data: &'data [u8],
     endian: Endian,
@@ -8,6 +9,7 @@ pub struct BinaryReader<'data> {
 }
 
 impl<'data> BinaryReader<'data> {
+    /// Performs new.
     pub fn new(data: &'data [u8], endian: Endian) -> Self {
         Self {
             data,
@@ -16,6 +18,7 @@ impl<'data> BinaryReader<'data> {
         }
     }
 
+    /// Performs at_offset.
     pub fn at_offset(data: &'data [u8], endian: Endian, offset: usize) -> Self {
         Self {
             data,
@@ -24,30 +27,37 @@ impl<'data> BinaryReader<'data> {
         }
     }
 
+    /// Performs offset.
     pub fn offset(&self) -> usize {
         self.offset
     }
 
+    /// Performs remaining.
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.offset)
     }
 
+    /// Performs len.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Performs is_empty.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
+    /// Performs endian.
     pub fn endian(&self) -> Endian {
         self.endian
     }
 
+    /// Performs seek.
     pub fn seek(&mut self, offset: usize) {
         self.offset = offset;
     }
 
+    /// Performs skip.
     pub fn skip(&mut self, n: usize) -> Result<()> {
         let new_offset = self
             .offset
@@ -60,6 +70,7 @@ impl<'data> BinaryReader<'data> {
         Ok(())
     }
 
+    /// Performs read_u8.
     pub fn read_u8(&mut self) -> Result<u8> {
         if self.offset >= self.data.len() {
             return Err(self.bounds_err(1));
@@ -69,26 +80,31 @@ impl<'data> BinaryReader<'data> {
         Ok(val)
     }
 
+    /// Performs read_u16.
     pub fn read_u16(&mut self) -> Result<u16> {
         let bytes = self.read_array::<2>()?;
         Ok(self.endian.read_u16(bytes))
     }
 
+    /// Performs read_u32.
     pub fn read_u32(&mut self) -> Result<u32> {
         let bytes = self.read_array::<4>()?;
         Ok(self.endian.read_u32(bytes))
     }
 
+    /// Performs read_u64.
     pub fn read_u64(&mut self) -> Result<u64> {
         let bytes = self.read_array::<8>()?;
         Ok(self.endian.read_u64(bytes))
     }
 
+    /// Performs read_i32.
     pub fn read_i32(&mut self) -> Result<i32> {
         let bytes = self.read_array::<4>()?;
         Ok(self.endian.read_i32(bytes))
     }
 
+    /// Performs read_bytes.
     pub fn read_bytes(&mut self, n: usize) -> Result<&'data [u8]> {
         let end = self
             .offset
@@ -102,6 +118,7 @@ impl<'data> BinaryReader<'data> {
         Ok(slice)
     }
 
+    /// Performs read_fixed_array.
     pub fn read_fixed_array<const N: usize>(&mut self) -> Result<[u8; N]> {
         let bytes = self.read_bytes(N)?;
         let mut arr = [0u8; N];
@@ -113,11 +130,7 @@ impl<'data> BinaryReader<'data> {
     /// Does not advance the cursor.
     pub fn read_c_string_at(&self, abs_offset: usize, max_len: usize) -> Result<&'data [u8]> {
         if abs_offset >= self.data.len() {
-            return Err(Error::Bounds {
-                offset: abs_offset as u64,
-                needed: 1,
-                available: self.data.len() as u64,
-            });
+            return Err(Error::bounds(abs_offset as u64, 1, self.data.len() as u64));
         }
         let limit = (abs_offset + max_len).min(self.data.len());
         let slice = &self.data[abs_offset..limit];
@@ -142,11 +155,7 @@ impl<'data> BinaryReader<'data> {
     }
 
     fn bounds_err(&self, needed: usize) -> Error {
-        Error::Bounds {
-            offset: self.offset as u64,
-            needed: needed as u64,
-            available: self.data.len() as u64,
-        }
+        Error::bounds(self.offset as u64, needed as u64, self.data.len() as u64)
     }
 }
 

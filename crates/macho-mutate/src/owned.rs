@@ -5,7 +5,7 @@ use zerocopy::{Immutable, IntoBytes, KnownLayout};
 use crate::format::constants::{FAT_MAGIC, FAT_MAGIC_64};
 use crate::format::io::{Endian, pod};
 use crate::format::parse_macho_file;
-use crate::model::addr::{AddressMap, MappingEntry, Rva, ThinFileOffset, Va};
+use crate::model::addr::{AddressMap, Rva, ThinFileOffset, Va};
 use crate::model::header::{Bitness, FatMagic, MachoHeader};
 use crate::model::load_command::ParsedLoadCommand;
 use crate::model::macho_file::MachoFile;
@@ -40,7 +40,7 @@ impl OwnedMachoFile {
             segments: macho.segments().to_vec(),
             endian: macho.endian(),
             bitness: macho.bitness(),
-            address_map: AddressMap::new(mapping_entries(macho.segments())),
+            address_map: macho.address_map().clone(),
             image_base: macho.image_base(),
         }
     }
@@ -54,7 +54,7 @@ impl OwnedMachoFile {
         let endian = parsed.endian();
         let bitness = parsed.bitness();
         let image_base = parsed.image_base();
-        let address_map = AddressMap::new(mapping_entries(&segments));
+        let address_map = parsed.address_map().clone();
 
         Ok(Self {
             bytes,
@@ -68,88 +68,101 @@ impl OwnedMachoFile {
         })
     }
 
+    /// Performs bytes.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
+    /// Performs bytes_mut.
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.bytes
     }
 
+    /// Performs header.
     pub fn header(&self) -> &MachoHeader {
         &self.header
     }
 
+    /// Performs load_commands.
     pub fn load_commands(&self) -> &[ParsedLoadCommand] {
         &self.load_commands
     }
 
+    /// Performs segments.
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }
 
+    /// Performs endian.
     pub fn endian(&self) -> Endian {
         self.endian
     }
 
+    /// Performs bitness.
     pub fn bitness(&self) -> Bitness {
         self.bitness
     }
 
+    /// Performs address_map.
     pub fn address_map(&self) -> &AddressMap {
         &self.address_map
     }
 
+    /// Performs image_base.
     pub fn image_base(&self) -> Va {
         self.image_base
     }
 
     // Write methods
 
+    /// Performs write_bytes_at.
     pub fn write_bytes_at(&mut self, offset: ThinFileOffset, data: &[u8]) -> Result<()> {
         let start = offset.as_usize();
-        let end = start.checked_add(data.len()).ok_or(Error::Bounds {
-            offset: offset.0,
-            needed: data.len() as u64,
-            available: self.bytes.len() as u64,
-        })?;
+        let end = start
+            .checked_add(data.len())
+            .ok_or_else(|| Error::bounds(offset.0, data.len() as u64, self.bytes.len() as u64))?;
         if end > self.bytes.len() {
-            return Err(Error::Bounds {
-                offset: offset.0,
-                needed: data.len() as u64,
-                available: self.bytes.len() as u64,
-            });
+            return Err(Error::bounds(
+                offset.0,
+                data.len() as u64,
+                self.bytes.len() as u64,
+            ));
         }
         self.bytes[start..end].copy_from_slice(data);
         Ok(())
     }
 
+    /// Performs write_bytes_at_va.
     pub fn write_bytes_at_va(&mut self, va: Va, data: &[u8]) -> Result<()> {
         let offset = self.address_map.va_to_thin_offset(va)?;
         self.write_bytes_at(offset, data)
     }
 
+    /// Performs write_bytes_at_rva.
     pub fn write_bytes_at_rva(&mut self, rva: Rva, data: &[u8]) -> Result<()> {
-        let va = AddressMap::rva_to_va(rva, self.image_base);
+        let va = AddressMap::rva_to_va(rva, self.image_base)?;
         self.write_bytes_at_va(va, data)
     }
 
+    /// Performs write_pod_at.
     pub fn write_pod_at<T>(&mut self, offset: ThinFileOffset, value: &T) -> Result<()>
     where
         T: IntoBytes + Immutable + KnownLayout,
     {
-        pod::write_pod(&mut self.bytes, offset.as_usize(), value)
+        Ok(pod::write_pod(&mut self.bytes, offset.as_usize(), value)?)
     }
 
     /// Re-parse the owned bytes as a fresh read-only `MachFile`.
     pub fn as_mach_file(&self) -> Result<MachoFile<'_>> {
-        parse_macho_file(&self.bytes)
+        Ok(parse_macho_file(&self.bytes)?)
     }
 
+    /// Performs into_bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes
     }
 
+    /// Performs save_to.
     pub fn save_to<W: Write>(&self, mut writer: W) -> std::io::Result<()> {
         writer.write_all(&self.bytes)
     }
@@ -174,6 +187,7 @@ pub struct OwnedFatBinary {
     arches: Vec<OwnedFatArch>,
 }
 
+/// The OwnedFatArch type.
 pub struct OwnedFatArch {
     /// Architecture spec from the fat arch table.
     pub spec: crate::model::header::ArchSpec,
@@ -199,39 +213,43 @@ impl OwnedFatBinary {
             .arches()
             .iter()
             .map(|arch| OwnedFatArch {
-                spec: arch.spec,
-                offset: arch.fat_offset.0 as usize,
-                size: arch.size as usize,
-                align: arch.align,
-                reserved: arch.reserved,
-                macho: OwnedMachoFile::from_macho_file(&arch.macho),
+                spec: arch.spec(),
+                offset: arch.fat_offset().0 as usize,
+                size: arch.size() as usize,
+                align: arch.align(),
+                reserved: arch.reserved(),
+                macho: OwnedMachoFile::from_macho_file(arch.macho()),
             })
             .collect();
 
         Self {
             container_bytes: full_data.to_vec(),
-            magic: fat.header.magic,
+            magic: fat.header().magic(),
             arches,
         }
     }
 
+    /// Performs arches.
     pub fn arches(&self) -> &[OwnedFatArch] {
         &self.arches
     }
 
+    /// Performs arch.
     pub fn arch(&self, index: usize) -> Option<&OwnedMachoFile> {
         self.arches.get(index).map(|a| &a.macho)
     }
 
+    /// Performs arch_mut.
     pub fn arch_mut(&mut self, index: usize) -> Option<&mut OwnedMachoFile> {
         self.arches.get_mut(index).map(|a| &mut a.macho)
     }
 
+    /// Performs replace_arch.
     pub fn replace_arch(&mut self, index: usize, bytes: Vec<u8>) -> Result<()> {
         let arch_count = self.arches.len();
         let macho = OwnedMachoFile::from_bytes(bytes)?;
         let arch = self.arches.get_mut(index).ok_or_else(|| {
-            Error::Format(format!(
+            Error::invalid(format!(
                 "fat arch index {index} out of range (have {arch_count})",
             ))
         })?;
@@ -254,12 +272,14 @@ impl OwnedFatBinary {
             .expect("OwnedFatBinary::into_bytes failed to rebuild fat container")
     }
 
+    /// Performs save_to.
     pub fn save_to<W: Write>(&mut self, mut writer: W) -> std::io::Result<()> {
         self.rebuild_in_place()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
         writer.write_all(&self.container_bytes)
     }
 
+    /// Performs rebuild_bytes.
     pub fn rebuild_bytes(&self) -> Result<Vec<u8>> {
         let (out, _) = self.build_rebuilt_container()?;
         Ok(out)
@@ -284,9 +304,9 @@ impl OwnedFatBinary {
             .checked_add(
                 arch_entry_size
                     .checked_mul(self.arches.len())
-                    .ok_or_else(|| Error::Format("fat arch table size overflow".into()))?,
+                    .ok_or_else(|| Error::invalid("fat arch table size overflow"))?,
             )
-            .ok_or_else(|| Error::Format("fat header size overflow".into()))?;
+            .ok_or_else(|| Error::invalid("fat header size overflow"))?;
 
         let layouts = self.arches.iter().try_fold(
             (Vec::with_capacity(self.arches.len()), header_size),
@@ -296,7 +316,7 @@ impl OwnedFatBinary {
                 let size = arch.macho.bytes().len();
                 let end = offset
                     .checked_add(size)
-                    .ok_or_else(|| Error::Format("fat arch offset overflow".into()))?;
+                    .ok_or_else(|| Error::invalid("fat arch offset overflow"))?;
                 layouts.push((arch, offset, size));
                 Ok::<_, Error>((layouts, end))
             },
@@ -314,7 +334,7 @@ impl OwnedFatBinary {
                 index,
                 arch,
                 u64::try_from(*offset)
-                    .map_err(|_| Error::Format("fat arch offset exceeds u64".into()))?,
+                    .map_err(|_| Error::invalid("fat arch offset exceeds u64"))?,
             )?;
 
             let end = *offset + *size;
@@ -335,7 +355,9 @@ impl std::fmt::Debug for OwnedFatBinary {
     }
 }
 
+/// The MachoOwnedExt type.
 pub trait MachoOwnedExt {
+    /// Performs to_owned_mach.
     fn to_owned_mach(&self) -> OwnedMachoFile;
 }
 
@@ -345,22 +367,10 @@ impl MachoOwnedExt for macho_core::model::macho_file::MachoFile<'_> {
     }
 }
 
-fn mapping_entries(segments: &[Segment]) -> Vec<MappingEntry> {
-    segments
-        .iter()
-        .map(|seg| MappingEntry {
-            file_offset: seg.file_offset,
-            file_size: seg.file_size,
-            vm_addr: seg.vm_addr,
-            vm_size: seg.vm_size,
-        })
-        .collect()
-}
-
 fn fat_align_bytes(align: u32) -> Result<usize> {
     1usize
         .checked_shl(align)
-        .ok_or_else(|| Error::Format(format!("fat arch alignment 2^{align} is too large")))
+        .ok_or_else(|| Error::invalid(format!("fat arch alignment 2^{align} is too large")))
 }
 
 fn align_up(value: usize, align: usize) -> usize {
@@ -399,9 +409,9 @@ fn write_fat_arch_entry(
     match magic {
         FatMagic::Fat32 => {
             let offset = u32::try_from(offset)
-                .map_err(|_| Error::Format("fat32 arch offset exceeds u32".into()))?;
+                .map_err(|_| Error::invalid("fat32 arch offset exceeds u32"))?;
             let size = u32::try_from(arch.macho.bytes().len())
-                .map_err(|_| Error::Format("fat32 arch size exceeds u32".into()))?;
+                .map_err(|_| Error::invalid("fat32 arch size exceeds u32"))?;
             out[base + 8..base + 12].copy_from_slice(&offset.to_be_bytes());
             out[base + 12..base + 16].copy_from_slice(&size.to_be_bytes());
             out[base + 16..base + 20].copy_from_slice(&arch.align.to_be_bytes());

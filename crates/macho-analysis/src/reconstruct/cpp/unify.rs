@@ -5,6 +5,7 @@ use super::types::{
     CppClass, CppConfidence, CppFunctionDecl, CppHeaderMatch, CppImageIndex, CppUnifiedIndex,
 };
 
+/// Performs unify_images.
 pub fn unify_images(images: &[CppImageIndex]) -> CppUnifiedIndex {
     let mut classes: BTreeMap<String, CppClass> = BTreeMap::new();
     let mut functions: BTreeMap<String, CppFunctionDecl> = BTreeMap::new();
@@ -89,6 +90,7 @@ fn function_key(function: &CppFunctionDecl) -> String {
     function.overload_key()
 }
 
+/// Performs correlation_stub.
 pub fn correlation_stub(header: &str, declaration: &str) -> CppHeaderMatch {
     CppHeaderMatch {
         declaration: declaration.to_string(),

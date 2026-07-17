@@ -1,7 +1,7 @@
 use serde::Serialize;
 
-use crate::deps::graph::DepGraph;
 use crate::Result;
+use crate::deps::graph::DepGraph;
 use crate::format::constants::{
     MachoHeaderFlags, PLATFORM_IOS, PLATFORM_MACOS, PLATFORM_TVOS, PLATFORM_WATCHOS,
 };
@@ -10,29 +10,48 @@ use crate::model::load_command::{LoadCommand, Platform};
 use crate::model::macho_file::MachoFile;
 
 #[derive(Debug, Clone, Serialize)]
+/// The CompatReport type.
 pub struct CompatReport {
+    /// The target_path field.
     pub target_path: String,
+    /// The provider_path field.
     pub provider_path: Option<String>,
+    /// The findings field.
     pub findings: Vec<CompatFinding>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The CompatFinding type.
 pub struct CompatFinding {
+    /// The category field.
     pub category: CompatCategory,
+    /// The severity field.
     pub severity: CompatSeverity,
+    /// The message field.
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// The CompatCategory type.
+#[non_exhaustive]
 pub enum CompatCategory {
+    /// The Architecture variant.
     Architecture,
+    /// The Platform variant.
     Platform,
+    /// The MinOS variant.
     MinOS,
+    /// The FileType variant.
     FileType,
+    /// The DylibVersion variant.
     DylibVersion,
+    /// The ImportCoverage variant.
     ImportCoverage,
+    /// The WeakImport variant.
     WeakImport,
+    /// The Rpath variant.
     Rpath,
+    /// The NamespaceMode variant.
     NamespaceMode,
 }
 
@@ -53,9 +72,14 @@ impl std::fmt::Display for CompatCategory {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// The CompatSeverity type.
+#[non_exhaustive]
 pub enum CompatSeverity {
+    /// The Incompatible variant.
     Incompatible,
+    /// The Warning variant.
     Warning,
+    /// The Info variant.
     Info,
 }
 
@@ -70,6 +94,7 @@ impl std::fmt::Display for CompatSeverity {
 }
 
 impl CompatReport {
+    /// Performs check.
     pub fn check(
         target: &MachoFile<'_>,
         target_path: &str,
@@ -84,9 +109,7 @@ impl CompatReport {
             findings.push(CompatFinding {
                 category: CompatCategory::ImportCoverage,
                 severity: match issue.severity {
-                    crate::deps::graph::IssueSeverity::Error => {
-                        CompatSeverity::Incompatible
-                    }
+                    crate::deps::graph::IssueSeverity::Error => CompatSeverity::Incompatible,
                     crate::deps::graph::IssueSeverity::Warning => CompatSeverity::Warning,
                 },
                 message: issue.message.clone(),
@@ -126,6 +149,7 @@ impl CompatReport {
         })
     }
 
+    /// Performs has_incompatible.
     pub fn has_incompatible(&self) -> bool {
         self.findings
             .iter()
@@ -134,8 +158,8 @@ impl CompatReport {
 }
 
 fn check_arch(target: &MachoFile<'_>, provider: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
-    let t_cpu = target.header().cpu_type;
-    let p_cpu = provider.header().cpu_type;
+    let t_cpu = target.header().cpu_type();
+    let p_cpu = provider.header().cpu_type();
 
     if t_cpu != p_cpu {
         findings.push(CompatFinding {
@@ -160,7 +184,7 @@ fn get_platform(
     macho: &MachoFile<'_>,
 ) -> Option<(Platform, crate::model::load_command::PackedVersion)> {
     for lc in macho.load_commands() {
-        match &lc.kind {
+        match lc.kind() {
             LoadCommand::BuildVersion(d) => return Some((d.platform, d.minos)),
             LoadCommand::VersionMinMacOS(d) => {
                 return Some((Platform(PLATFORM_MACOS), d.version));
@@ -244,7 +268,7 @@ fn check_file_type(
     provider: &MachoFile<'_>,
     findings: &mut Vec<CompatFinding>,
 ) {
-    let p_type = provider.header().file_type;
+    let p_type = provider.header().file_type();
 
     match p_type {
         FileType::Dylib | FileType::Bundle | FileType::DylibStub => {
@@ -255,7 +279,7 @@ fn check_file_type(
             });
         }
         _ => {
-            let t_type = target.header().file_type;
+            let t_type = target.header().file_type();
             findings.push(CompatFinding {
                 category: CompatCategory::FileType,
                 severity: CompatSeverity::Warning,
@@ -288,7 +312,7 @@ fn check_version_compat(
 
     // Get provider's current version from its own LC_ID_DYLIB
     let provider_current = provider.load_commands().iter().find_map(|lc| {
-        if let LoadCommand::IdDylib(d) = &lc.kind {
+        if let LoadCommand::IdDylib(d) = lc.kind() {
             Some(d.current_version)
         } else {
             None
@@ -403,7 +427,7 @@ fn check_import_coverage(
 }
 
 fn check_namespace_mode(target: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
-    let flags = target.header().flags;
+    let flags = target.header().flags();
 
     if flags.contains(MachoHeaderFlags::FORCE_FLAT) {
         findings.push(CompatFinding {
@@ -425,13 +449,13 @@ fn check_rpaths(target: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
     let rpaths: Vec<String> = target
         .load_commands()
         .iter()
-        .filter_map(|lc| lc.kind.as_rpath().map(|s| s.to_string()))
+        .filter_map(|lc| lc.kind().as_rpath().map(|s| s.to_string()))
         .collect();
 
     // Check if any linked dylib uses @rpath and whether rpaths are defined
     let has_rpath_dylib = target.load_commands().iter().any(|lc| {
         matches!(
-            &lc.kind,
+            lc.kind(),
             LoadCommand::LoadDylib(d)
             | LoadCommand::LoadWeakDylib(d)
             | LoadCommand::ReexportDylib(d)

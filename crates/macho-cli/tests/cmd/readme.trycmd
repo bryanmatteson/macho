@@ -1,0 +1,29 @@
+# Executable command examples
+
+These examples use the same deterministic minimal Mach-O builder as unit,
+fuzz, and benchmark coverage.
+
+```console
+$ macho info tests/cmd/fixture.macho
+Thin Mach-O binary (32 bytes)
+...
+```
+
+```console
+$ macho snapshot --format json tests/cmd/fixture.macho
+{
+...
+  "command": "snapshot",
+...
+  "ok": true,
+  "schema_version": 1
+}
+
+```
+
+```console
+$ macho not-a-command
+? 2
+Error: error: unrecognized subcommand 'not-a-command'
+...
+```

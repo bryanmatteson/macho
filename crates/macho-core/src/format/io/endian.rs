@@ -1,10 +1,14 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The Endian type.
 pub enum Endian {
+    /// The Little variant.
     Little,
+    /// The Big variant.
     Big,
 }
 
 impl Endian {
+    /// Performs read_u16.
     pub fn read_u16(self, bytes: [u8; 2]) -> u16 {
         match self {
             Endian::Little => u16::from_le_bytes(bytes),
@@ -12,6 +16,7 @@ impl Endian {
         }
     }
 
+    /// Performs read_u32.
     pub fn read_u32(self, bytes: [u8; 4]) -> u32 {
         match self {
             Endian::Little => u32::from_le_bytes(bytes),
@@ -19,6 +24,7 @@ impl Endian {
         }
     }
 
+    /// Performs read_u64.
     pub fn read_u64(self, bytes: [u8; 8]) -> u64 {
         match self {
             Endian::Little => u64::from_le_bytes(bytes),
@@ -26,6 +32,7 @@ impl Endian {
         }
     }
 
+    /// Performs read_i32.
     pub fn read_i32(self, bytes: [u8; 4]) -> i32 {
         match self {
             Endian::Little => i32::from_le_bytes(bytes),
@@ -45,6 +52,7 @@ impl Endian {
         }
     }
 
+    /// Performs interpret_u64.
     pub fn interpret_u64(self, raw: u64) -> u64 {
         match self {
             Endian::Little => u64::from_le(raw),
@@ -52,6 +60,7 @@ impl Endian {
         }
     }
 
+    /// Performs interpret_i32.
     pub fn interpret_i32(self, raw: i32) -> i32 {
         match self {
             Endian::Little => i32::from_le(raw),
@@ -59,6 +68,7 @@ impl Endian {
         }
     }
 
+    /// Performs interpret_u16.
     pub fn interpret_u16(self, raw: u16) -> u16 {
         match self {
             Endian::Little => u16::from_le(raw),
@@ -70,6 +80,7 @@ impl Endian {
     // the byte order used in the file, so it can be stored in a POD struct
     // field before writing.
 
+    /// Performs encode_u16.
     pub fn encode_u16(self, val: u16) -> u16 {
         match self {
             Endian::Little => val.to_le(),
@@ -77,6 +88,7 @@ impl Endian {
         }
     }
 
+    /// Performs encode_u32.
     pub fn encode_u32(self, val: u32) -> u32 {
         match self {
             Endian::Little => val.to_le(),
@@ -84,6 +96,7 @@ impl Endian {
         }
     }
 
+    /// Performs encode_u64.
     pub fn encode_u64(self, val: u64) -> u64 {
         match self {
             Endian::Little => val.to_le(),
@@ -91,6 +104,7 @@ impl Endian {
         }
     }
 
+    /// Performs encode_i32.
     pub fn encode_i32(self, val: i32) -> i32 {
         match self {
             Endian::Little => val.to_le(),

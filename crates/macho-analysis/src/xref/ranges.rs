@@ -1,58 +1,93 @@
 use std::collections::HashSet;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::core::dyld::exports::parse_exports;
-use crate::core::dyld::types::ExportKind;
-use crate::core::objc::ObjCMetadata;
+use crate::dyld::exports::parse_exports;
+use crate::dyld::types::ExportKind;
 use crate::ext::MachoExt;
 use crate::model::addr::map::AddressMap;
 use crate::model::addr::types::{ThinFileOffset, Va};
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
 use crate::model::symbol::SymbolType;
+use crate::objc::ObjCMetadata;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The SymbolRangeIndex type.
 pub struct SymbolRangeIndex {
     entries: Vec<RangeEntry>,
+    truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The RangeEntry type.
 pub struct RangeEntry {
+    #[serde(
+        serialize_with = "crate::serde_addr::va",
+        deserialize_with = "crate::serde_addr::va_from"
+    )]
+    /// The start field.
     pub start: Va,
+    #[serde(
+        serialize_with = "crate::serde_addr::va",
+        deserialize_with = "crate::serde_addr::va_from"
+    )]
+    /// The end field.
     pub end: Va,
+    /// The entity field.
     pub entity: CodeEntity,
+    /// The source field.
     pub source: RangeSource,
+    /// The is_alt_entry field.
     pub is_alt_entry: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+/// The CodeEntity type.
+#[non_exhaustive]
 pub enum CodeEntity {
+    /// The Symbol variant.
     Symbol {
+        /// The String field.
         name: String,
+        /// The bool field.
         external: bool,
     },
+    /// The ObjCMethod variant.
     ObjCMethod {
+        /// The String field.
         class_name: String,
+        /// The String field.
         selector: String,
+        /// The bool field.
         is_class_method: bool,
     },
+    /// The Export variant.
     Export {
+        /// The String field.
         name: String,
     },
+    /// The Anonymous variant.
     Anonymous {
+        /// The String field.
         section_name: String,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// The RangeSource type.
+#[non_exhaustive]
 pub enum RangeSource {
+    /// The Nlist variant.
     Nlist,
+    /// The ExportTrie variant.
     ExportTrie,
+    /// The ObjCMetadata variant.
     ObjCMetadata,
+    /// The Inferred variant.
     Inferred,
 }
 
@@ -64,8 +99,18 @@ struct RawEntry {
 }
 
 impl SymbolRangeIndex {
+    /// Performs build.
     pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
+        Self::build_limited(macho, usize::MAX)
+    }
+
+    /// Builds at most `max_ranges` symbol ranges.
+    ///
+    /// [`Self::was_truncated`] reports whether additional input-derived ranges
+    /// were discarded after the bound was reached.
+    pub fn build_limited(macho: &MachoFile<'_>, max_ranges: usize) -> Result<Self> {
         let mut raw: Vec<RawEntry> = Vec::new();
+        let mut truncated = false;
 
         // Track nlist VAs in a HashSet for O(1) dedup checks instead of O(n)
         // linear scans per entry.
@@ -75,6 +120,10 @@ impl SymbolRangeIndex {
         if let Ok(symtab) = macho.ext::<SymbolTable<'_>>() {
             for sym in symtab.symbols() {
                 if sym.sym_type == SymbolType::Section && sym.value != 0 {
+                    if raw.len() >= max_ranges {
+                        truncated = true;
+                        continue;
+                    }
                     nlist_vas.insert(sym.value);
                     raw.push(RawEntry {
                         va: Va(sym.value),
@@ -107,6 +156,10 @@ impl SymbolRangeIndex {
                 if nlist_vas.contains(&addr) {
                     continue;
                 }
+                if raw.len() >= max_ranges {
+                    truncated = true;
+                    continue;
+                }
                 raw.push(RawEntry {
                     va: Va(addr),
                     entity: CodeEntity::Export {
@@ -123,6 +176,10 @@ impl SymbolRangeIndex {
             for class in &objc.classes {
                 for method in &class.instance_methods {
                     if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
+                        if raw.len() >= max_ranges {
+                            truncated = true;
+                            continue;
+                        }
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -137,6 +194,10 @@ impl SymbolRangeIndex {
                 }
                 for method in &class.class_methods {
                     if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
+                        if raw.len() >= max_ranges {
+                            truncated = true;
+                            continue;
+                        }
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -153,6 +214,10 @@ impl SymbolRangeIndex {
             for cat in &objc.categories {
                 for method in &cat.instance_methods {
                     if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
+                        if raw.len() >= max_ranges {
+                            truncated = true;
+                            continue;
+                        }
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -167,6 +232,10 @@ impl SymbolRangeIndex {
                 }
                 for method in &cat.class_methods {
                     if method.imp.0 != 0 && !nlist_vas.contains(&method.imp.0) {
+                        if raw.len() >= max_ranges {
+                            truncated = true;
+                            continue;
+                        }
                         raw.push(RawEntry {
                             va: method.imp,
                             entity: CodeEntity::ObjCMethod {
@@ -191,9 +260,9 @@ impl SymbolRangeIndex {
         // Build section boundaries for sizing the last entry in each section
         let mut section_ends: Vec<(Va, Va)> = Vec::new(); // (start, end)
         for seg in macho.segments() {
-            for sect in &seg.sections {
-                if sect.size > 0 {
-                    section_ends.push((sect.addr, Va(sect.addr.0 + sect.size)));
+            for sect in seg.sections() {
+                if sect.size() > 0 {
+                    section_ends.push((sect.addr(), Va(sect.addr().0 + sect.size())));
                 }
             }
         }
@@ -231,9 +300,10 @@ impl SymbolRangeIndex {
             });
         }
 
-        Ok(Self { entries })
+        Ok(Self { entries, truncated })
     }
 
+    /// Performs lookup_va.
     pub fn lookup_va(&self, va: Va) -> Option<&RangeEntry> {
         // Binary search for the entry containing this VA
         let idx = self.entries.partition_point(|e| e.start <= va);
@@ -248,6 +318,7 @@ impl SymbolRangeIndex {
         }
     }
 
+    /// Performs lookup_file_offset.
     pub fn lookup_file_offset(
         &self,
         offset: ThinFileOffset,
@@ -257,26 +328,38 @@ impl SymbolRangeIndex {
         self.lookup_va(va)
     }
 
+    /// Performs entries.
     pub fn entries(&self) -> &[RangeEntry] {
         &self.entries
     }
 
+    /// Performs entries_in_range.
     pub fn entries_in_range(&self, start: Va, end: Va) -> &[RangeEntry] {
         let lo = self.entries.partition_point(|e| e.start < start);
         let hi = self.entries.partition_point(|e| e.start < end);
         &self.entries[lo..hi]
     }
 
+    /// Performs len.
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    /// Performs is_empty.
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Returns whether input-derived ranges were discarded at the configured
+    /// collection bound.
+    pub fn was_truncated(&self) -> bool {
+        self.truncated
     }
 }
 
 impl<'data> MachoExt<'data> for SymbolRangeIndex {
+    type Error = crate::AnalysisError;
+
     fn parse<'mf>(macho: &'mf MachoFile<'data>) -> Result<Self>
     where
         'data: 'mf,

@@ -3,11 +3,17 @@ use crate::format::constants::*;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The SymbolType type.
 pub enum SymbolType {
+    /// The Undefined variant.
     Undefined,
+    /// The Absolute variant.
     Absolute,
+    /// The Section variant.
     Section,
+    /// The PreboundUndefined variant.
     PreboundUndefined,
+    /// The Indirect variant.
     Indirect,
     /// STAB debugging symbol. The inner value is the stab type code
     /// (the full `n_type` byte with `N_STAB` bits set). STAB symbols are
@@ -20,6 +26,7 @@ pub enum SymbolType {
 }
 
 impl SymbolType {
+    /// Performs from_n_type.
     pub fn from_n_type(n_type: u8) -> Self {
         if n_type & N_STAB != 0 {
             return Self::Stab(n_type);
@@ -34,6 +41,7 @@ impl SymbolType {
         }
     }
 
+    /// Performs name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Undefined => "undef",
@@ -46,6 +54,7 @@ impl SymbolType {
         }
     }
 
+    /// Performs is_stab.
     pub fn is_stab(&self) -> bool {
         matches!(self, Self::Stab(_))
     }
@@ -58,43 +67,58 @@ impl fmt::Display for SymbolType {
 }
 
 #[derive(Debug, Clone)]
+/// The Symbol type.
 pub struct Symbol<'data> {
+    /// The name field.
     pub name: &'data str,
+    /// The sym_type field.
     pub sym_type: SymbolType,
+    /// The external field.
     pub external: bool,
+    /// The private_external field.
     pub private_external: bool,
+    /// The section_index field.
     pub section_index: u8,
+    /// The desc field.
     pub desc: u16,
+    /// The value field.
     pub value: u64,
     /// Original index in the symbol table.
     pub index: usize,
 }
 
 impl Symbol<'_> {
+    /// Performs is_stab.
     pub fn is_stab(&self) -> bool {
         self.sym_type.is_stab()
     }
 
+    /// Performs is_defined.
     pub fn is_defined(&self) -> bool {
         matches!(self.sym_type, SymbolType::Section | SymbolType::Absolute)
     }
 
+    /// Performs is_undefined.
     pub fn is_undefined(&self) -> bool {
         matches!(self.sym_type, SymbolType::Undefined)
     }
 
+    /// Performs is_weak_def.
     pub fn is_weak_def(&self) -> bool {
         self.desc & N_WEAK_DEF != 0
     }
 
+    /// Performs is_weak_ref.
     pub fn is_weak_ref(&self) -> bool {
         self.desc & N_WEAK_REF != 0
     }
 
+    /// Performs is_no_dead_strip.
     pub fn is_no_dead_strip(&self) -> bool {
         self.desc & N_NO_DEAD_STRIP != 0
     }
 
+    /// Performs is_alt_entry.
     pub fn is_alt_entry(&self) -> bool {
         self.desc & N_ALT_ENTRY != 0
     }
@@ -118,36 +142,37 @@ pub struct StringTable<'data> {
 }
 
 impl<'data> StringTable<'data> {
+    /// Performs new.
     pub fn new(data: &'data [u8]) -> Self {
         Self { data }
     }
 
+    /// Performs get.
     pub fn get(&self, index: u32) -> Result<&'data str> {
         let start = index as usize;
         if start >= self.data.len() {
-            return Err(Error::Bounds {
-                offset: start as u64,
-                needed: 1,
-                available: self.data.len() as u64,
-            });
+            return Err(Error::bounds(start as u64, 1, self.data.len() as u64));
         }
         let slice = &self.data[start..];
         let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
         std::str::from_utf8(&slice[..end]).map_err(|e| {
-            Error::Format(format!(
+            Error::format(format!(
                 "invalid UTF-8 in string table at index {index}: {e}"
             ))
         })
     }
 
+    /// Performs bytes.
     pub fn bytes(&self) -> &'data [u8] {
         self.data
     }
 
+    /// Performs len.
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
+    /// Performs is_empty.
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -175,42 +200,52 @@ impl<'data> SymbolTable<'data> {
         }
     }
 
+    /// Performs symbols.
     pub fn symbols(&self) -> &[Symbol<'data>] {
         &self.symbols
     }
 
+    /// Performs len.
     pub fn len(&self) -> usize {
         self.symbols.len()
     }
 
+    /// Performs is_empty.
     pub fn is_empty(&self) -> bool {
         self.symbols.is_empty()
     }
 
+    /// Performs get.
     pub fn get(&self, index: usize) -> Option<&Symbol<'data>> {
         self.symbols.get(index)
     }
 
+    /// Performs string_table.
     pub fn string_table(&self) -> &StringTable<'data> {
         &self.string_table
     }
 
+    /// Performs find_by_name.
     pub fn find_by_name(&self, name: &str) -> Option<&Symbol<'data>> {
         self.symbols.iter().find(|s| s.name == name)
     }
 
+    /// Performs defined.
     pub fn defined(&self) -> impl Iterator<Item = &Symbol<'data>> {
         self.symbols.iter().filter(|s| s.is_defined())
     }
 
+    /// Performs undefined.
     pub fn undefined(&self) -> impl Iterator<Item = &Symbol<'data>> {
         self.symbols.iter().filter(|s| s.is_undefined())
     }
 
+    /// Performs stabs.
     pub fn stabs(&self) -> impl Iterator<Item = &Symbol<'data>> {
         self.symbols.iter().filter(|s| s.is_stab())
     }
 
+    /// Performs external.
     pub fn external(&self) -> impl Iterator<Item = &Symbol<'data>> {
         self.symbols.iter().filter(|s| s.external)
     }

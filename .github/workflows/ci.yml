@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo xtask verify
+      - name: Bounded fuzz smoke
+        shell: bash
+        run: |
+          for target in container load_commands dyld codesign insn mutation cache_fileset; do
+            cargo fuzz run "$target" -- -max_total_time=10
+          done
+      - name: Real macOS adapter smoke
+        if: runner.os == 'macOS'
+        run: cargo test -p macho-cli --test adapter_tests -- --ignored
+      - name: Retain benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-${{ matrix.os }}
+          path: target/criterion
+          if-no-files-found: ignore

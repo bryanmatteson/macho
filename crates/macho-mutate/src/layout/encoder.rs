@@ -122,38 +122,38 @@ fn encode_segment_64(
 ) -> Result<Vec<u8>> {
     let seg = segments
         .get(d.segment_index)
-        .ok_or_else(|| Error::Format(format!("segment index {} out of range", d.segment_index)))?;
+        .ok_or_else(|| Error::invalid(format!("segment index {} out of range", d.segment_index)))?;
 
-    let nsects = seg.sections.len() as u32;
+    let nsects = seg.sections().len() as u32;
     let cmdsize = 72 + nsects as usize * 80;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT_64);
     push_u32(&mut buf, endian, cmdsize as u32);
-    buf.extend_from_slice(seg.name.as_bytes());
-    push_u64(&mut buf, endian, seg.vm_addr.0);
-    push_u64(&mut buf, endian, seg.vm_size);
-    push_u64(&mut buf, endian, seg.file_offset.0);
-    push_u64(&mut buf, endian, seg.file_size);
-    push_i32(&mut buf, endian, seg.max_prot.bits());
-    push_i32(&mut buf, endian, seg.init_prot.bits());
+    buf.extend_from_slice(seg.name().as_bytes());
+    push_u64(&mut buf, endian, seg.vm_addr().0);
+    push_u64(&mut buf, endian, seg.vm_size());
+    push_u64(&mut buf, endian, seg.file_offset().0);
+    push_u64(&mut buf, endian, seg.file_size());
+    push_i32(&mut buf, endian, seg.max_prot().bits());
+    push_i32(&mut buf, endian, seg.init_prot().bits());
     push_u32(&mut buf, endian, nsects);
-    push_u32(&mut buf, endian, seg.flags.bits());
+    push_u32(&mut buf, endian, seg.flags().bits());
 
-    for sect in &seg.sections {
-        buf.extend_from_slice(sect.section_name.as_bytes());
-        buf.extend_from_slice(sect.segment_name.as_bytes());
-        push_u64(&mut buf, endian, sect.addr.0);
-        push_u64(&mut buf, endian, sect.size);
-        push_u32(&mut buf, endian, sect.offset.0 as u32);
-        push_u32(&mut buf, endian, sect.align);
-        push_u32(&mut buf, endian, sect.reloff.0 as u32);
-        push_u32(&mut buf, endian, sect.nreloc);
-        let flags = (section_type_to_u8(&sect.section_type) as u32) | sect.attributes.bits();
+    for sect in seg.sections() {
+        buf.extend_from_slice(sect.section_name().as_bytes());
+        buf.extend_from_slice(sect.segment_name().as_bytes());
+        push_u64(&mut buf, endian, sect.addr().0);
+        push_u64(&mut buf, endian, sect.size());
+        push_u32(&mut buf, endian, sect.offset().0 as u32);
+        push_u32(&mut buf, endian, sect.align());
+        push_u32(&mut buf, endian, sect.relocation_offset().0 as u32);
+        push_u32(&mut buf, endian, sect.relocation_count());
+        let flags = (section_type_to_u8(&sect.section_type()) as u32) | sect.attributes().bits();
         push_u32(&mut buf, endian, flags);
-        push_u32(&mut buf, endian, sect.reserved1);
-        push_u32(&mut buf, endian, sect.reserved2);
-        push_u32(&mut buf, endian, sect.reserved3);
+        push_u32(&mut buf, endian, sect.reserved1());
+        push_u32(&mut buf, endian, sect.reserved2());
+        push_u32(&mut buf, endian, sect.reserved3());
     }
 
     Ok(buf)
@@ -166,37 +166,37 @@ fn encode_segment_32(
 ) -> Result<Vec<u8>> {
     let seg = segments
         .get(d.segment_index)
-        .ok_or_else(|| Error::Format(format!("segment index {} out of range", d.segment_index)))?;
+        .ok_or_else(|| Error::invalid(format!("segment index {} out of range", d.segment_index)))?;
 
-    let nsects = seg.sections.len() as u32;
+    let nsects = seg.sections().len() as u32;
     let cmdsize = 56 + nsects as usize * 68;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT);
     push_u32(&mut buf, endian, cmdsize as u32);
-    buf.extend_from_slice(seg.name.as_bytes());
-    push_u32(&mut buf, endian, seg.vm_addr.0 as u32);
-    push_u32(&mut buf, endian, seg.vm_size as u32);
-    push_u32(&mut buf, endian, seg.file_offset.0 as u32);
-    push_u32(&mut buf, endian, seg.file_size as u32);
-    push_i32(&mut buf, endian, seg.max_prot.bits());
-    push_i32(&mut buf, endian, seg.init_prot.bits());
+    buf.extend_from_slice(seg.name().as_bytes());
+    push_u32(&mut buf, endian, seg.vm_addr().0 as u32);
+    push_u32(&mut buf, endian, seg.vm_size() as u32);
+    push_u32(&mut buf, endian, seg.file_offset().0 as u32);
+    push_u32(&mut buf, endian, seg.file_size() as u32);
+    push_i32(&mut buf, endian, seg.max_prot().bits());
+    push_i32(&mut buf, endian, seg.init_prot().bits());
     push_u32(&mut buf, endian, nsects);
-    push_u32(&mut buf, endian, seg.flags.bits());
+    push_u32(&mut buf, endian, seg.flags().bits());
 
-    for sect in &seg.sections {
-        buf.extend_from_slice(sect.section_name.as_bytes());
-        buf.extend_from_slice(sect.segment_name.as_bytes());
-        push_u32(&mut buf, endian, sect.addr.0 as u32);
-        push_u32(&mut buf, endian, sect.size as u32);
-        push_u32(&mut buf, endian, sect.offset.0 as u32);
-        push_u32(&mut buf, endian, sect.align);
-        push_u32(&mut buf, endian, sect.reloff.0 as u32);
-        push_u32(&mut buf, endian, sect.nreloc);
-        let flags = (section_type_to_u8(&sect.section_type) as u32) | sect.attributes.bits();
+    for sect in seg.sections() {
+        buf.extend_from_slice(sect.section_name().as_bytes());
+        buf.extend_from_slice(sect.segment_name().as_bytes());
+        push_u32(&mut buf, endian, sect.addr().0 as u32);
+        push_u32(&mut buf, endian, sect.size() as u32);
+        push_u32(&mut buf, endian, sect.offset().0 as u32);
+        push_u32(&mut buf, endian, sect.align());
+        push_u32(&mut buf, endian, sect.relocation_offset().0 as u32);
+        push_u32(&mut buf, endian, sect.relocation_count());
+        let flags = (section_type_to_u8(&sect.section_type()) as u32) | sect.attributes().bits();
         push_u32(&mut buf, endian, flags);
-        push_u32(&mut buf, endian, sect.reserved1);
-        push_u32(&mut buf, endian, sect.reserved2);
+        push_u32(&mut buf, endian, sect.reserved1());
+        push_u32(&mut buf, endian, sect.reserved2());
     }
 
     Ok(buf)

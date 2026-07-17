@@ -4,26 +4,39 @@ use crate::model::macho_file::MachoFile;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]
+/// The ResignPlan type.
 pub struct ResignPlan {
+    /// The was_signed field.
     pub was_signed: bool,
+    /// The identifier field.
     pub identifier: Option<String>,
+    /// The team_id field.
     pub team_id: Option<String>,
+    /// The has_entitlements field.
     pub has_entitlements: bool,
+    /// The entitlements_xml field.
     pub entitlements_xml: Option<String>,
+    /// The entitlements_der_present field.
     pub entitlements_der_present: bool,
+    /// The has_cms_signature field.
     pub has_cms_signature: bool,
+    /// The hash_type field.
     pub hash_type: Option<String>,
+    /// The signature_parse_error field.
     pub signature_parse_error: Option<String>,
+    /// The suggested_command field.
     pub suggested_command: String,
+    /// The manual_steps field.
     pub manual_steps: Vec<String>,
 }
 
 impl ResignPlan {
+    /// Performs from_mach.
     pub fn from_mach(macho: &MachoFile<'_>) -> Self {
         let has_signature_load_command = macho
             .load_commands()
             .iter()
-            .any(|lc| matches!(lc.kind, LoadCommand::CodeSignature(_)));
+            .any(|lc| matches!(lc.kind(), LoadCommand::CodeSignature(_)));
         let sig = macho.ext::<CodeSignature<'_>>();
 
         let (

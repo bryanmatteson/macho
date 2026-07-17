@@ -9,11 +9,9 @@ The previous draft set had two problems:
   `compat`, and `symbol ranges` were split across competing documents)
 
 Those drafts have been consolidated into the plan set below. Plans `01` through
-`05` describe the analysis foundation that is already partially represented in
-the current tree (`src/analysis/`, `src/diff/`, `src/audit/`,
-`src/container_analysis/`, `src/objc/graph.rs`, `src/swift/`). Plans `06`
-through `14` are the canonical follow-on API, fidelity, inference, and
-packaging tracks.
+`13` remain the feature authorities. Plan `15` is the architecture-completion
+authority for the workspace now present under `crates/`. Plan `14` is retained
+only as historical context for the first split and is superseded by plan `15`.
 
 ## Canonical Plan Set
 
@@ -35,7 +33,10 @@ packaging tracks.
 11. `11-cpp-header-fidelity-plan.md`
 12. `12-c-header-fidelity-plan.md`
 13. `13-llm-header-inference-plan.md`
-14. `14-workspace-crate-refactor-plan.md`
+
+### Architecture Integration Track
+
+15. `15-architecture-coherence-implementation-plan.md`
 
 ## Recommended Sequence
 
@@ -55,7 +56,10 @@ that keeps shared infrastructure from being reinvented:
 11. `11-cpp-header-fidelity-plan.md`
 12. `12-c-header-fidelity-plan.md`
 13. `13-llm-header-inference-plan.md`
-14. `14-workspace-crate-refactor-plan.md`
+
+Apply `15-architecture-coherence-implementation-plan.md` as one integration
+pass against the current tree. Its work packages are dependency checkpoints,
+not additional release phases after the feature plans.
 
 ## Dependency Notes
 
@@ -81,27 +85,32 @@ that keeps shared infrastructure from being reinvented:
 - `11-cpp-header-fidelity-plan.md`, `12-c-header-fidelity-plan.md`, and
   `13-llm-header-inference-plan.md` extend the roadmap from metadata recovery
   into higher-fidelity declaration reconstruction and evidence-driven inference.
-- `14-workspace-crate-refactor-plan.md` is the canonical home for the package
-  and crate-boundary refactor that turns the current monolithic crate into a
-  reusable workspace.
+- `15-architecture-coherence-implementation-plan.md` is the canonical,
+  single-pass execution authority for completing the live workspace design from
+  the core library outward through the CLI. It supersedes plan 14's pre-workspace
+  target graph and phased migration.
+
+Plans `01` through `13` remain feature authorities where their behavior is not
+in conflict with plan 15. Plan 15 owns crate placement, dependency direction,
+shared execution contracts, public delivery boundaries, and final gates.
 
 ## Repository Anchors
 
 These plans are intentionally tied to the current repository layout:
 
-- CLI entrypoint: `src/main.rs`
-- Command surfaces: `src/commands/`
-- Snapshot/diff/audit: `src/analysis/`, `src/diff/`, `src/audit/`
-- Editing: `src/edit/`
-- Validation: `src/validate/`
-- ObjC and Swift metadata: `src/objc/`, `src/swift/`
-- Container analysis: `src/container_analysis/`, `src/model/container.rs`
-- Dyld/import-export parsing: `src/dyld/`
+- Workspace authority: `Cargo.toml`
+- Core parsing/model: `crates/macho-core/src/`
+- Instruction handling: `crates/macho-insn/src/`
+- Snapshot/diff/audit/reconstruction: `crates/macho-analysis/src/`
+- Mutation: `crates/macho-mutate/src/`
+- Façade and current command ownership: `crates/macho/src/`
+- CLI entrypoint: `crates/macho-cli/src/main.rs`
+- Architecture completion contract:
+  `15-architecture-coherence-implementation-plan.md`
 
 ## Superseded Drafts
 
-The following drafts were merged into the canonical set and intentionally
-removed:
+The following drafts were merged into or superseded by the canonical set:
 
 - old ObjC resolver draft merged into `04-objc-swift-graph-plan.md`
 - old fat-parity draft merged into `05-multi-image-analysis-plan.md`
@@ -112,3 +121,5 @@ removed:
   `08-dependency-and-compatibility-plan.md`
 - old string-region and vtable drafts merged into
   `09-binary-data-analysis-plan.md`
+- `14-workspace-crate-refactor-plan.md` is retained for history but superseded by
+  `15-architecture-coherence-implementation-plan.md`

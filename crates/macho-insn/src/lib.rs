@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Architecture-aware instruction decoding, encoding, and relocation.
 //!
 //! Wraps [`iced_x86`] and [`bad64`] behind a unified API for the instruction-level
@@ -18,6 +19,7 @@ use std::fmt;
 
 /// Register class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RegClass {
     /// General-purpose register (x0-x30 on ARM64, rax-r15 on x86_64).
     Gpr,
@@ -32,16 +34,26 @@ pub enum RegClass {
 /// x86_64 numbering: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7, r8-r15=8-15.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Reg {
+    /// The class field.
     pub class: RegClass,
+    /// The num field.
     pub num: u8,
 }
 
 impl Reg {
+    /// Performs gpr.
     pub fn gpr(num: u8) -> Self {
-        Self { class: RegClass::Gpr, num }
+        Self {
+            class: RegClass::Gpr,
+            num,
+        }
     }
+    /// Performs fp.
     pub fn fp(num: u8) -> Self {
-        Self { class: RegClass::Fp, num }
+        Self {
+            class: RegClass::Fp,
+            num,
+        }
     }
 }
 
@@ -56,22 +68,33 @@ impl fmt::Display for Reg {
 
 /// An instruction operand.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Operand {
     /// Register operand.
     Reg(Reg),
     /// Immediate value.
     Imm(i64),
     /// Memory operand with base register and displacement.
-    Mem { base: Reg, disp: i64 },
+    /// The Mem field.
+    Mem {
+        /// Base register used to address memory.
+        base: Reg,
+        /// Signed displacement in bytes from the base register.
+        disp: i64,
+    },
 }
 
 const MAX_OPERANDS: usize = 4;
 
 /// Target architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Arch {
+    /// The X86_64 variant.
     X86_64,
+    /// The Arm64 variant.
     Arm64,
+    /// The Arm64e variant.
     Arm64e,
 }
 
@@ -93,7 +116,13 @@ impl Arch {
 }
 
 /// A decoded instruction.
-#[derive(Debug, Clone)]
+///
+/// The `writes_op0_reg` and `writes_implicit_gpr0` fields together form the
+/// minimum write-set surface that ABI inference needs to decide whether a
+/// register was clobbered mid-function. Consumers that need a full
+/// read/write register set should inspect the underlying decoder (bad64 on
+/// ARM64, iced on x86_64) directly; this struct intentionally stays small.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Insn {
     /// Byte offset into the input buffer where this instruction starts.
     pub offset: usize,
@@ -106,6 +135,16 @@ pub struct Insn {
     /// single-operand IMUL, CWD/CDQ/CQO, and sign-extension instructions.
     /// Always false on ARM64 (no implicit register side effects).
     pub writes_implicit_gpr0: bool,
+    /// True when the first operand is a register and the instruction's
+    /// semantics write that register (as opposed to reading it). This
+    /// catches both the conventional destination-first forms (`MOV rdi, …`,
+    /// `LDR x0, …`) and in-place arithmetic (`ADD rdi, rax`, `ADD x0, x1, x2`)
+    /// that previously had no write-visibility in the operand list.
+    ///
+    /// False for comparisons (`CMP`, `TEST`, `TST`), branches, returns,
+    /// stores (`STR`, `MOV [mem], reg`), and any instruction whose op0 is
+    /// not a register.
+    pub writes_op0_reg: bool,
     ops: [Operand; MAX_OPERANDS],
     op_count: u8,
 }
@@ -116,18 +155,31 @@ impl Insn {
         &self.ops[..self.op_count as usize]
     }
 
+    /// The register written by this instruction when `writes_op0_reg` is true.
+    pub fn op0_write_target(&self) -> Option<Reg> {
+        if !self.writes_op0_reg {
+            return None;
+        }
+        match self.operands().first()? {
+            Operand::Reg(r) => Some(*r),
+            _ => None,
+        }
+    }
+
     pub(crate) fn with_ops(
         len: usize,
         kind: InsnKind,
         ops: [Operand; MAX_OPERANDS],
         op_count: u8,
         writes_implicit_gpr0: bool,
+        writes_op0_reg: bool,
     ) -> Self {
         Self {
             offset: 0,
             len,
             kind,
             writes_implicit_gpr0,
+            writes_op0_reg,
             ops,
             op_count,
         }
@@ -136,6 +188,7 @@ impl Insn {
 
 /// High-level classification of an instruction.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum InsnKind {
     /// Unconditional branch (B, JMP).
     Branch(BranchInfo),
@@ -156,11 +209,13 @@ pub enum InsnKind {
 /// Branch operand information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchInfo {
+    /// The target field.
     pub target: BranchTarget,
 }
 
 /// How a branch resolves its destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BranchTarget {
     /// A PC-relative offset (signed, from the instruction's VA).
     Direct(i64),
@@ -180,7 +235,13 @@ pub struct PcRelInfo {
 /// Errors from decode operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError {
+    /// The message field.
     pub message: String,
+}
+
+impl DecodeError {
+    /// The CODE constant.
+    pub const CODE: &'static str = "insn.decode.invalid";
 }
 
 impl fmt::Display for DecodeError {
@@ -194,7 +255,13 @@ impl std::error::Error for DecodeError {}
 /// Errors from encode / relocate operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncodeError {
+    /// The message field.
     pub message: String,
+}
+
+impl EncodeError {
+    /// The CODE constant.
+    pub const CODE: &'static str = "insn.encode.invalid";
 }
 
 impl fmt::Display for EncodeError {
@@ -213,34 +280,56 @@ pub struct InsnIter<'a> {
     base_va: u64,
     offset: usize,
     arch: Arch,
+    stopped: bool,
 }
 
 impl<'a> Iterator for InsnIter<'a> {
-    type Item = Insn;
+    type Item = Result<Insn, DecodeError>;
 
-    fn next(&mut self) -> Option<Insn> {
-        loop {
-            if self.offset >= self.bytes.len() {
-                return None;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped || self.offset >= self.bytes.len() {
+            return None;
+        }
+        let Some(va) = self.base_va.checked_add(self.offset as u64) else {
+            self.stopped = true;
+            return Some(Err(DecodeError {
+                message: "instruction virtual address overflows".into(),
+            }));
+        };
+        match decode_one(&self.bytes[self.offset..], va, self.arch) {
+            Ok(mut insn) => {
+                insn.offset = self.offset;
+                self.offset += insn.len;
+                Some(Ok(insn))
             }
-            let va = self.base_va + self.offset as u64;
-            match decode_one(&self.bytes[self.offset..], va, self.arch) {
-                Ok(mut insn) => {
-                    insn.offset = self.offset;
-                    self.offset += insn.len;
-                    return Some(insn);
-                }
-                Err(_) => {
-                    // Skip one byte (x86_64) or 4 bytes (arm64) on decode failure.
-                    if self.arch.is_arm64() {
-                        self.offset += 4;
-                    } else {
-                        self.offset += 1;
-                    }
-                }
+            Err(error) => {
+                self.stopped = true;
+                Some(Err(error))
             }
         }
     }
+}
+
+/// One explicit region skipped by lossy instruction decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DecodeGap {
+    /// The offset field.
+    pub offset: usize,
+    /// The len field.
+    pub len: usize,
+    /// The va field.
+    pub va: u64,
+    /// The error field.
+    pub error: DecodeError,
+}
+
+/// Decoded instructions plus every region skipped during explicit recovery.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodeReport {
+    /// The instructions field.
+    pub instructions: Vec<Insn>,
+    /// The gaps field.
+    pub gaps: Vec<DecodeGap>,
 }
 
 // ───────────────────────────────── public API ─────
@@ -260,7 +349,41 @@ pub fn decode_iter(bytes: &[u8], base_va: u64, arch: Arch) -> InsnIter<'_> {
         base_va,
         offset: 0,
         arch,
+        stopped: false,
     }
+}
+
+/// Decode with architecture-specific recovery while recording every skipped range.
+pub fn decode_lossy(bytes: &[u8], base_va: u64, arch: Arch) -> DecodeReport {
+    let mut instructions = Vec::new();
+    let mut gaps: Vec<DecodeGap> = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let va = base_va.saturating_add(offset as u64);
+        match decode_one(&bytes[offset..], va, arch) {
+            Ok(mut instruction) => {
+                instruction.offset = offset;
+                offset += instruction.len;
+                instructions.push(instruction);
+            }
+            Err(error) => {
+                let len = if arch.is_arm64() { 4 } else { 1 }.min(bytes.len() - offset);
+                if let Some(previous) = gaps.last_mut().filter(|gap| gap.offset + gap.len == offset)
+                {
+                    previous.len += len;
+                } else {
+                    gaps.push(DecodeGap {
+                        offset,
+                        len,
+                        va,
+                        error,
+                    });
+                }
+                offset += len;
+            }
+        }
+    }
+    DecodeReport { instructions, gaps }
 }
 
 /// Return the byte length of the instruction at the start of `bytes`.

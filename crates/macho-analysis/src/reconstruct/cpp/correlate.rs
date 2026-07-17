@@ -1,6 +1,8 @@
 use super::types::{CppConfidence, CppFunctionDecl, CppHeaderMatch, CppType, QualifiedName};
 
+/// The ExternalHeaderIndex type.
 pub trait ExternalHeaderIndex {
+    /// Performs match_function.
     fn match_function(
         &self,
         qualified_name: &QualifiedName,
@@ -9,12 +11,17 @@ pub trait ExternalHeaderIndex {
 }
 
 #[derive(Debug, Clone)]
+/// The HeaderCandidate type.
 pub struct HeaderCandidate {
+    /// The declaration field.
     pub declaration: String,
+    /// The header field.
     pub header: String,
+    /// The confidence field.
     pub confidence: CppConfidence,
 }
 
+/// Performs correlate_functions.
 pub fn correlate_functions(
     functions: &[CppFunctionDecl],
     headers: &dyn ExternalHeaderIndex,

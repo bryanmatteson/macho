@@ -1,14 +1,15 @@
-use cpp_demangle::DemangleOptions;
-
 use super::types::{
     CppConfidence, CppEvidence, CppEvidenceKind, CppFunctionDecl, CppFunctionSignature,
     CppParameter, CppRefQualifier, CppSpecialSymbol, CppSymbolKind, CppSymbolRecord, CppThunkKind,
     CppType, QualifiedName,
 };
-use crate::core::dwarf::types::{DwarfFunctionInfo, DwarfType};
-use crate::core::dwarf::DwarfFunctionIndex;
-use crate::core::symbols::demangle::{demangle_cpp_symbol_with_options, demangle_symbol};
+use crate::dwarf::DwarfFunctionIndex;
+use crate::dwarf::types::{DwarfFunctionInfo, DwarfType};
+use crate::symbols::demangle::{
+    demangle_cpp_symbol, demangle_cpp_symbol_without_return_type, demangle_symbol,
+};
 
+/// Performs parse_symbol.
 pub fn parse_symbol(
     mangled_name: &str,
     address: Option<u64>,
@@ -43,7 +44,9 @@ pub fn parse_symbol(
         mangled_name: mangled_name.to_string(),
         demangled_name: Some(demangled_name),
         address,
-        kind: CppSymbolKind::Function { decl },
+        kind: CppSymbolKind::Function {
+            decl: Box::new(decl),
+        },
         confidence: CppConfidence::High,
     })
 }
@@ -103,11 +106,9 @@ fn parse_function(
     address: Option<u64>,
     dwarf_func: Option<&DwarfFunctionInfo>,
 ) -> Option<CppFunctionDecl> {
-    let no_return =
-        demangle_cpp_symbol_with_options(mangled_name, DemangleOptions::default().no_return_type())
-            .unwrap_or_else(|| demangled_name.to_string());
-    let full = demangle_cpp_symbol_with_options(mangled_name, DemangleOptions::default())
+    let no_return = demangle_cpp_symbol_without_return_type(mangled_name)
         .unwrap_or_else(|| demangled_name.to_string());
+    let full = demangle_cpp_symbol(mangled_name).unwrap_or_else(|| demangled_name.to_string());
 
     let (name_text, args_text, suffix) = split_signature(&no_return)?;
     let name = QualifiedName::from_text(name_text);
@@ -133,10 +134,7 @@ fn parse_function(
             .filter(|p| !p.is_artificial)
             .enumerate()
             .map(|(i, dp)| CppParameter {
-                name: dp
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("arg{i}")),
+                name: dp.name.clone().unwrap_or_else(|| format!("arg{i}")),
                 ty: dwarf_type_to_cpp(&dp.ty),
             })
             .collect();
@@ -261,6 +259,9 @@ fn dwarf_type_to_cpp(dt: &DwarfType) -> CppType {
         DwarfType::Unresolved => CppType::Unknown {
             label: "<unresolved>".to_string(),
         },
+        _ => CppType::Unknown {
+            label: "<unsupported DWARF type>".to_string(),
+        },
     }
 }
 
@@ -354,6 +355,7 @@ fn split_top_level_args(args: &str) -> Vec<String> {
     out
 }
 
+/// Performs parse_type.
 pub fn parse_type(text: &str) -> CppType {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -528,7 +530,7 @@ mod tests {
     // ── DWARF type conversion tests ──
 
     use super::dwarf_type_to_cpp;
-    use crate::core::dwarf::types::{BaseTypeEncoding, DwarfType};
+    use crate::dwarf::types::{BaseTypeEncoding, DwarfType};
 
     #[test]
     fn dwarf_void_to_cpp() {
@@ -602,7 +604,11 @@ mod tests {
             encoding: BaseTypeEncoding::Signed,
         })));
         match ty {
-            CppType::Qualified { is_const, is_volatile, .. } => {
+            CppType::Qualified {
+                is_const,
+                is_volatile,
+                ..
+            } => {
                 assert!(is_const);
                 assert!(!is_volatile);
             }
@@ -614,7 +620,11 @@ mod tests {
     fn dwarf_volatile_to_cpp() {
         let ty = dwarf_type_to_cpp(&DwarfType::Volatile(Box::new(DwarfType::Void)));
         match ty {
-            CppType::Qualified { is_const, is_volatile, .. } => {
+            CppType::Qualified {
+                is_const,
+                is_volatile,
+                ..
+            } => {
                 assert!(!is_const);
                 assert!(is_volatile);
             }

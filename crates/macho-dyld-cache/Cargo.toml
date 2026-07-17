@@ -1,0 +1,18 @@
+[package]
+name = "macho-dyld-cache"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Dyld shared-cache parsing and extraction"
+
+[dependencies]
+macho-core.workspace = true
+macho-dyld.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+macho-test-support.workspace = true
+thiserror.workspace = true

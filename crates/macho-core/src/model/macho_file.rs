@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
 use crate::model::addr::map::{AddressMap, MappingEntry};
@@ -10,6 +8,7 @@ use crate::model::names::SegmentName;
 use crate::model::section::Section;
 use crate::model::segment::Segment;
 
+/// The MachoFile type.
 pub struct MachoFile<'data> {
     bytes: &'data [u8],
     header: MachoHeader,
@@ -17,7 +16,7 @@ pub struct MachoFile<'data> {
     segments: Vec<Segment>,
     endian: Endian,
     bitness: Bitness,
-    derived: OnceLock<DerivedIndexes>,
+    derived: DerivedIndexes,
 }
 
 struct DerivedIndexes {
@@ -27,18 +26,20 @@ struct DerivedIndexes {
 }
 
 impl DerivedIndexes {
-    fn build(segments: &[Segment], load_commands: &[ParsedLoadCommand]) -> Self {
+    fn build(segments: &[Segment], load_commands: &[ParsedLoadCommand]) -> Result<Self> {
         let entries: Vec<MappingEntry> = segments
             .iter()
-            .map(|seg| MappingEntry {
-                file_offset: seg.file_offset,
-                file_size: seg.file_size,
-                vm_addr: seg.vm_addr,
-                vm_size: seg.vm_size,
+            .map(|segment| {
+                MappingEntry::try_new(
+                    segment.file_offset,
+                    segment.file_size,
+                    segment.vm_addr,
+                    segment.vm_size,
+                )
             })
-            .collect();
+            .collect::<Result<_>>()?;
 
-        let address_map = AddressMap::new(entries);
+        let address_map = AddressMap::try_new(entries)?;
 
         let uuid = load_commands.iter().find_map(|lc| {
             if let LoadCommand::Uuid(ref d) = lc.kind {
@@ -54,11 +55,11 @@ impl DerivedIndexes {
             .map(|seg| seg.vm_addr)
             .unwrap_or(Va(0));
 
-        Self {
+        Ok(Self {
             address_map,
             uuid,
             image_base,
-        }
+        })
     }
 }
 
@@ -70,51 +71,59 @@ impl<'data> MachoFile<'data> {
         segments: Vec<Segment>,
         endian: Endian,
         bitness: Bitness,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        let derived = DerivedIndexes::build(&segments, &load_commands)?;
+        Ok(Self {
             bytes,
             header,
             load_commands,
             segments,
             endian,
             bitness,
-            derived: OnceLock::new(),
-        }
+            derived,
+        })
     }
 
     fn derived(&self) -> &DerivedIndexes {
-        self.derived
-            .get_or_init(|| DerivedIndexes::build(&self.segments, &self.load_commands))
+        &self.derived
     }
 
+    /// Performs header.
     pub fn header(&self) -> &MachoHeader {
         &self.header
     }
 
+    /// Performs load_commands.
     pub fn load_commands(&self) -> &[ParsedLoadCommand] {
         &self.load_commands
     }
 
+    /// Performs segments.
     pub fn segments(&self) -> &[Segment] {
         &self.segments
     }
 
+    /// Performs endian.
     pub fn endian(&self) -> Endian {
         self.endian
     }
 
+    /// Performs bitness.
     pub fn bitness(&self) -> Bitness {
         self.bitness
     }
 
+    /// Performs bytes.
     pub fn bytes(&self) -> &'data [u8] {
         self.bytes
     }
 
+    /// Performs file_size.
     pub fn file_size(&self) -> usize {
         self.bytes.len()
     }
 
+    /// Performs is_64bit.
     pub fn is_64bit(&self) -> bool {
         self.bitness == Bitness::Bits64
     }
@@ -132,18 +141,22 @@ impl<'data> MachoFile<'data> {
         self.load_commands.iter().find(|lc| pred(&lc.kind))
     }
 
+    /// Performs address_map.
     pub fn address_map(&self) -> &AddressMap {
         &self.derived().address_map
     }
 
+    /// Performs uuid.
     pub fn uuid(&self) -> Option<&[u8; 16]> {
         self.derived().uuid.as_ref()
     }
 
+    /// Performs image_base.
     pub fn image_base(&self) -> Va {
         self.derived().image_base
     }
 
+    /// Performs section.
     pub fn section(&self, seg_name: &str, sect_name: &str) -> Option<&Section> {
         self.segments.iter().find_map(|seg| {
             if seg.name == seg_name {
@@ -154,42 +167,40 @@ impl<'data> MachoFile<'data> {
         })
     }
 
+    /// Performs section_bytes.
     pub fn section_bytes(&self, seg_name: &str, sect_name: &str) -> Result<&'data [u8]> {
         let section = self
             .section(seg_name, sect_name)
-            .ok_or_else(|| Error::Format(format!("section {seg_name},{sect_name} not found")))?;
+            .ok_or_else(|| Error::format(format!("section {seg_name},{sect_name} not found")))?;
         if section.section_type.is_zerofill() {
-            return Err(Error::Format(format!(
+            return Err(Error::format(format!(
                 "section {seg_name},{sect_name} is zero-fill and has no file data"
             )));
         }
         self.read_bytes_at(section.offset, section.size as usize)
     }
 
+    /// Performs read_bytes_at.
     pub fn read_bytes_at(&self, offset: ThinFileOffset, len: usize) -> Result<&'data [u8]> {
         let start = offset.as_usize();
-        let end = start.checked_add(len).ok_or(Error::Bounds {
-            offset: offset.0,
-            needed: len as u64,
-            available: self.bytes.len() as u64,
-        })?;
+        let end = start
+            .checked_add(len)
+            .ok_or_else(|| Error::bounds(offset.0, len as u64, self.bytes.len() as u64))?;
         if end > self.bytes.len() {
-            return Err(Error::Bounds {
-                offset: offset.0,
-                needed: len as u64,
-                available: self.bytes.len() as u64,
-            });
+            return Err(Error::bounds(offset.0, len as u64, self.bytes.len() as u64));
         }
         Ok(&self.bytes[start..end])
     }
 
+    /// Performs read_bytes_at_va.
     pub fn read_bytes_at_va(&self, va: Va, len: usize) -> Result<&'data [u8]> {
         let offset = self.address_map().va_to_thin_offset(va)?;
         self.read_bytes_at(offset, len)
     }
 
+    /// Performs read_bytes_at_rva.
     pub fn read_bytes_at_rva(&self, rva: Rva, len: usize) -> Result<&'data [u8]> {
-        let va = AddressMap::rva_to_va(rva, self.image_base());
+        let va = AddressMap::rva_to_va(rva, self.image_base())?;
         self.read_bytes_at_va(va, len)
     }
 }

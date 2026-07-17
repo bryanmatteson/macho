@@ -1,26 +1,68 @@
-pub mod abi;
+pub use macho_cpp::abi;
+/// The correlate module.
 pub mod correlate;
+/// The render module.
 pub mod render;
+/// The rtti module.
 pub mod rtti;
+/// The symbol module.
 pub mod symbol;
+/// The types module.
 pub mod types;
+/// The unify module.
 pub mod unify;
 
+use serde::Serialize;
 use std::collections::BTreeMap;
 
-use crate::core::dwarf::DwarfFunctionIndex;
+use crate::Result;
 use crate::core::{MachoFile, SymbolTable};
+use crate::dwarf::DwarfFunctionIndex;
+use crate::vtables::{SlotTarget, VtableIndex};
 use abi::analyze_symbol_body;
 use rtti::build_typeinfo_index;
 use symbol::parse_symbol;
-use crate::vtables::{SlotTarget, VtableIndex};
-use crate::{Error, Result};
 
 pub use correlate::{ExternalHeaderIndex, HeaderCandidate, correlate_functions};
 pub use render::{default_header_unit, render_header};
 pub use types::*;
 pub use unify::unify_images;
 
+/// Explicit configuration for one C++ reconstruction run.
+#[derive(Debug, Clone, Default)]
+pub struct CppReconstructionPlan {
+    /// Optional exact class-name selection applied before rendering.
+    pub class_filter: Option<String>,
+    /// Whether to include a rendered recovered header.
+    pub render_header: bool,
+}
+
+/// Typed result of a planned C++ reconstruction run.
+#[derive(Debug, Clone, Serialize)]
+pub struct CppReconstructionReport {
+    /// Recovered image model after plan filtering.
+    pub index: CppImageIndex,
+    /// Optional recovered header requested by the plan.
+    pub header: Option<String>,
+}
+
+/// Execute C++ reconstruction according to an explicit plan.
+pub fn reconstruct(
+    macho: &MachoFile<'_>,
+    plan: &CppReconstructionPlan,
+) -> Result<CppReconstructionReport> {
+    let mut index = build_image_index(macho)?;
+    if let Some(class_name) = &plan.class_filter {
+        index.classes.retain(|name, _| name == class_name);
+    }
+    let header = plan.render_header.then(|| {
+        let unified = unify_images(&[index.clone()]);
+        render_header(&default_header_unit(&unified))
+    });
+    Ok(CppReconstructionReport { index, header })
+}
+
+/// Performs build_image_index.
 pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> {
     let symtab = macho.ext::<SymbolTable<'_>>()?;
     let typeinfos = build_typeinfo_index(macho)?;
@@ -44,21 +86,19 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
     }
 
     for symbol in symtab.symbols() {
-        let Some(mut record) =
-            parse_symbol(symbol.name, Some(symbol.value), dwarf_index.as_ref())
+        let Some(mut record) = parse_symbol(symbol.name, Some(symbol.value), dwarf_index.as_ref())
         else {
             continue;
         };
 
         if let types::CppSymbolKind::Function { ref mut decl } = record.kind {
-            decl.body_analysis =
-                analyze_symbol_body(macho, &symtab, symbol, Some(&vtables));
+            decl.body_analysis = analyze_symbol_body(macho, &symtab, symbol, Some(&vtables));
             if let Some(parent) = decl.name.parent() {
                 if decl.is_constructor || decl.is_destructor {
                     probable_classes.insert(parent.as_string());
                 }
             }
-            pending_functions.push(decl.clone());
+            pending_functions.push(decl.as_ref().clone());
         }
 
         symbols.push(record);
@@ -117,9 +157,9 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
 
     Ok(types::CppImageIndex {
         image: types::CppImageInfo {
-            arch: macho.header().cpu_type.name().to_string(),
+            arch: macho.header().cpu_type().name().to_string(),
             uuid: macho.uuid().map(crate::core::format_uuid),
-            install_name: macho.load_commands().iter().find_map(|lc| match &lc.kind {
+            install_name: macho.load_commands().iter().find_map(|lc| match lc.kind() {
                 crate::core::LoadCommand::IdDylib(data) => Some(data.name.to_string()),
                 _ => None,
             }),
@@ -140,7 +180,7 @@ fn seed_class(name: &str, typeinfo: Option<&types::CppTypeInfoNode>) -> types::C
         vtables: Vec::new(),
         evidence: typeinfo
             .map(|node| node.evidence.clone())
-            .unwrap_or_else(Vec::new),
+            .unwrap_or_default(),
     }
 }
 
@@ -166,6 +206,7 @@ fn convert_vtable(vtable: &crate::vtables::VtableEntry) -> types::CppVtableGroup
                     SlotTarget::Function { .. } => types::CppVtableSlotKind::Method,
                     SlotTarget::PureVirtual => types::CppVtableSlotKind::PureVirtual,
                     SlotTarget::Unknown { .. } => types::CppVtableSlotKind::Unknown,
+                    _ => types::CppVtableSlotKind::Unknown,
                 },
                 target_name: match &slot.target {
                     SlotTarget::Function { name, .. } => Some(name.clone()),
@@ -215,28 +256,10 @@ fn strip_leading_return_type(text: &str) -> Option<&str> {
     Some(text[split + 1..].trim_start())
 }
 
+/// Performs build_headers_for_mach.
 pub fn build_headers_for_mach(macho: &MachoFile<'_>) -> Result<String> {
     let index = build_image_index(macho)?;
     let unified = unify::unify_images(&[index]);
     let unit = render::default_header_unit(&unified);
     Ok(render::render_header(&unit))
-}
-
-pub fn validate_header_syntax(path: &std::path::Path) -> Result<()> {
-    let output = std::process::Command::new("xcrun")
-        .arg("clang++")
-        .arg("-std=c++17")
-        .arg("-x")
-        .arg("c++-header")
-        .arg("-fsyntax-only")
-        .arg(path)
-        .output()
-        .map_err(|err| Error::Validation(format!("failed to invoke clang++: {err}")))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(Error::Validation(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
-    }
 }

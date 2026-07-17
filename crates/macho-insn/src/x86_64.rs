@@ -1,12 +1,12 @@
 //! x86_64 instruction decoding and disassembly via `iced-x86`.
 
 use iced_x86::{
-    Code, Decoder, DecoderOptions, Encoder, FlowControl, Formatter as _, Instruction, Mnemonic,
-    OpKind, Register,
+    Code, Decoder, DecoderOptions, Encoder, FlowControl, Formatter as _, Instruction,
+    InstructionInfoFactory, Mnemonic, OpAccess, OpKind, Register,
 };
 
 use crate::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, Operand, PcRelInfo, Reg, MAX_OPERANDS,
+    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo, Reg,
 };
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
@@ -34,12 +34,39 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     let writes_implicit_gpr0 = match insn.mnemonic() {
         Mnemonic::Div | Mnemonic::Idiv | Mnemonic::Mul => true,
         Mnemonic::Imul => insn.op_count() == 1, // single-operand form only
-        Mnemonic::Cwd | Mnemonic::Cdq | Mnemonic::Cqo
-        | Mnemonic::Cdqe | Mnemonic::Cbw | Mnemonic::Cwde => true,
+        Mnemonic::Cwd
+        | Mnemonic::Cdq
+        | Mnemonic::Cqo
+        | Mnemonic::Cdqe
+        | Mnemonic::Cbw
+        | Mnemonic::Cwde => true,
         _ => false,
     };
 
-    Ok(Insn::with_ops(insn.len(), kind, ops, op_count, writes_implicit_gpr0))
+    // writes_op0_reg: true iff op0 is a register and iced reports its
+    // access as Write or ReadWrite. iced's InstructionInfoFactory walks
+    // the operand-info tables that back the decoder, so this is the ground
+    // truth for whether an instruction like `ADD rdi, rax` actually
+    // modifies `rdi` rather than just reading both operands.
+    let writes_op0_reg = if insn.op_count() >= 1 && insn.op0_kind() == OpKind::Register {
+        let mut factory = InstructionInfoFactory::new();
+        let info = factory.info(&insn);
+        matches!(
+            info.op_access(0),
+            OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite
+        )
+    } else {
+        false
+    };
+
+    Ok(Insn::with_ops(
+        insn.len(),
+        kind,
+        ops,
+        op_count,
+        writes_implicit_gpr0,
+        writes_op0_reg,
+    ))
 }
 
 fn classify(insn: &Instruction, _va: u64) -> InsnKind {
@@ -69,9 +96,7 @@ fn classify(insn: &Instruction, _va: u64) -> InsnKind {
         }),
         FlowControl::Next | FlowControl::Interrupt | FlowControl::Exception => {
             if let Some(disp) = rip_relative_displacement(insn) {
-                return InsnKind::PcRelative(PcRelInfo {
-                    displacement: disp,
-                });
+                return InsnKind::PcRelative(PcRelInfo { displacement: disp });
             }
             InsnKind::Other
         }
@@ -158,9 +183,7 @@ fn map_operand(insn: &Instruction, idx: u32) -> Option<Operand> {
         OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
             Some(Operand::Imm(insn.near_branch_target() as i64))
         }
-        OpKind::FarBranch16 | OpKind::FarBranch32 => {
-            Some(Operand::Imm(insn.far_branch32() as i64))
-        }
+        OpKind::FarBranch16 | OpKind::FarBranch32 => Some(Operand::Imm(insn.far_branch32() as i64)),
         _ => None,
     }
 }
@@ -250,10 +273,7 @@ pub(crate) fn disassemble_one(bytes: &[u8], va: u64) -> Result<String, DecodeErr
     Ok(output)
 }
 
-pub(crate) fn disassemble(
-    bytes: &[u8],
-    base_va: u64,
-) -> Result<Vec<(u64, String)>, DecodeError> {
+pub(crate) fn disassemble(bytes: &[u8], base_va: u64) -> Result<Vec<(u64, String)>, DecodeError> {
     let mut result = Vec::new();
     let mut decoder = Decoder::with_ip(64, bytes, base_va, DecoderOptions::NONE);
     let mut formatter = iced_x86::IntelFormatter::new();
@@ -282,10 +302,9 @@ pub(crate) fn encode_branch_insn(
     } else {
         Code::Jmp_rel32_64
     };
-    let mut insn = Instruction::with_branch(code, to_va)
-        .map_err(|e| crate::EncodeError {
-            message: e.to_string(),
-        })?;
+    let mut insn = Instruction::with_branch(code, to_va).map_err(|e| crate::EncodeError {
+        message: e.to_string(),
+    })?;
     insn.set_ip(from_va);
 
     let mut encoder = Encoder::new(64);

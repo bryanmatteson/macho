@@ -1,0 +1,18 @@
+[package]
+name = "macho-cpp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "C++ RTTI, vtable, and ABI inference for Mach-O images"
+
+[dependencies]
+macho-core.workspace = true
+macho-insn.workspace = true
+macho-symbols.workspace = true
+macho-dyld.workspace = true
+macho-dwarf.workspace = true
+serde.workspace = true
+thiserror.workspace = true

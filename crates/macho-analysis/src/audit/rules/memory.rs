@@ -1,5 +1,5 @@
+use crate::audit::AuditInput;
 use crate::audit::{AuditFinding, AuditRule, AuditSeverity};
-use crate::snapshot::SliceSnapshot;
 
 pub struct WritableExecutableSegment;
 
@@ -8,14 +8,14 @@ impl AuditRule for WritableExecutableSegment {
         "MEM001"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
-        for seg in &slice.segments {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
+        for seg in slice.segments() {
             // Check both init_prot and max_prot. A segment with max_prot=rwx
             // can be made W+X at runtime via mprotect even if init_prot is safe.
             for (prot_field, prot) in [("init_prot", &seg.init_prot), ("max_prot", &seg.max_prot)] {
                 if prot.contains('w') && prot.contains('x') {
                     findings.push(AuditFinding {
-                        rule_id: self.id(),
+                        rule_id: self.id().to_owned(),
                         severity: AuditSeverity::Critical,
                         title: format!(
                             "segment {} is writable and executable ({})",
@@ -47,13 +47,16 @@ impl AuditRule for MissingPie {
         "MEM002"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
-        if slice.header.file_type != "MH_EXECUTE" {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
+        let Some(header) = slice.header() else {
+            return;
+        };
+        if header.file_type != "MH_EXECUTE" {
             return;
         }
-        if !slice.header.flags.iter().any(|f| f == "PIE") {
+        if !header.flags.iter().any(|f| f == "PIE") {
             findings.push(AuditFinding {
-                rule_id: self.id(),
+                rule_id: self.id().to_owned(),
                 severity: AuditSeverity::Error,
                 title: "executable not built as PIE".into(),
                 body: "Position-Independent Executables enable ASLR, which is a \
@@ -73,15 +76,13 @@ impl AuditRule for AllowStackExecution {
         "MEM003"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
-        if slice
-            .header
-            .flags
-            .iter()
-            .any(|f| f == "ALLOW_STACK_EXECUTION")
-        {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
+        let Some(header) = slice.header() else {
+            return;
+        };
+        if header.flags.iter().any(|f| f == "ALLOW_STACK_EXECUTION") {
             findings.push(AuditFinding {
-                rule_id: self.id(),
+                rule_id: self.id().to_owned(),
                 severity: AuditSeverity::Critical,
                 title: "binary allows stack execution".into(),
                 body: "The MH_ALLOW_STACK_EXECUTION flag disables NX on the stack, \

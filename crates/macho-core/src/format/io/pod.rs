@@ -2,6 +2,10 @@ use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 use crate::error::{Error, Result};
 
+mod objc;
+
+pub use objc::*;
+
 /// Read a zerocopy-compatible struct from `data` at `offset`.
 /// Returns a copy (not a reference) to handle unaligned data.
 pub fn read_pod<T>(data: &[u8], offset: usize) -> Result<T>
@@ -9,20 +13,14 @@ where
     T: FromBytes + KnownLayout + Immutable + Copy,
 {
     let size = size_of::<T>();
-    let end = offset.checked_add(size).ok_or(Error::Bounds {
-        offset: offset as u64,
-        needed: size as u64,
-        available: data.len() as u64,
-    })?;
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| Error::bounds(offset as u64, size as u64, data.len() as u64))?;
     if end > data.len() {
-        return Err(Error::Bounds {
-            offset: offset as u64,
-            needed: size as u64,
-            available: data.len() as u64,
-        });
+        return Err(Error::bounds(offset as u64, size as u64, data.len() as u64));
     }
     T::read_from_bytes(&data[offset..end]).map_err(|e| {
-        Error::Format(format!(
+        Error::format(format!(
             "failed to read {} at offset {offset:#x}: {e}",
             std::any::type_name::<T>()
         ))
@@ -35,356 +33,587 @@ where
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawMachHeader32 type.
 pub struct RawMachHeader32 {
+    /// The magic field.
     pub magic: u32,
+    /// The cputype field.
     pub cputype: i32,
+    /// The cpusubtype field.
     pub cpusubtype: i32,
+    /// The filetype field.
     pub filetype: u32,
+    /// The ncmds field.
     pub ncmds: u32,
+    /// The sizeofcmds field.
     pub sizeofcmds: u32,
+    /// The flags field.
     pub flags: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawMachHeader64 type.
 pub struct RawMachHeader64 {
+    /// The magic field.
     pub magic: u32,
+    /// The cputype field.
     pub cputype: i32,
+    /// The cpusubtype field.
     pub cpusubtype: i32,
+    /// The filetype field.
     pub filetype: u32,
+    /// The ncmds field.
     pub ncmds: u32,
+    /// The sizeofcmds field.
     pub sizeofcmds: u32,
+    /// The flags field.
     pub flags: u32,
+    /// The reserved field.
     pub reserved: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawFatHeader type.
 pub struct RawFatHeader {
+    /// The magic field.
     pub magic: u32,
+    /// The nfat_arch field.
     pub nfat_arch: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawFatArch32 type.
 pub struct RawFatArch32 {
+    /// The cputype field.
     pub cputype: i32,
+    /// The cpusubtype field.
     pub cpusubtype: i32,
+    /// The offset field.
     pub offset: u32,
+    /// The size field.
     pub size: u32,
+    /// The align field.
     pub align: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawFatArch64 type.
 pub struct RawFatArch64 {
+    /// The cputype field.
     pub cputype: i32,
+    /// The cpusubtype field.
     pub cpusubtype: i32,
+    /// The offset field.
     pub offset: u64,
+    /// The size field.
     pub size: u64,
+    /// The align field.
     pub align: u32,
+    /// The reserved field.
     pub reserved: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawLoadCommand type.
 pub struct RawLoadCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSegmentCommand32 type.
 pub struct RawSegmentCommand32 {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The segname field.
     pub segname: [u8; 16],
+    /// The vmaddr field.
     pub vmaddr: u32,
+    /// The vmsize field.
     pub vmsize: u32,
+    /// The fileoff field.
     pub fileoff: u32,
+    /// The filesize field.
     pub filesize: u32,
+    /// The maxprot field.
     pub maxprot: i32,
+    /// The initprot field.
     pub initprot: i32,
+    /// The nsects field.
     pub nsects: u32,
+    /// The flags field.
     pub flags: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSegmentCommand64 type.
 pub struct RawSegmentCommand64 {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The segname field.
     pub segname: [u8; 16],
+    /// The vmaddr field.
     pub vmaddr: u64,
+    /// The vmsize field.
     pub vmsize: u64,
+    /// The fileoff field.
     pub fileoff: u64,
+    /// The filesize field.
     pub filesize: u64,
+    /// The maxprot field.
     pub maxprot: i32,
+    /// The initprot field.
     pub initprot: i32,
+    /// The nsects field.
     pub nsects: u32,
+    /// The flags field.
     pub flags: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSection32 type.
 pub struct RawSection32 {
+    /// The sectname field.
     pub sectname: [u8; 16],
+    /// The segname field.
     pub segname: [u8; 16],
+    /// The addr field.
     pub addr: u32,
+    /// The size field.
     pub size: u32,
+    /// The offset field.
     pub offset: u32,
+    /// The align field.
     pub align: u32,
+    /// The reloff field.
     pub reloff: u32,
+    /// The nreloc field.
     pub nreloc: u32,
+    /// The flags field.
     pub flags: u32,
+    /// The reserved1 field.
     pub reserved1: u32,
+    /// The reserved2 field.
     pub reserved2: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSection64 type.
 pub struct RawSection64 {
+    /// The sectname field.
     pub sectname: [u8; 16],
+    /// The segname field.
     pub segname: [u8; 16],
+    /// The addr field.
     pub addr: u64,
+    /// The size field.
     pub size: u64,
+    /// The offset field.
     pub offset: u32,
+    /// The align field.
     pub align: u32,
+    /// The reloff field.
     pub reloff: u32,
+    /// The nreloc field.
     pub nreloc: u32,
+    /// The flags field.
     pub flags: u32,
+    /// The reserved1 field.
     pub reserved1: u32,
+    /// The reserved2 field.
     pub reserved2: u32,
+    /// The reserved3 field.
     pub reserved3: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSymtabCommand type.
 pub struct RawSymtabCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The symoff field.
     pub symoff: u32,
+    /// The nsyms field.
     pub nsyms: u32,
+    /// The stroff field.
     pub stroff: u32,
+    /// The strsize field.
     pub strsize: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawDysymtabCommand type.
 pub struct RawDysymtabCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The ilocalsym field.
     pub ilocalsym: u32,
+    /// The nlocalsym field.
     pub nlocalsym: u32,
+    /// The iextdefsym field.
     pub iextdefsym: u32,
+    /// The nextdefsym field.
     pub nextdefsym: u32,
+    /// The iundefsym field.
     pub iundefsym: u32,
+    /// The nundefsym field.
     pub nundefsym: u32,
+    /// The tocoff field.
     pub tocoff: u32,
+    /// The ntoc field.
     pub ntoc: u32,
+    /// The modtaboff field.
     pub modtaboff: u32,
+    /// The nmodtab field.
     pub nmodtab: u32,
+    /// The extrefsymoff field.
     pub extrefsymoff: u32,
+    /// The nextrefsyms field.
     pub nextrefsyms: u32,
+    /// The indirectsymoff field.
     pub indirectsymoff: u32,
+    /// The nindirectsyms field.
     pub nindirectsyms: u32,
+    /// The extreloff field.
     pub extreloff: u32,
+    /// The nextrel field.
     pub nextrel: u32,
+    /// The locreloff field.
     pub locreloff: u32,
+    /// The nlocrel field.
     pub nlocrel: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawDylibCommand type.
 pub struct RawDylibCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The name_offset field.
     pub name_offset: u32,
+    /// The timestamp field.
     pub timestamp: u32,
+    /// The current_version field.
     pub current_version: u32,
+    /// The compatibility_version field.
     pub compatibility_version: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawUuidCommand type.
 pub struct RawUuidCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The uuid field.
     pub uuid: [u8; 16],
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawBuildVersionCommand type.
 pub struct RawBuildVersionCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The platform field.
     pub platform: u32,
+    /// The minos field.
     pub minos: u32,
+    /// The sdk field.
     pub sdk: u32,
+    /// The ntools field.
     pub ntools: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawBuildToolVersion type.
 pub struct RawBuildToolVersion {
+    /// The tool field.
     pub tool: u32,
+    /// The version field.
     pub version: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawEntryPointCommand type.
 pub struct RawEntryPointCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The entryoff field.
     pub entryoff: u64,
+    /// The stacksize field.
     pub stacksize: u64,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawSourceVersionCommand type.
 pub struct RawSourceVersionCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The version field.
     pub version: u64,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawLinkeditDataCommand type.
 pub struct RawLinkeditDataCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The dataoff field.
     pub dataoff: u32,
+    /// The datasize field.
     pub datasize: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawDyldInfoCommand type.
 pub struct RawDyldInfoCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The rebase_off field.
     pub rebase_off: u32,
+    /// The rebase_size field.
     pub rebase_size: u32,
+    /// The bind_off field.
     pub bind_off: u32,
+    /// The bind_size field.
     pub bind_size: u32,
+    /// The weak_bind_off field.
     pub weak_bind_off: u32,
+    /// The weak_bind_size field.
     pub weak_bind_size: u32,
+    /// The lazy_bind_off field.
     pub lazy_bind_off: u32,
+    /// The lazy_bind_size field.
     pub lazy_bind_size: u32,
+    /// The export_off field.
     pub export_off: u32,
+    /// The export_size field.
     pub export_size: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawEncryptionInfoCommand type.
 pub struct RawEncryptionInfoCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The cryptoff field.
     pub cryptoff: u32,
+    /// The cryptsize field.
     pub cryptsize: u32,
+    /// The cryptid field.
     pub cryptid: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawEncryptionInfoCommand64 type.
 pub struct RawEncryptionInfoCommand64 {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The cryptoff field.
     pub cryptoff: u32,
+    /// The cryptsize field.
     pub cryptsize: u32,
+    /// The cryptid field.
     pub cryptid: u32,
+    /// The pad field.
     pub pad: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawVersionMinCommand type.
 pub struct RawVersionMinCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The version field.
     pub version: u32,
+    /// The sdk field.
     pub sdk: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawNoteCommand type.
 pub struct RawNoteCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The data_owner field.
     pub data_owner: [u8; 16],
+    /// The offset field.
     pub offset: u64,
+    /// The size field.
     pub size: u64,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawFilesetEntryCommand type.
 pub struct RawFilesetEntryCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The vmaddr field.
     pub vmaddr: u64,
+    /// The fileoff field.
     pub fileoff: u64,
+    /// The entry_id_offset field.
     pub entry_id_offset: u32,
+    /// The reserved field.
     pub reserved: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawStringCommand type.
 pub struct RawStringCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The string_offset field.
     pub string_offset: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawLinkerOptionCommand type.
 pub struct RawLinkerOptionCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The count field.
     pub count: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawPrebindCksumCommand type.
 pub struct RawPrebindCksumCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The cksum field.
     pub cksum: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawTwolevelHintsCommand type.
 pub struct RawTwolevelHintsCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The offset field.
     pub offset: u32,
+    /// The nhints field.
     pub nhints: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawRoutinesCommand type.
 pub struct RawRoutinesCommand {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The init_address field.
     pub init_address: u32,
+    /// The init_module field.
     pub init_module: u32,
+    /// The reserved1 field.
     pub reserved1: u32,
+    /// The reserved2 field.
     pub reserved2: u32,
+    /// The reserved3 field.
     pub reserved3: u32,
+    /// The reserved4 field.
     pub reserved4: u32,
+    /// The reserved5 field.
     pub reserved5: u32,
+    /// The reserved6 field.
     pub reserved6: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawRoutinesCommand64 type.
 pub struct RawRoutinesCommand64 {
+    /// The cmd field.
     pub cmd: u32,
+    /// The cmdsize field.
     pub cmdsize: u32,
+    /// The init_address field.
     pub init_address: u64,
+    /// The init_module field.
     pub init_module: u64,
+    /// The reserved1 field.
     pub reserved1: u64,
+    /// The reserved2 field.
     pub reserved2: u64,
+    /// The reserved3 field.
     pub reserved3: u64,
+    /// The reserved4 field.
     pub reserved4: u64,
+    /// The reserved5 field.
     pub reserved5: u64,
+    /// The reserved6 field.
     pub reserved6: u64,
 }
 
@@ -392,21 +621,33 @@ pub struct RawRoutinesCommand64 {
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawNlist32 type.
 pub struct RawNlist32 {
+    /// The n_strx field.
     pub n_strx: u32,
+    /// The n_type field.
     pub n_type: u8,
+    /// The n_sect field.
     pub n_sect: u8,
+    /// The n_desc field.
     pub n_desc: i16,
+    /// The n_value field.
     pub n_value: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawNlist64 type.
 pub struct RawNlist64 {
+    /// The n_strx field.
     pub n_strx: u32,
+    /// The n_type field.
     pub n_type: u8,
+    /// The n_sect field.
     pub n_sect: u8,
+    /// The n_desc field.
     pub n_desc: u16,
+    /// The n_value field.
     pub n_value: u64,
 }
 
@@ -414,8 +655,11 @@ pub struct RawNlist64 {
 
 #[derive(Debug, Clone, Copy, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawRelocationInfo type.
 pub struct RawRelocationInfo {
+    /// The r_address field.
     pub r_address: i32,
+    /// The r_symbolnum_and_flags field.
     pub r_symbolnum_and_flags: u32,
 }
 
@@ -423,33 +667,49 @@ pub struct RawRelocationInfo {
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawChainedFixupsHeader type.
 pub struct RawChainedFixupsHeader {
+    /// The fixups_version field.
     pub fixups_version: u32,
+    /// The starts_offset field.
     pub starts_offset: u32,
+    /// The imports_offset field.
     pub imports_offset: u32,
+    /// The symbols_offset field.
     pub symbols_offset: u32,
+    /// The imports_count field.
     pub imports_count: u32,
+    /// The imports_format field.
     pub imports_format: u32,
+    /// The symbols_format field.
     pub symbols_format: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawChainedImport type.
 pub struct RawChainedImport {
+    /// The packed field.
     pub packed: u32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawChainedImportAddend type.
 pub struct RawChainedImportAddend {
+    /// The packed field.
     pub packed: u32,
+    /// The addend field.
     pub addend: i32,
 }
 
 #[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
 #[repr(C)]
+/// The RawChainedImportAddend64 type.
 pub struct RawChainedImportAddend64 {
+    /// The packed field.
     pub packed: u64,
+    /// The addend field.
     pub addend: u64,
 }
 
@@ -459,113 +719,14 @@ where
     T: IntoBytes + Immutable + KnownLayout,
 {
     let size = size_of::<T>();
-    let end = offset.checked_add(size).ok_or(Error::Bounds {
-        offset: offset as u64,
-        needed: size as u64,
-        available: buf.len() as u64,
-    })?;
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| Error::bounds(offset as u64, size as u64, buf.len() as u64))?;
     if end > buf.len() {
-        return Err(Error::Bounds {
-            offset: offset as u64,
-            needed: size as u64,
-            available: buf.len() as u64,
-        });
+        return Err(Error::bounds(offset as u64, size as u64, buf.len() as u64));
     }
     buf[offset..end].copy_from_slice(value.as_bytes());
     Ok(())
-}
-
-// ObjC runtime structures (64-bit)
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawObjCClass64 {
-    pub isa: u64,
-    pub superclass: u64,
-    pub cache: u64,
-    pub vtable: u64,
-    pub data: u64, // pointer to class_ro_t (bit 0 = swift flag in some ABIs)
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawClassRoT64 {
-    pub flags: u32,
-    pub instance_start: u32,
-    pub instance_size: u32,
-    pub reserved: u32,
-    pub ivar_layout: u64,
-    pub name: u64,
-    pub base_methods: u64,
-    pub base_protocols: u64,
-    pub ivars: u64,
-    pub weak_ivar_layout: u64,
-    pub base_properties: u64,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawMethodListHeader {
-    pub entsize_and_flags: u32,
-    pub count: u32,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawMethodT {
-    pub name: u64,
-    pub types: u64,
-    pub imp: u64,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawRelativeMethodT {
-    pub name_offset: i32,
-    pub types_offset: i32,
-    pub imp_offset: i32,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawIvarT64 {
-    pub offset_ptr: u64,
-    pub name: u64,
-    pub type_encoding: u64,
-    pub alignment: u32,
-    pub size: u32,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawPropertyT {
-    pub name: u64,
-    pub attributes: u64,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawProtocolT64 {
-    pub isa: u64,
-    pub name: u64,
-    pub protocols: u64,
-    pub instance_methods: u64,
-    pub class_methods: u64,
-    pub optional_instance_methods: u64,
-    pub optional_class_methods: u64,
-    pub instance_properties: u64,
-    pub size: u32,
-    pub flags: u32,
-}
-
-#[derive(Debug, Clone, Copy, FromBytes, Immutable, KnownLayout)]
-#[repr(C)]
-pub struct RawCategoryT64 {
-    pub name: u64,
-    pub cls: u64,
-    pub instance_methods: u64,
-    pub class_methods: u64,
-    pub protocols: u64,
 }
 
 #[cfg(test)]

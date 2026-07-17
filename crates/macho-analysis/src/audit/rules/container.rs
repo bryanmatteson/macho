@@ -1,5 +1,5 @@
+use crate::audit::AuditInput;
 use crate::audit::{AuditFinding, AuditRule, AuditSeverity};
-use crate::snapshot::SliceSnapshot;
 
 pub struct MissingPagezero;
 
@@ -8,19 +8,22 @@ impl AuditRule for MissingPagezero {
         "CTR001"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
-        if slice.header.file_type != "MH_EXECUTE" {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
+        let Some(header) = slice.header() else {
+            return;
+        };
+        if header.file_type != "MH_EXECUTE" {
             return;
         }
 
         let has_pagezero = slice
-            .segments
+            .segments()
             .iter()
             .any(|s| s.name == "__PAGEZERO" && s.vm_size > 0);
 
         if !has_pagezero {
             findings.push(AuditFinding {
-                rule_id: self.id(),
+                rule_id: self.id().to_owned(),
                 severity: AuditSeverity::Warning,
                 title: "executable missing __PAGEZERO segment".into(),
                 body: "__PAGEZERO maps the low address range as inaccessible, \

@@ -1,4 +1,5 @@
-use crate::error::{Error, Result};
+use crate::error::{ContextFrame, Error, OffsetSpan, Result};
+use crate::format::ParseLimits;
 use crate::format::constants::*;
 use crate::format::io::endian::Endian;
 use crate::format::io::pod::{self, *};
@@ -8,6 +9,7 @@ use crate::model::load_command::*;
 use crate::model::names::SegmentName;
 use crate::model::segment::Segment;
 
+/// Performs parse_load_commands.
 pub fn parse_load_commands(
     data: &[u8],
     endian: Endian,
@@ -15,44 +17,99 @@ pub fn parse_load_commands(
     ncmds: u32,
     sizeofcmds: u32,
 ) -> Result<(Vec<ParsedLoadCommand>, Vec<Segment>)> {
+    parse_load_commands_with_limits(
+        data,
+        endian,
+        offset,
+        ncmds,
+        sizeofcmds,
+        &ParseLimits::default(),
+    )
+}
+
+pub(crate) fn parse_load_commands_with_limits(
+    data: &[u8],
+    endian: Endian,
+    offset: usize,
+    ncmds: u32,
+    sizeofcmds: u32,
+    limits: &ParseLimits,
+) -> Result<(Vec<ParsedLoadCommand>, Vec<Segment>)> {
+    if ncmds as usize > limits.max_load_commands {
+        return Err(Error::limit(format!(
+            "image claims {ncmds} load commands, exceeding max_load_commands={}",
+            limits.max_load_commands
+        )));
+    }
     // Cap capacity to avoid OOM from malformed ncmds. Each command is at least
     // 8 bytes, so sizeofcmds / 8 is the theoretical max. Also cap to a
     // reasonable absolute limit.
     let max_cmds = (sizeofcmds as usize / 8).min(ncmds as usize).min(10_000);
     let mut commands = Vec::with_capacity(max_cmds);
     let mut segments: Vec<Segment> = Vec::new();
+    let mut budget = ParseBudget::new(limits);
     let mut cur = offset;
     let cmd_end = offset.checked_add(sizeofcmds as usize).ok_or_else(|| {
-        Error::Command(format!(
+        Error::command(format!(
             "sizeofcmds {sizeofcmds:#x} overflows when added to header offset {offset:#x}"
         ))
     })?;
 
-    for _ in 0..ncmds {
+    for index in 0..ncmds as usize {
         if cur + 8 > data.len() || cur + 8 > cmd_end {
-            return Err(Error::Command(
-                "load command extends beyond sizeofcmds".into(),
-            ));
+            return Err(Error::command("load command extends beyond sizeofcmds")
+                .with_location(OffsetSpan {
+                    offset: cur as u64,
+                    len: 8,
+                })
+                .with_context(ContextFrame::LoadCommand { index }));
         }
 
-        let raw_lc: RawLoadCommand = pod::read_pod(data, cur)?;
+        let raw_lc: RawLoadCommand = pod::read_pod(data, cur).map_err(|error| {
+            error
+                .with_location(OffsetSpan {
+                    offset: cur as u64,
+                    len: 8,
+                })
+                .with_context(ContextFrame::LoadCommand { index })
+        })?;
         let cmd = endian.interpret_u32(raw_lc.cmd);
         let cmdsize = endian.interpret_u32(raw_lc.cmdsize) as usize;
 
         if cmdsize < 8 || cmdsize % 4 != 0 {
-            return Err(Error::Command(format!(
+            return Err(Error::command(format!(
                 "load command at offset {cur:#x} has invalid cmdsize {cmdsize} \
                  (must be >= 8 and 4-byte aligned)"
-            )));
+            ))
+            .with_location(OffsetSpan {
+                offset: cur as u64,
+                len: cmdsize as u64,
+            })
+            .with_context(ContextFrame::LoadCommand { index }));
         }
         if cur + cmdsize > data.len() || cur + cmdsize > cmd_end {
-            return Err(Error::Command(format!(
+            return Err(Error::command(format!(
                 "load command at offset {cur:#x} extends beyond file/command region"
-            )));
+            ))
+            .with_location(OffsetSpan {
+                offset: cur as u64,
+                len: cmdsize as u64,
+            })
+            .with_context(ContextFrame::LoadCommand { index }));
         }
 
         let cmd_data = &data[cur..cur + cmdsize];
-        let kind = parse_single_command(data, cmd_data, cur, cmd, endian, &mut segments)?;
+        let kind =
+            parse_single_command(data, cmd_data, cur, cmd, endian, &mut segments, &mut budget)
+                .map_err(|mut error| {
+                    if error.location.is_none() {
+                        error.location = Some(OffsetSpan {
+                            offset: cur as u64,
+                            len: cmdsize as u64,
+                        });
+                    }
+                    error.with_context(ContextFrame::LoadCommand { index })
+                })?;
 
         commands.push(ParsedLoadCommand {
             kind,
@@ -73,10 +130,11 @@ fn parse_single_command(
     cmd: u32,
     endian: Endian,
     segments: &mut Vec<Segment>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<LoadCommand> {
     match cmd {
-        LC_SEGMENT => parse_segment_32(file_data, cmd_offset, endian, segments),
-        LC_SEGMENT_64 => parse_segment_64(file_data, cmd_offset, endian, segments),
+        LC_SEGMENT => parse_segment_32(file_data, cmd_offset, endian, segments, budget),
+        LC_SEGMENT_64 => parse_segment_64(file_data, cmd_offset, endian, segments, budget),
         LC_SYMTAB => parse_symtab(cmd_data, endian),
         LC_DYSYMTAB => parse_dysymtab(cmd_data, endian),
         LC_UUID => parse_uuid(cmd_data),
@@ -107,16 +165,24 @@ fn parse_single_command(
             parse_linkedit(cmd_data, endian).map(LoadCommand::FunctionVariantFixups)
         }
         LC_LOAD_DYLIB | LC_ID_DYLIB | LC_LOAD_WEAK_DYLIB | LC_REEXPORT_DYLIB
-        | LC_LAZY_LOAD_DYLIB | LC_LOAD_UPWARD_DYLIB => parse_dylib(cmd_data, cmd, endian),
-        LC_RPATH => parse_string_cmd(cmd_data, endian).map(LoadCommand::Rpath),
-        LC_TARGET_TRIPLE => parse_string_cmd(cmd_data, endian).map(LoadCommand::TargetTriple),
-        LC_LOAD_DYLINKER => parse_string_cmd(cmd_data, endian).map(LoadCommand::LoadDylinker),
-        LC_ID_DYLINKER => parse_string_cmd(cmd_data, endian).map(LoadCommand::IdDylinker),
-        LC_DYLD_ENVIRONMENT => parse_string_cmd(cmd_data, endian).map(LoadCommand::DyldEnvironment),
-        LC_SUB_FRAMEWORK => parse_string_cmd(cmd_data, endian).map(LoadCommand::SubFramework),
-        LC_SUB_UMBRELLA => parse_string_cmd(cmd_data, endian).map(LoadCommand::SubUmbrella),
-        LC_SUB_CLIENT => parse_string_cmd(cmd_data, endian).map(LoadCommand::SubClient),
-        LC_SUB_LIBRARY => parse_string_cmd(cmd_data, endian).map(LoadCommand::SubLibrary),
+        | LC_LAZY_LOAD_DYLIB | LC_LOAD_UPWARD_DYLIB => parse_dylib(cmd_data, cmd, endian, budget),
+        LC_RPATH => parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::Rpath),
+        LC_TARGET_TRIPLE => {
+            parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::TargetTriple)
+        }
+        LC_LOAD_DYLINKER => {
+            parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::LoadDylinker)
+        }
+        LC_ID_DYLINKER => parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::IdDylinker),
+        LC_DYLD_ENVIRONMENT => {
+            parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::DyldEnvironment)
+        }
+        LC_SUB_FRAMEWORK => {
+            parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::SubFramework)
+        }
+        LC_SUB_UMBRELLA => parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::SubUmbrella),
+        LC_SUB_CLIENT => parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::SubClient),
+        LC_SUB_LIBRARY => parse_string_cmd(cmd_data, endian, budget).map(LoadCommand::SubLibrary),
         LC_VERSION_MIN_MACOSX => {
             parse_version_min(cmd_data, endian).map(LoadCommand::VersionMinMacOS)
         }
@@ -133,9 +199,9 @@ fn parse_single_command(
         LC_ENCRYPTION_INFO_64 => {
             parse_encryption_info_64(cmd_data, endian).map(LoadCommand::EncryptionInfo64)
         }
-        LC_LINKER_OPTION => parse_linker_option(cmd_data, endian),
+        LC_LINKER_OPTION => parse_linker_option(cmd_data, endian, budget),
         LC_NOTE => parse_note(cmd_data, endian),
-        LC_FILESET_ENTRY => parse_fileset_entry(cmd_data, endian),
+        LC_FILESET_ENTRY => parse_fileset_entry(cmd_data, file_data.len(), endian, budget),
         LC_PREBIND_CKSUM => parse_prebind_cksum(cmd_data, endian),
         LC_TWOLEVEL_HINTS => parse_twolevel_hints(cmd_data, endian),
         LC_ROUTINES => parse_routines(cmd_data, endian).map(LoadCommand::Routines),
@@ -164,9 +230,11 @@ fn parse_segment_32(
     offset: usize,
     endian: Endian,
     segments: &mut Vec<Segment>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<LoadCommand> {
     let raw: RawSegmentCommand32 = pod::read_pod(data, offset)?;
     let nsects = endian.interpret_u32(raw.nsects);
+    budget.claim_sections(nsects as usize)?;
     let sect_offset = offset + size_of::<RawSegmentCommand32>();
     let sections = parse_sections_32(data, endian, sect_offset, nsects)?;
 
@@ -192,9 +260,11 @@ fn parse_segment_64(
     offset: usize,
     endian: Endian,
     segments: &mut Vec<Segment>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<LoadCommand> {
     let raw: RawSegmentCommand64 = pod::read_pod(data, offset)?;
     let nsects = endian.interpret_u32(raw.nsects);
+    budget.claim_sections(nsects as usize)?;
     let sect_offset = offset + size_of::<RawSegmentCommand64>();
     let sections = parse_sections_64(data, endian, sect_offset, nsects)?;
 
@@ -323,7 +393,12 @@ fn parse_linkedit(cmd_data: &[u8], endian: Endian) -> Result<LinkeditData> {
     })
 }
 
-fn parse_dylib(cmd_data: &[u8], cmd: u32, endian: Endian) -> Result<LoadCommand> {
+fn parse_dylib(
+    cmd_data: &[u8],
+    cmd: u32,
+    endian: Endian,
+    budget: &mut ParseBudget<'_>,
+) -> Result<LoadCommand> {
     let raw: RawDylibCommand = pod::read_pod(cmd_data, 0)?;
     let name_off = endian.interpret_u32(raw.name_offset) as usize;
     let marker = endian.interpret_u32(raw.timestamp);
@@ -336,7 +411,7 @@ fn parse_dylib(cmd_data: &[u8], cmd: u32, endian: Endian) -> Result<LoadCommand>
     // parse it separately yet but the name extraction is correct.
     let is_dylib_use = marker == DYLIB_USE_MARKER;
 
-    let name = read_lc_string(cmd_data, name_off)?;
+    let name = read_lc_string(cmd_data, name_off, budget)?;
 
     let data = DylibData {
         name,
@@ -355,10 +430,14 @@ fn parse_dylib(cmd_data: &[u8], cmd: u32, endian: Endian) -> Result<LoadCommand>
     })
 }
 
-fn parse_string_cmd(cmd_data: &[u8], endian: Endian) -> Result<StringData> {
+fn parse_string_cmd(
+    cmd_data: &[u8],
+    endian: Endian,
+    budget: &mut ParseBudget<'_>,
+) -> Result<StringData> {
     let raw: RawStringCommand = pod::read_pod(cmd_data, 0)?;
     let str_off = endian.interpret_u32(raw.string_offset) as usize;
-    let value = read_lc_string(cmd_data, str_off)?;
+    let value = read_lc_string(cmd_data, str_off, budget)?;
     Ok(StringData { value })
 }
 
@@ -388,7 +467,11 @@ fn parse_encryption_info_64(cmd_data: &[u8], endian: Endian) -> Result<Encryptio
     })
 }
 
-fn parse_linker_option(cmd_data: &[u8], endian: Endian) -> Result<LoadCommand> {
+fn parse_linker_option(
+    cmd_data: &[u8],
+    endian: Endian,
+    budget: &mut ParseBudget<'_>,
+) -> Result<LoadCommand> {
     let raw: RawLinkerOptionCommand = pod::read_pod(cmd_data, 0)?;
     let count = endian.interpret_u32(raw.count) as usize;
     let payload = &cmd_data[size_of::<RawLinkerOptionCommand>()..];
@@ -402,11 +485,13 @@ fn parse_linker_option(cmd_data: &[u8], endian: Endian) -> Result<LoadCommand> {
         match payload[pos..].iter().position(|&b| b == 0) {
             Some(null_pos) => {
                 let s = String::from_utf8_lossy(&payload[pos..pos + null_pos]).into_owned();
+                budget.claim_string_bytes(s.len())?;
                 strings.push(s);
                 pos += null_pos + 1;
             }
             None => {
                 let s = String::from_utf8_lossy(&payload[pos..]).into_owned();
+                budget.claim_string_bytes(s.len())?;
                 strings.push(s);
                 break;
             }
@@ -426,14 +511,23 @@ fn parse_note(cmd_data: &[u8], endian: Endian) -> Result<LoadCommand> {
     }))
 }
 
-fn parse_fileset_entry(cmd_data: &[u8], endian: Endian) -> Result<LoadCommand> {
+fn parse_fileset_entry(
+    cmd_data: &[u8],
+    file_len: usize,
+    endian: Endian,
+    budget: &mut ParseBudget<'_>,
+) -> Result<LoadCommand> {
     let raw: RawFilesetEntryCommand = pod::read_pod(cmd_data, 0)?;
     let id_off = endian.interpret_u32(raw.entry_id_offset) as usize;
-    let entry_id = read_lc_string(cmd_data, id_off)?;
+    let entry_id = read_lc_string(cmd_data, id_off, budget)?;
+    let file_offset = endian.interpret_u64(raw.fileoff);
+    if file_offset >= file_len as u64 {
+        return Err(Error::bounds(file_offset, 1, file_len as u64));
+    }
 
     Ok(LoadCommand::FilesetEntry(FilesetEntryData {
         vm_addr: endian.interpret_u64(raw.vmaddr),
-        file_offset: endian.interpret_u64(raw.fileoff),
+        file_offset,
         entry_id,
     }))
 }
@@ -471,14 +565,63 @@ fn parse_routines_64(cmd_data: &[u8], endian: Endian) -> Result<RoutinesData> {
 
 /// Read a null-terminated string from within a load command's data.
 /// `str_offset` is relative to the start of the load command.
-fn read_lc_string(cmd_data: &[u8], str_offset: usize) -> Result<String> {
+fn read_lc_string(
+    cmd_data: &[u8],
+    str_offset: usize,
+    budget: &mut ParseBudget<'_>,
+) -> Result<String> {
     if str_offset >= cmd_data.len() {
-        return Err(Error::Command(format!(
+        return Err(Error::command(format!(
             "lc_str offset {str_offset:#x} is beyond command size {}",
             cmd_data.len()
         )));
     }
     let slice = &cmd_data[str_offset..];
     let end = slice.iter().position(|&b| b == 0).unwrap_or(slice.len());
+    budget.claim_string_bytes(end)?;
     Ok(String::from_utf8_lossy(&slice[..end]).into_owned())
+}
+
+struct ParseBudget<'limits> {
+    limits: &'limits ParseLimits,
+    sections: usize,
+    string_bytes: usize,
+}
+
+impl<'limits> ParseBudget<'limits> {
+    fn new(limits: &'limits ParseLimits) -> Self {
+        Self {
+            limits,
+            sections: 0,
+            string_bytes: 0,
+        }
+    }
+
+    fn claim_sections(&mut self, count: usize) -> Result<()> {
+        self.sections = self
+            .sections
+            .checked_add(count)
+            .ok_or_else(|| Error::limit("section count overflows usize"))?;
+        if self.sections > self.limits.max_sections {
+            return Err(Error::limit(format!(
+                "image claims {} sections, exceeding max_sections={}",
+                self.sections, self.limits.max_sections
+            )));
+        }
+        Ok(())
+    }
+
+    fn claim_string_bytes(&mut self, count: usize) -> Result<()> {
+        self.string_bytes = self
+            .string_bytes
+            .checked_add(count)
+            .ok_or_else(|| Error::limit("load-command string bytes overflow usize"))?;
+        if self.string_bytes > self.limits.max_string_bytes {
+            return Err(Error::limit(format!(
+                "load-command strings total {} bytes, exceeding max_string_bytes={}",
+                self.string_bytes, self.limits.max_string_bytes
+            )));
+        }
+        Ok(())
+    }
 }

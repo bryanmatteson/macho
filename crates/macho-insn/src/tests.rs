@@ -138,7 +138,9 @@ fn encode_branch_arm64_bl() {
 fn decode_iter_x86_64() {
     // NOP NOP RET
     let bytes = [0x90, 0x90, 0xC3];
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
+    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(insns.len(), 3);
     assert_eq!(insns[0].kind, InsnKind::Nop);
     assert_eq!(insns[0].offset, 0);
@@ -194,7 +196,8 @@ fn arm64_tbnz_high_bit_relocate_preserves_b40() {
 
     // Relocate to 0x3000 — target should still be 0x2020
     let relocated = relocate_insn(&bytes, 0x2000, 0x3000, Arch::Arm64).unwrap();
-    let relocated_word = u32::from_le_bytes([relocated[0], relocated[1], relocated[2], relocated[3]]);
+    let relocated_word =
+        u32::from_le_bytes([relocated[0], relocated[1], relocated[2], relocated[3]]);
     // Verify b40 field (bits[23:19]) is preserved
     let b40_after = (relocated_word >> 19) & 0x1F;
     assert_eq!(b40_after, 17, "b40 field corrupted during relocation");
@@ -284,7 +287,9 @@ fn arm64_br_register() {
     let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
     assert!(matches!(
         insn.kind,
-        InsnKind::Branch(BranchInfo { target: BranchTarget::Register })
+        InsnKind::Branch(BranchInfo {
+            target: BranchTarget::Register
+        })
     ));
 }
 
@@ -295,7 +300,9 @@ fn arm64_blr_register() {
     let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
     assert!(matches!(
         insn.kind,
-        InsnKind::Call(BranchInfo { target: BranchTarget::Register })
+        InsnKind::Call(BranchInfo {
+            target: BranchTarget::Register
+        })
     ));
 }
 
@@ -347,20 +354,24 @@ fn decode_error_short_arm64() {
     assert!(decode_one(&[0x00, 0x00], 0, Arch::Arm64).is_err());
 }
 
-// ── decode_iter skips invalid bytes without stack overflow ──
+// ── strict and lossy invalid-byte behavior ──
 
 #[test]
-fn decode_iter_skips_invalid_bytes() {
-    // 256 invalid bytes (0xFF) followed by NOP + RET.
-    // Should not stack-overflow and should find the trailing instructions.
-    let mut bytes = vec![0xFFu8; 256];
+fn decode_iter_stops_and_lossy_records_invalid_bytes() {
+    let mut bytes = vec![0x06u8; 256];
     bytes.push(0x90); // NOP
     bytes.push(0xC3); // RET
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
-    assert!(insns.len() >= 2);
-    let last_two: Vec<_> = insns.iter().rev().take(2).collect();
-    assert_eq!(last_two[0].kind, InsnKind::Return);
-    assert_eq!(last_two[1].kind, InsnKind::Nop);
+    let mut strict = decode_iter(&bytes, 0x1000, Arch::X86_64);
+    assert!(strict.next().unwrap().is_err());
+    assert!(strict.next().is_none());
+
+    let report = decode_lossy(&bytes, 0x1000, Arch::X86_64);
+    assert_eq!(report.gaps.len(), 1);
+    assert_eq!(report.gaps[0].offset, 0);
+    assert_eq!(report.gaps[0].len, 256);
+    assert_eq!(report.instructions.len(), 2);
+    assert_eq!(report.instructions[0].kind, InsnKind::Nop);
+    assert_eq!(report.instructions[1].kind, InsnKind::Return);
 }
 
 // ── instruction_len ──
@@ -452,10 +463,14 @@ fn resolve_branch_target_none_for_nop() {
 
 #[test]
 fn error_display() {
-    let de = DecodeError { message: "test".into() };
+    let de = DecodeError {
+        message: "test".into(),
+    };
     assert_eq!(format!("{de}"), "decode: test");
 
-    let ee = EncodeError { message: "test".into() };
+    let ee = EncodeError {
+        message: "test".into(),
+    };
     assert_eq!(format!("{ee}"), "encode: test");
 }
 
@@ -488,7 +503,13 @@ fn x86_64_mov_rsp_disp_rdi_operands() {
     let insn = decode_one(&[0x48, 0x89, 0x7C, 0x24, 0x08], 0x1000, Arch::X86_64).unwrap();
     let ops = insn.operands();
     assert_eq!(ops.len(), 2, "expected 2 operands, got: {ops:?}");
-    assert!(matches!(ops[0], Operand::Mem { base: Reg { num: 4, .. }, disp: 8 })); // [rsp+8]
+    assert!(matches!(
+        ops[0],
+        Operand::Mem {
+            base: Reg { num: 4, .. },
+            disp: 8
+        }
+    )); // [rsp+8]
     assert_eq!(ops[1], Operand::Reg(Reg::gpr(7))); // rdi
 }
 
@@ -514,7 +535,13 @@ fn arm64_stp_x0_x1_sp_operands() {
     assert_eq!(ops.len(), 3, "expected 3 operands for STP, got: {ops:?}");
     assert_eq!(ops[0], Operand::Reg(Reg::gpr(0))); // x0
     assert_eq!(ops[1], Operand::Reg(Reg::gpr(1))); // x1
-    assert!(matches!(ops[2], Operand::Mem { base: Reg { num: 31, .. }, disp: -16 }));
+    assert!(matches!(
+        ops[2],
+        Operand::Mem {
+            base: Reg { num: 31, .. },
+            disp: -16
+        }
+    ));
 }
 
 #[test]
@@ -526,7 +553,13 @@ fn arm64_str_x8_sp_operands() {
     let ops = insn.operands();
     assert_eq!(ops.len(), 2, "expected 2 operands for STR, got: {ops:?}");
     assert_eq!(ops[0], Operand::Reg(Reg::gpr(8))); // x8
-    assert!(matches!(ops[2 - 1], Operand::Mem { base: Reg { num: 31, .. }, disp: 0 }));
+    assert!(matches!(
+        ops[2 - 1],
+        Operand::Mem {
+            base: Reg { num: 31, .. },
+            disp: 0
+        }
+    ));
 }
 
 #[test]
@@ -549,8 +582,8 @@ fn arm64_fmov_d0_d1_operands() {
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     let ops = insn.operands();
     assert_eq!(ops.len(), 2, "expected 2 operands for FMOV, got: {ops:?}");
-    assert_eq!(ops[0], Operand::Reg(Reg::fp(0)));  // d0
-    assert_eq!(ops[1], Operand::Reg(Reg::fp(1)));  // d1
+    assert_eq!(ops[0], Operand::Reg(Reg::fp(0))); // d0
+    assert_eq!(ops[1], Operand::Reg(Reg::fp(1))); // d1
 }
 
 // ── writes_implicit_gpr0 flag ──
@@ -646,9 +679,15 @@ fn arm64_stp_d0_d1_sp_operands() {
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     let ops = insn.operands();
     assert_eq!(ops.len(), 3, "expected 3 operands for FP STP, got: {ops:?}");
-    assert_eq!(ops[0], Operand::Reg(Reg::fp(0)));  // d0
-    assert_eq!(ops[1], Operand::Reg(Reg::fp(1)));  // d1
-    assert!(matches!(ops[2], Operand::Mem { base: Reg { num: 31, .. }, .. }));
+    assert_eq!(ops[0], Operand::Reg(Reg::fp(0))); // d0
+    assert_eq!(ops[1], Operand::Reg(Reg::fp(1))); // d1
+    assert!(matches!(
+        ops[2],
+        Operand::Mem {
+            base: Reg { num: 31, .. },
+            ..
+        }
+    ));
 }
 
 // ── ARM64 SUB immediate ──
@@ -676,7 +715,11 @@ fn arm64_stp_post_index_gpr_operands() {
     let word: u32 = 0xA881_07E0;
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     let ops = insn.operands();
-    assert_eq!(ops.len(), 3, "expected 3 operands for post-index STP, got: {ops:?}");
+    assert_eq!(
+        ops.len(),
+        3,
+        "expected 3 operands for post-index STP, got: {ops:?}"
+    );
     assert_eq!(ops[0], Operand::Reg(Reg::gpr(0)));
     assert_eq!(ops[1], Operand::Reg(Reg::gpr(1)));
 }
@@ -697,7 +740,8 @@ fn x86_64_absolute_addr_uses_sentinel_base() {
     let ops = insn.operands();
     // Should have Mem with base = Gpr(255) sentinel (no base register)
     assert!(
-        ops.iter().any(|op| matches!(op, Operand::Mem { base, .. } if base.num == 255)),
+        ops.iter()
+            .any(|op| matches!(op, Operand::Mem { base, .. } if base.num == 255)),
         "expected Gpr(255) sentinel for absolute address, got: {ops:?}"
     );
 }
@@ -731,23 +775,29 @@ fn x86_64_decode_single_invalid_byte() {
 
 #[test]
 fn decode_iter_empty_x86_64() {
-    let insns: Vec<_> = decode_iter(&[], 0x1000, Arch::X86_64).collect();
+    let insns: Vec<_> = decode_iter(&[], 0x1000, Arch::X86_64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(insns.is_empty());
 }
 
 #[test]
 fn decode_iter_empty_arm64() {
-    let insns: Vec<_> = decode_iter(&[], 0x1000, Arch::Arm64).collect();
+    let insns: Vec<_> = decode_iter(&[], 0x1000, Arch::Arm64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert!(insns.is_empty());
 }
 
 #[test]
 fn decode_iter_all_invalid_x86_64() {
-    // 0x06 = PUSH ES, invalid in 64-bit mode. Iterator skips 1 byte at a time
-    // and never finds a valid instruction, so yields nothing.
     let bytes = [0x06u8; 4];
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
-    assert!(insns.is_empty(), "all-invalid bytes should yield 0 items, got {}", insns.len());
+    let results: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_err());
+    let report = decode_lossy(&bytes, 0x1000, Arch::X86_64);
+    assert!(report.instructions.is_empty());
+    assert_eq!(report.gaps[0].len, 4);
 }
 
 // ── Category 5: Disassembly Edge Cases ──
@@ -813,7 +863,11 @@ fn x86_64_disassemble_stops_at_invalid() {
     let result = disassemble(&[0x90, 0x06], 0x1000, Arch::X86_64).unwrap();
     assert_eq!(result.len(), 1, "should stop at first invalid byte");
     assert_eq!(result[0].0, 0x1000);
-    assert!(result[0].1.to_lowercase().contains("nop"), "got: {}", result[0].1);
+    assert!(
+        result[0].1.to_lowercase().contains("nop"),
+        "got: {}",
+        result[0].1
+    );
 }
 
 #[test]
@@ -838,7 +892,11 @@ fn arm64_add_shifted_reg_operands() {
     let word: u32 = 0x8B02_0020;
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     let ops = insn.operands();
-    assert_eq!(ops.len(), 3, "expected 3 operands for ADD shifted reg, got: {ops:?}");
+    assert_eq!(
+        ops.len(),
+        3,
+        "expected 3 operands for ADD shifted reg, got: {ops:?}"
+    );
     assert_eq!(ops[0], Operand::Reg(Reg::gpr(0)));
     assert_eq!(ops[1], Operand::Reg(Reg::gpr(1)));
     assert_eq!(ops[2], Operand::Reg(Reg::gpr(2)));
@@ -849,17 +907,28 @@ fn arm64_zero_operands_dmb() {
     // DMB ISH = 0xD503_3BBF — data memory barrier
     let word: u32 = 0xD503_3BBF;
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
-    assert!(insn.operands().is_empty(), "DMB should have 0 operands, got: {:?}", insn.operands());
+    assert!(
+        insn.operands().is_empty(),
+        "DMB should have 0 operands, got: {:?}",
+        insn.operands()
+    );
 }
 
 #[test]
 fn x86_64_negative_disp32_sign_extends() {
     // MOV rax, [rbp-0x80] = 48 8B 85 80 FF FF FF
-    let insn = decode_one(&[0x48, 0x8B, 0x85, 0x80, 0xFF, 0xFF, 0xFF], 0x1000, Arch::X86_64).unwrap();
+    let insn = decode_one(
+        &[0x48, 0x8B, 0x85, 0x80, 0xFF, 0xFF, 0xFF],
+        0x1000,
+        Arch::X86_64,
+    )
+    .unwrap();
     let ops = insn.operands();
     assert!(ops.len() >= 2, "got: {ops:?}");
     match &ops[1] {
-        Operand::Mem { disp, .. } => assert_eq!(*disp, -128, "disp32 0xFFFFFF80 must sign-extend to -128"),
+        Operand::Mem { disp, .. } => {
+            assert_eq!(*disp, -128, "disp32 0xFFFFFF80 must sign-extend to -128")
+        }
         other => panic!("expected Mem, got {other:?}"),
     }
 }
@@ -876,7 +945,9 @@ fn x86_64_nop_no_implicit_gpr0() {
 fn decode_iter_offset_tracking_x86_64() {
     // NOP(1) + CALL rel32(5) + RET(1)
     let bytes = [0x90, 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3];
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
+    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(insns.len(), 3);
     assert_eq!(insns[0].offset, 0);
     assert_eq!(insns[1].offset, 1);
@@ -892,7 +963,9 @@ fn decode_iter_offset_tracking_arm64() {
     bytes.extend_from_slice(&nop.to_le_bytes());
     bytes.extend_from_slice(&bl.to_le_bytes());
     bytes.extend_from_slice(&ret.to_le_bytes());
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::Arm64).collect();
+    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::Arm64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(insns.len(), 3);
     assert_eq!(insns[0].offset, 0);
     assert_eq!(insns[1].offset, 4);
@@ -901,13 +974,18 @@ fn decode_iter_offset_tracking_arm64() {
 
 #[test]
 fn decode_iter_skip_1_byte_x86_64() {
-    // 0x06 (PUSH ES, invalid in 64-bit) + NOP
-    // Iterator: offset 0 fails → skip to 1, offset 1 decodes NOP → done
     let bytes = [0x06, 0x90];
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::X86_64).collect();
-    assert_eq!(insns.len(), 1, "expected exactly 1 instruction after skip");
-    assert_eq!(insns[0].kind, InsnKind::Nop);
-    assert_eq!(insns[0].offset, 1);
+    assert!(
+        decode_iter(&bytes, 0x1000, Arch::X86_64)
+            .next()
+            .unwrap()
+            .is_err()
+    );
+    let report = decode_lossy(&bytes, 0x1000, Arch::X86_64);
+    assert_eq!(report.gaps.len(), 1);
+    assert_eq!(report.instructions.len(), 1);
+    assert_eq!(report.instructions[0].kind, InsnKind::Nop);
+    assert_eq!(report.instructions[0].offset, 1);
 }
 
 #[test]
@@ -917,7 +995,9 @@ fn decode_iter_large_arm64() {
     for _ in 0..256 {
         bytes.extend_from_slice(&nop_word);
     }
-    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::Arm64).collect();
+    let insns: Vec<_> = decode_iter(&bytes, 0x1000, Arch::Arm64)
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
     assert_eq!(insns.len(), 256);
     for (i, insn) in insns.iter().enumerate() {
         assert_eq!(insn.offset, i * 4);
@@ -939,15 +1019,27 @@ fn instruction_len_short_arm64_fails() {
 #[test]
 fn instruction_len_x86_64_multi_byte() {
     // MOV [rsp+0x08], rdi = 48 89 7C 24 08 (5 bytes)
-    assert_eq!(instruction_len(&[0x48, 0x89, 0x7C, 0x24, 0x08], Arch::X86_64).unwrap(), 5);
+    assert_eq!(
+        instruction_len(&[0x48, 0x89, 0x7C, 0x24, 0x08], Arch::X86_64).unwrap(),
+        5
+    );
 }
 
 #[test]
 fn instruction_len_arm64_always_4() {
     // NOP, BL, RET — all 4 bytes
-    assert_eq!(instruction_len(&0xD503_201Fu32.to_le_bytes(), Arch::Arm64).unwrap(), 4);
-    assert_eq!(instruction_len(&0x9400_0040u32.to_le_bytes(), Arch::Arm64).unwrap(), 4);
-    assert_eq!(instruction_len(&0xD65F_03C0u32.to_le_bytes(), Arch::Arm64).unwrap(), 4);
+    assert_eq!(
+        instruction_len(&0xD503_201Fu32.to_le_bytes(), Arch::Arm64).unwrap(),
+        4
+    );
+    assert_eq!(
+        instruction_len(&0x9400_0040u32.to_le_bytes(), Arch::Arm64).unwrap(),
+        4
+    );
+    assert_eq!(
+        instruction_len(&0xD65F_03C0u32.to_le_bytes(), Arch::Arm64).unwrap(),
+        4
+    );
 }
 
 // ── Category 8: resolve_branch_target & Arch ──
@@ -963,7 +1055,12 @@ fn resolve_target_register_none() {
 fn resolve_target_indirect_jmp_none() {
     // JMP [rax] = FF 20
     let insn = decode_one(&[0xFF, 0x20], 0x1000, Arch::X86_64).unwrap();
-    assert!(matches!(insn.kind, InsnKind::Branch(BranchInfo { target: BranchTarget::Indirect })));
+    assert!(matches!(
+        insn.kind,
+        InsnKind::Branch(BranchInfo {
+            target: BranchTarget::Indirect
+        })
+    ));
     assert_eq!(resolve_branch_target(&insn, 0x1000), None);
 }
 
@@ -971,7 +1068,12 @@ fn resolve_target_indirect_jmp_none() {
 fn resolve_target_indirect_call_none() {
     // CALL [rax] = FF 10
     let insn = decode_one(&[0xFF, 0x10], 0x1000, Arch::X86_64).unwrap();
-    assert!(matches!(insn.kind, InsnKind::Call(BranchInfo { target: BranchTarget::Indirect })));
+    assert!(matches!(
+        insn.kind,
+        InsnKind::Call(BranchInfo {
+            target: BranchTarget::Indirect
+        })
+    ));
     assert_eq!(resolve_branch_target(&insn, 0x1000), None);
 }
 
@@ -1018,8 +1120,14 @@ fn arm64_braa_is_branch_register() {
     let word: u32 = 0xD71F_0210;
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     assert!(
-        matches!(insn.kind, InsnKind::Branch(BranchInfo { target: BranchTarget::Register })),
-        "expected Branch(Register), got {:?}", insn.kind
+        matches!(
+            insn.kind,
+            InsnKind::Branch(BranchInfo {
+                target: BranchTarget::Register
+            })
+        ),
+        "expected Branch(Register), got {:?}",
+        insn.kind
     );
 }
 
@@ -1029,8 +1137,14 @@ fn arm64_blraa_is_call_register() {
     let word: u32 = 0xD73F_0100;
     let insn = decode_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
     assert!(
-        matches!(insn.kind, InsnKind::Call(BranchInfo { target: BranchTarget::Register })),
-        "expected Call(Register), got {:?}", insn.kind
+        matches!(
+            insn.kind,
+            InsnKind::Call(BranchInfo {
+                target: BranchTarget::Register
+            })
+        ),
+        "expected Call(Register), got {:?}",
+        insn.kind
     );
 }
 
@@ -1056,7 +1170,12 @@ fn arm64_bcond_bne_relocation_preserves_cond() {
     assert_eq!(resolve_branch_target(&insn, 0x1040), Some(0x1080));
     // Verify NE condition field (bits[3:0] = 1) preserved
     let new_word = u32::from_le_bytes([relocated[0], relocated[1], relocated[2], relocated[3]]);
-    assert_eq!(new_word & 0xF, 1, "B.NE cond=1 must be preserved, got {}", new_word & 0xF);
+    assert_eq!(
+        new_word & 0xF,
+        1,
+        "B.NE cond=1 must be preserved, got {}",
+        new_word & 0xF
+    );
 }
 
 #[test]
@@ -1079,7 +1198,10 @@ fn arm64_relocate_non_pc_relative_unchanged() {
     let word: u32 = 0x9100_A820;
     let bytes = word.to_le_bytes();
     let relocated = relocate_insn(&bytes, 0x1000, 0x2000, Arch::Arm64).unwrap();
-    assert_eq!(relocated, bytes, "non-PC-relative instruction should be unchanged after relocation");
+    assert_eq!(
+        relocated, bytes,
+        "non-PC-relative instruction should be unchanged after relocation"
+    );
 }
 
 #[test]
@@ -1088,7 +1210,11 @@ fn x86_64_nop_encodings_decode_as_nop() {
     for size in 1..=15 {
         let nops = encode_nop(Arch::X86_64, size).unwrap();
         let insn = decode_one(&nops, 0x1000, Arch::X86_64).unwrap();
-        assert_eq!(insn.kind, InsnKind::Nop, "size-{size} NOP didn't decode as Nop");
+        assert_eq!(
+            insn.kind,
+            InsnKind::Nop,
+            "size-{size} NOP didn't decode as Nop"
+        );
         assert_eq!(insn.len, size, "size-{size} NOP decoded as wrong length");
     }
 }
@@ -1097,4 +1223,105 @@ fn x86_64_nop_encodings_decode_as_nop() {
 fn reg_display() {
     assert_eq!(format!("{}", Reg::gpr(0)), "gpr0");
     assert_eq!(format!("{}", Reg::fp(3)), "fp3");
+}
+
+// ── writes_op0_reg semantic tests ──
+//
+// The ABI inference in `macho-analysis` relies on `writes_op0_reg` as the
+// ground-truth predicate for whether an instruction overwrites its first
+// register operand. These tests pin the contract on both architectures.
+
+#[test]
+fn x86_mov_reg_reg_writes_dest() {
+    // MOV rdi, rax  (48 89 c7)
+    let insn = decode_one(&[0x48, 0x89, 0xC7], 0x1000, Arch::X86_64).unwrap();
+    assert!(insn.writes_op0_reg);
+    assert_eq!(insn.op0_write_target(), Some(Reg::gpr(7)));
+}
+
+#[test]
+fn x86_add_reg_reg_writes_dest() {
+    // ADD rdi, rax  (48 01 c7)  — in-place pointer arithmetic.
+    let insn = decode_one(&[0x48, 0x01, 0xC7], 0x1000, Arch::X86_64).unwrap();
+    assert!(
+        insn.writes_op0_reg,
+        "ADD must write op0 (missed by the old operand-shape heuristic)"
+    );
+    assert_eq!(insn.op0_write_target(), Some(Reg::gpr(7)));
+}
+
+#[test]
+fn x86_cmp_reg_imm_does_not_write() {
+    // CMP rdi, 0  (48 83 ff 00) — flags only.
+    let insn = decode_one(&[0x48, 0x83, 0xFF, 0x00], 0x1000, Arch::X86_64).unwrap();
+    assert!(!insn.writes_op0_reg, "CMP must not count as a write to op0");
+}
+
+#[test]
+fn x86_test_reg_reg_does_not_write() {
+    // TEST rdi, rdi  (48 85 ff) — flags only.
+    let insn = decode_one(&[0x48, 0x85, 0xFF], 0x1000, Arch::X86_64).unwrap();
+    assert!(!insn.writes_op0_reg);
+}
+
+#[test]
+fn x86_store_does_not_write_op0() {
+    // MOV [rdi], rax  (48 89 07)  — op0 is the memory operand, not a reg.
+    let insn = decode_one(&[0x48, 0x89, 0x07], 0x1000, Arch::X86_64).unwrap();
+    assert!(!insn.writes_op0_reg);
+}
+
+#[test]
+fn arm64_ldr_writes_dest() {
+    // LDR x0, [x1]  — unsigned offset form, imm12=0, Rn=1, Rt=0.
+    // 11 111 001 01 000000000000 00001 00000 = 0xF940_0020
+    let bytes = 0xF940_0020u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(insn.writes_op0_reg, "LDR must write Rt");
+}
+
+#[test]
+fn arm64_str_does_not_write_op0() {
+    // STR x0, [x1]  — imm12=0, Rn=1, Rt=0.
+    // 11 111 001 00 000000000000 00001 00000 = 0xF900_0020
+    let bytes = 0xF900_0020u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(
+        !insn.writes_op0_reg,
+        "STR must not write op0 — op0 is the stored source reg"
+    );
+}
+
+#[test]
+fn arm64_ldp_writes_dest_pair() {
+    // LDP x0, x1, [sp]  — signed offset form, L=1.
+    // 10 101 001 01 imm7=0 Rt2=1 Rn=31 Rt=0 = 0xA940_07E0
+    let bytes = 0xA940_07E0u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(insn.writes_op0_reg);
+}
+
+#[test]
+fn arm64_stp_does_not_write_op0() {
+    // STP x0, x1, [sp, #-16]!  — L=0.
+    // 10 101 001 10 imm7=0x78 Rt2=1 Rn=31 Rt=0 = 0xA9BF_07E0
+    let bytes = 0xA9BF_07E0u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(!insn.writes_op0_reg);
+}
+
+#[test]
+fn arm64_add_imm_writes_dest() {
+    // ADD x0, x31, #42 — shown in existing test, = 0x9100_ABE0
+    let bytes = 0x9100_ABE0u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(insn.writes_op0_reg);
+}
+
+#[test]
+fn arm64_ret_does_not_write_op0() {
+    // RET  = 0xD65F_03C0
+    let bytes = 0xD65F_03C0u32.to_le_bytes();
+    let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
+    assert!(!insn.writes_op0_reg);
 }

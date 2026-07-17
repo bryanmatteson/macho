@@ -79,15 +79,15 @@ fn find_first_data_offset(macho: &MachoFile<'_>) -> usize {
     // the header and commands are already part of __TEXT, so we need to find
     // where the content AFTER the commands starts. That's the page-aligned
     // boundary after header + sizeofcmds.
-    let header_end = macho.bitness().header_size() + macho.header().sizeofcmds as usize;
+    let header_end = macho.bitness().header_size() + macho.header().load_commands_size() as usize;
     let page_size = infer_page_size(macho);
     align_up(header_end, page_size)
 }
 
 fn infer_page_size(macho: &MachoFile<'_>) -> usize {
     for seg in macho.segments() {
-        if seg.file_size > 0 && seg.file_offset.0 > 0 {
-            let off = seg.file_offset.0 as usize;
+        if seg.file_size() > 0 && seg.file_offset().0 > 0 {
+            let off = seg.file_offset().0 as usize;
             if off % 0x4000 == 0 {
                 return 0x4000;
             }

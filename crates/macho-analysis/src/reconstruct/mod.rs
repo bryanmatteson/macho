@@ -1,8 +1,14 @@
+/// The c module.
 pub mod c;
+/// The cpp module.
 pub mod cpp;
+/// The objc module.
 pub mod objc;
+/// The prompt module.
 pub mod prompt;
+/// The schema module.
 pub mod schema;
+/// The validate module.
 pub mod validate;
 
 use serde::{Deserialize, Serialize};
@@ -16,92 +22,135 @@ pub use schema::{
     validate_bundle,
 };
 pub use validate::{
-    ClangSyntaxValidator, EntityCoverageValidator, ModelOutputValidator, OutputContractValidator,
-    ValidationIssue, ValidationReport, ValidationSeverity, validate_output,
+    EntityCoverageValidator, ModelOutputValidator, OutputContractValidator, ValidationIssue,
+    ValidationReport, ValidationSeverity, validate_output,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ConfidenceSummary type.
 pub struct ConfidenceSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The overall field.
     pub overall: Option<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The highlights field.
     pub highlights: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The InferredDeclaration type.
 pub struct InferredDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The entity_id field.
     pub entity_id: Option<String>,
+    /// The label field.
     pub label: String,
+    /// The code field.
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The confidence field.
     pub confidence: Option<f32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The rationale field.
     pub rationale: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The references field.
     pub references: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The InferredUnresolved type.
 pub struct InferredUnresolved {
+    /// The entity_id field.
     pub entity_id: String,
+    /// The reason field.
     pub reason: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The fallback field.
     pub fallback: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ModelOutput type.
 pub struct ModelOutput {
+    /// The header_name field.
     pub header_name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The declarations field.
     pub declarations: Vec<InferredDeclaration>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The dependencies field.
     pub dependencies: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The unresolved field.
     pub unresolved: Vec<InferredUnresolved>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The confidence_summary field.
     pub confidence_summary: Option<ConfidenceSummary>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The notes field.
     pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The SidecarOutput type.
 pub struct SidecarOutput {
+    /// The schema_version field.
     pub schema_version: u32,
+    /// The header_unit_id field.
     pub header_unit_id: String,
+    /// The header_name field.
     pub header_name: String,
+    /// The valid field.
     pub valid: bool,
+    /// The generated_header field.
     pub generated_header: String,
+    /// The model_output field.
     pub model_output: ModelOutput,
+    /// The validation field.
     pub validation: ValidationReport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The prompt field.
     pub prompt: Option<PromptSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The repair_prompt field.
     pub repair_prompt: Option<PromptSet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The InferenceAttempt type.
 pub struct InferenceAttempt {
+    /// The prompt field.
     pub prompt: PromptSet,
+    /// The raw_response field.
     pub raw_response: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The parsed_output field.
     pub parsed_output: Option<ModelOutput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The validation field.
     pub validation: Option<ValidationReport>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The parse_error field.
     pub parse_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The InferenceRun type.
 pub struct InferenceRun {
+    /// The success field.
     pub success: bool,
+    /// The attempts field.
     pub attempts: Vec<InferenceAttempt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The sidecar field.
     pub sidecar: Option<SidecarOutput>,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// The InferenceOptions type.
 pub struct InferenceOptions {
+    /// The max_attempts field.
     pub max_attempts: usize,
 }
 
@@ -111,24 +160,30 @@ impl Default for InferenceOptions {
     }
 }
 
+/// The HeaderInferenceModel type.
 pub trait HeaderInferenceModel {
+    /// Performs infer.
     fn infer(&self, prompt: &PromptSet) -> crate::Result<String>;
 }
 
 #[derive(Debug, Clone)]
+/// The HeaderInferenceSession type.
 pub struct HeaderInferenceSession {
     bundle: EvidenceBundle,
 }
 
 impl HeaderInferenceSession {
+    /// Performs new.
     pub fn new(bundle: EvidenceBundle) -> Self {
         Self { bundle }
     }
 
+    /// Performs bundle.
     pub fn bundle(&self) -> &EvidenceBundle {
         &self.bundle
     }
 
+    /// Performs validate_bundle.
     pub fn validate_bundle(&self) -> crate::Result<()> {
         let report = validate_bundle(&self.bundle);
         if report.valid {
@@ -140,21 +195,24 @@ impl HeaderInferenceSession {
             .map(|issue| format!("{}: {}", issue.code, issue.message))
             .collect::<Vec<_>>()
             .join("; ");
-        Err(crate::Error::Validation(format!(
+        Err(crate::Error::validation(format!(
             "invalid evidence bundle: {joined}"
         )))
     }
 
+    /// Performs prompt.
     pub fn prompt(&self) -> crate::Result<PromptSet> {
         self.validate_bundle()?;
         build_prompt(&self.bundle)
     }
 
+    /// Performs parse_model_output.
     pub fn parse_model_output(&self, json: &str) -> crate::Result<ModelOutput> {
         serde_json::from_str(json)
-            .map_err(|err| crate::Error::Validation(format!("parse model output JSON: {err}")))
+            .map_err(|err| crate::Error::validation(format!("parse model output JSON: {err}")))
     }
 
+    /// Performs validate.
     pub fn validate(
         &self,
         output: &ModelOutput,
@@ -164,6 +222,7 @@ impl HeaderInferenceSession {
         validate_output(&self.bundle, output, validators)
     }
 
+    /// Performs apply.
     pub fn apply(
         &self,
         output: ModelOutput,
@@ -178,7 +237,7 @@ impl HeaderInferenceSession {
             Some(build_repair_prompt(
                 &self.bundle,
                 &serde_json::to_string_pretty(&output).map_err(|err| {
-                    crate::Error::Validation(format!("serialize model output: {err}"))
+                    crate::Error::validation(format!("serialize model output: {err}"))
                 })?,
                 &validation.issues,
             )?)
@@ -197,6 +256,7 @@ impl HeaderInferenceSession {
         })
     }
 
+    /// Performs run_with_model.
     pub fn run_with_model(
         &self,
         model: &dyn HeaderInferenceModel,
@@ -235,9 +295,7 @@ impl HeaderInferenceSession {
                     }
 
                     prompt = sidecar.repair_prompt.clone().ok_or_else(|| {
-                        crate::Error::Validation(
-                            "invalid inference sidecar missing repair prompt".into(),
-                        )
+                        crate::Error::validation("invalid inference sidecar missing repair prompt")
                     })?;
                 }
                 Err(err) => {
@@ -262,6 +320,7 @@ impl HeaderInferenceSession {
     }
 }
 
+/// Performs render_header.
 pub fn render_header(output: &ModelOutput) -> String {
     let mut rendered = String::new();
     rendered.push_str("/* Generated by macho header-infer. */\n");

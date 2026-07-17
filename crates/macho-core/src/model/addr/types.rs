@@ -1,15 +1,14 @@
 use std::fmt;
 use std::ops::{Add, Sub};
 
-use serde::Serialize;
-
 macro_rules! addr_type {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
         pub struct $name(pub u64);
 
         impl $name {
+            /// Performs as_usize.
             pub fn as_usize(self) -> usize {
                 self.0 as usize
             }

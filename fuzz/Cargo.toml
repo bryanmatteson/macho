@@ -1,0 +1,69 @@
+[package]
+name = "macho-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+macho-core = { path = "../crates/macho-core" }
+macho-insn = { path = "../crates/macho-insn" }
+macho-dyld = { path = "../crates/macho-dyld" }
+macho-codesign = { path = "../crates/macho-codesign" }
+macho-mutate = { path = "../crates/macho-mutate" }
+macho-dyld-cache = { path = "../crates/macho-dyld-cache" }
+
+[[bin]]
+name = "container"
+path = "fuzz_targets/container.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "load_commands"
+path = "fuzz_targets/load_commands.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dyld"
+path = "fuzz_targets/dyld.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codesign"
+path = "fuzz_targets/codesign.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "insn"
+path = "fuzz_targets/insn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mutation"
+path = "fuzz_targets/mutation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cache_fileset"
+path = "fuzz_targets/cache_fileset.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

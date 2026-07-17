@@ -1,8 +1,4 @@
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
-use std::path::PathBuf;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -10,37 +6,55 @@ use crate::reconstruct::schema::EvidenceBundle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// The ValidationSeverity type.
+#[non_exhaustive]
 pub enum ValidationSeverity {
+    /// The Error variant.
     Error,
+    /// The Warning variant.
     Warning,
+    /// The Info variant.
     Info,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ValidationIssue type.
 pub struct ValidationIssue {
+    /// The severity field.
     pub severity: ValidationSeverity,
+    /// The code field.
     pub code: String,
+    /// The message field.
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// The entity_id field.
     pub entity_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The ValidationReport type.
 pub struct ValidationReport {
+    /// The valid field.
     pub valid: bool,
     #[serde(default)]
+    /// The syntax_checked field.
     pub syntax_checked: bool,
     #[serde(default)]
+    /// The syntax_ok field.
     pub syntax_ok: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// The issues field.
     pub issues: Vec<ValidationIssue>,
 }
 
+/// The ModelOutputValidator type.
 pub trait ModelOutputValidator {
+    /// Performs is_syntax_validator.
     fn is_syntax_validator(&self) -> bool {
         false
     }
 
+    /// Performs validate.
     fn validate(
         &self,
         bundle: &EvidenceBundle,
@@ -50,6 +64,7 @@ pub trait ModelOutputValidator {
 }
 
 #[derive(Debug, Default)]
+/// The OutputContractValidator type.
 pub struct OutputContractValidator;
 
 impl ModelOutputValidator for OutputContractValidator {
@@ -116,6 +131,7 @@ impl ModelOutputValidator for OutputContractValidator {
 }
 
 #[derive(Debug, Default)]
+/// The EntityCoverageValidator type.
 pub struct EntityCoverageValidator;
 
 impl ModelOutputValidator for EntityCoverageValidator {
@@ -211,53 +227,7 @@ impl ModelOutputValidator for EntityCoverageValidator {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct ClangSyntaxValidator;
-
-impl ModelOutputValidator for ClangSyntaxValidator {
-    fn is_syntax_validator(&self) -> bool {
-        true
-    }
-
-    fn validate(
-        &self,
-        bundle: &EvidenceBundle,
-        _output: &crate::reconstruct::ModelOutput,
-        header_text: &str,
-    ) -> crate::Result<Vec<ValidationIssue>> {
-        let header_path = temp_path("header-infer", "h");
-        std::fs::write(&header_path, header_text)
-            .map_err(|err| crate::Error::Validation(format!("write temp header: {err}")))?;
-
-        let output = Command::new("clang")
-            .arg("-x")
-            .arg(bundle.header_unit.language.clang_language())
-            .arg(format!("-std={}", bundle.header_unit.language.clang_std()))
-            .arg("-fsyntax-only")
-            .arg(OsStr::new(&header_path))
-            .output()
-            .map_err(|err| crate::Error::Validation(format!("run clang: {err}")))?;
-
-        let _ = std::fs::remove_file(&header_path);
-
-        if output.status.success() {
-            return Ok(Vec::new());
-        }
-
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Ok(vec![ValidationIssue {
-            severity: ValidationSeverity::Error,
-            code: "HI006".into(),
-            message: if stderr.is_empty() {
-                "clang syntax validation failed".into()
-            } else {
-                format!("clang syntax validation failed: {stderr}")
-            },
-            entity_id: None,
-        }])
-    }
-}
-
+/// Performs validate_output.
 pub fn validate_output(
     bundle: &EvidenceBundle,
     output: &crate::reconstruct::ModelOutput,
@@ -303,12 +273,4 @@ pub fn validate_output(
         syntax_ok,
         issues,
     })
-}
-
-fn temp_path(prefix: &str, ext: &str) -> PathBuf {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    std::env::temp_dir().join(format!("macho-{prefix}-{nanos}.{ext}"))
 }

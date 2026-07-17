@@ -3,6 +3,7 @@ use super::types::{
 };
 use std::collections::BTreeMap;
 
+/// Performs render_header.
 pub fn render_header(unit: &CppHeaderUnit) -> String {
     let mut out = String::new();
     let ordered_classes = order_classes(&unit.classes);
@@ -38,7 +39,7 @@ pub fn render_header(unit: &CppHeaderUnit) -> String {
     out
 }
 
-fn order_classes<'a>(classes: &'a [CppClass]) -> Vec<&'a CppClass> {
+fn order_classes(classes: &[CppClass]) -> Vec<&CppClass> {
     let mut remaining: BTreeMap<String, &CppClass> = classes
         .iter()
         .map(|class| (class.name.clone(), class))
@@ -66,6 +67,7 @@ fn order_classes<'a>(classes: &'a [CppClass]) -> Vec<&'a CppClass> {
     ordered
 }
 
+/// Performs default_header_unit.
 pub fn default_header_unit(index: &CppUnifiedIndex) -> CppHeaderUnit {
     CppHeaderUnit {
         name: "recovered.hpp".to_string(),
@@ -110,7 +112,7 @@ fn render_class(class: &CppClass) -> String {
     out
 }
 
-fn dedup_functions<'a>(functions: &'a [CppFunctionDecl]) -> Vec<&'a CppFunctionDecl> {
+fn dedup_functions(functions: &[CppFunctionDecl]) -> Vec<&CppFunctionDecl> {
     let mut ordered: BTreeMap<String, &CppFunctionDecl> = BTreeMap::new();
     for function in functions {
         let key = function.overload_key();
@@ -185,11 +187,7 @@ fn render_function(function: &CppFunctionDecl, terminate: bool) -> String {
     if function.signature.noexcept {
         out.push_str(" noexcept");
     }
-    if terminate {
-        out.push(';');
-    } else {
-        out.push(';');
-    }
+    out.push(';');
     out
 }
 

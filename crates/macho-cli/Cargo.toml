@@ -6,11 +6,21 @@ rust-version.workspace = true
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Thin CLI wrapper for macho"
+description = "Command-line delivery layer for macho"
 
 [[bin]]
 name = "macho"
 path = "src/main.rs"
+doc = false
 
 [dependencies]
-macho.workspace = true
+macho = { workspace = true, default-features = false, features = ["full"] }
+clap.workspace = true
+memmap2.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+macho-test-support.workspace = true
+trycmd.workspace = true

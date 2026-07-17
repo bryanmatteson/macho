@@ -17,7 +17,7 @@ pub fn relocations_for_section(
         return Ok(Vec::new());
     }
     if nreloc > MAX_RELOCS_PER_SECTION {
-        return Err(Error::Format(format!(
+        return Err(Error::format(format!(
             "section {},{} claims {nreloc} relocations, exceeding limit of {MAX_RELOCS_PER_SECTION}",
             section.segment_name, section.section_name
         )));

@@ -1,13 +1,21 @@
 use crate::error::{Error, Result};
+use crate::format::ParseLimits;
 use crate::format::constants::MachoHeaderFlags;
 use crate::format::io::pod::{self, RawMachHeader32, RawMachHeader64};
-use crate::format::load_commands::parse_load_commands;
 use crate::model::header::*;
 use crate::model::macho_file::MachoFile;
 
+/// Performs parse_macho_file.
 pub fn parse_macho_file(data: &[u8]) -> Result<MachoFile<'_>> {
+    parse_macho_file_with_limits(data, &ParseLimits::default())
+}
+
+pub(crate) fn parse_macho_file_with_limits<'data>(
+    data: &'data [u8],
+    limits: &ParseLimits,
+) -> Result<MachoFile<'data>> {
     if data.len() < 4 {
-        return Err(Error::Format("file too small for Mach-O magic".into()));
+        return Err(Error::format("file too small for Mach-O magic"));
     }
 
     let magic_val = u32::from_ne_bytes(data[0..4].try_into().unwrap());
@@ -45,15 +53,14 @@ pub fn parse_macho_file(data: &[u8]) -> Result<MachoFile<'_>> {
     };
 
     let lc_offset = bitness.header_size();
-    let (load_commands, segments) =
-        parse_load_commands(data, endian, lc_offset, header.ncmds, header.sizeofcmds)?;
-
-    Ok(MachoFile::new(
+    let (load_commands, segments) = crate::format::load_commands::parse_load_commands_with_limits(
         data,
-        header,
-        load_commands,
-        segments,
         endian,
-        bitness,
-    ))
+        lc_offset,
+        header.ncmds,
+        header.sizeofcmds,
+        limits,
+    )?;
+
+    MachoFile::new(data, header, load_commands, segments, endian, bitness)
 }

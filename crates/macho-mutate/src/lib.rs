@@ -1,21 +1,31 @@
-pub use macho_analysis as analysis;
-pub use macho_core::{Error, Result};
+#![deny(missing_docs)]
+//! In-memory structural Mach-O mutation and transactional validation.
+
 pub use macho_core::{format, model};
 
+/// The error module.
+pub mod error;
+pub(crate) use error::Error;
+pub use error::{MutationError, MutationErrorKind, MutationOperation, Result};
+
+/// The metadata module.
 pub mod metadata {
-    pub use macho_core::codesign;
-    pub use macho_core::dyld;
-    pub use macho_core::image;
-    pub use macho_core::objc;
-    pub use macho_core::swift;
+    pub use macho_codesign as codesign;
+    pub use macho_dyld as dyld;
 }
 
+/// The layout module.
 pub mod layout;
+/// The owned module.
 pub mod owned;
+/// The patch module.
 pub mod patch;
+/// The preview module.
 pub mod preview;
+/// The resign module.
 pub mod resign;
 pub mod sign;
+/// The transaction module.
 pub mod transaction;
 
 pub use patch::{
@@ -23,6 +33,10 @@ pub use patch::{
     PatchArch, PatchOp, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable,
     TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
 };
+pub use sign::{
+    AdhocSignatureProvider, SignatureProvider, SignatureProviderError, SignatureRequest,
+};
+pub use transaction::{PatchPlan, PatchTransaction, PreparedPatch};
 
 use crate::model::load_command::*;
 use crate::model::macho_file::MachoFile;
@@ -39,11 +53,12 @@ pub struct MachoEditor<'data> {
 }
 
 impl<'data> MachoEditor<'data> {
+    /// Performs new.
     pub fn new(macho: &'data MachoFile<'data>) -> Self {
         let commands: Vec<LoadCommand> = macho
             .load_commands()
             .iter()
-            .map(|lc| lc.kind.clone())
+            .map(|lc| lc.kind().clone())
             .collect();
         let segments = macho.segments().to_vec();
         Self {
@@ -53,10 +68,12 @@ impl<'data> MachoEditor<'data> {
         }
     }
 
+    /// Performs commands.
     pub fn commands(&self) -> &[LoadCommand] {
         &self.commands
     }
 
+    /// Performs command_count.
     pub fn command_count(&self) -> usize {
         self.commands.len()
     }
@@ -69,7 +86,7 @@ impl<'data> MachoEditor<'data> {
     /// Remove the load command at the given index.
     pub fn remove_command(&mut self, index: usize) -> Result<LoadCommand> {
         if index >= self.commands.len() {
-            return Err(Error::Format(format!(
+            return Err(Error::invalid(format!(
                 "command index {index} out of range (have {})",
                 self.commands.len()
             )));
@@ -80,7 +97,7 @@ impl<'data> MachoEditor<'data> {
     /// Replace the load command at the given index.
     pub fn replace_command(&mut self, index: usize, cmd: LoadCommand) -> Result<LoadCommand> {
         if index >= self.commands.len() {
-            return Err(Error::Format(format!(
+            return Err(Error::invalid(format!(
                 "command index {index} out of range (have {})",
                 self.commands.len()
             )));
@@ -143,8 +160,11 @@ impl<'data> MachoEditor<'data> {
     }
 }
 
+/// The LoadCommandEditExt type.
 pub trait LoadCommandEditExt {
+    /// Performs new_rpath.
     fn new_rpath(path: &str) -> Self;
+    /// Performs new_load_dylib.
     fn new_load_dylib(name: &str, current_version: u32, compat_version: u32) -> Self;
 }
 
@@ -165,6 +185,7 @@ impl LoadCommandEditExt for macho_core::model::load_command::LoadCommand {
     }
 }
 
+/// The mutate module.
 pub mod mutate {
     pub use crate::layout;
     pub use crate::owned;

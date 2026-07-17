@@ -1,0 +1,13 @@
+[package]
+name = "macho-codesign"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Mach-O code-signature parsing"
+
+[dependencies]
+macho-core.workspace = true
+thiserror.workspace = true

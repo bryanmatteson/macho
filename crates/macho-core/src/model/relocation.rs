@@ -3,11 +3,14 @@ use std::fmt;
 /// A decoded relocation entry, either standard or scattered.
 #[derive(Debug, Clone, Copy)]
 pub enum Relocation {
+    /// The Standard variant.
     Standard(StandardRelocation),
+    /// The Scattered variant.
     Scattered(ScatteredRelocation),
 }
 
 impl Relocation {
+    /// Performs address.
     pub fn address(&self) -> u32 {
         match self {
             Self::Standard(r) => r.address,
@@ -15,6 +18,7 @@ impl Relocation {
         }
     }
 
+    /// Performs reloc_type.
     pub fn reloc_type(&self) -> u8 {
         match self {
             Self::Standard(r) => r.reloc_type,
@@ -22,6 +26,7 @@ impl Relocation {
         }
     }
 
+    /// Performs length.
     pub fn length(&self) -> u8 {
         match self {
             Self::Standard(r) => r.length,
@@ -29,6 +34,7 @@ impl Relocation {
         }
     }
 
+    /// Performs pc_relative.
     pub fn pc_relative(&self) -> bool {
         match self {
             Self::Standard(r) => r.pc_relative,
@@ -36,6 +42,7 @@ impl Relocation {
         }
     }
 
+    /// Performs is_scattered.
     pub fn is_scattered(&self) -> bool {
         matches!(self, Self::Scattered(_))
     }
@@ -59,24 +66,30 @@ impl fmt::Display for Relocation {
 }
 
 #[derive(Debug, Clone, Copy)]
+/// The StandardRelocation type.
 pub struct StandardRelocation {
+    /// The address field.
     pub address: u32,
     /// Symbol table index (if extern) or section ordinal (if not extern). 24 bits.
     pub symbol_num: u32,
+    /// The pc_relative field.
     pub pc_relative: bool,
     /// Log2 of the relocation size: 0=byte, 1=word, 2=long, 3=quad.
     pub length: u8,
+    /// The is_extern field.
     pub is_extern: bool,
     /// Architecture-specific relocation type. 4 bits.
     pub reloc_type: u8,
 }
 
 #[derive(Debug, Clone, Copy)]
+/// The ScatteredRelocation type.
 pub struct ScatteredRelocation {
     /// Architecture-specific relocation type. 4 bits.
     pub reloc_type: u8,
     /// Log2 of the relocation size.
     pub length: u8,
+    /// The pc_relative field.
     pub pc_relative: bool,
     /// Offset within the section. 24 bits.
     pub address: u32,

@@ -6,78 +6,123 @@ use macho_core::ext::MachoExt;
 use macho_core::model::addr::ThinFileOffset;
 use macho_core::model::macho_file::MachoFile;
 use macho_core::model::symbol::SymbolTable;
-use macho_core::objc::ObjCMetadata;
-use macho_core::objc::types::ObjCCategory;
+use macho_objc::ObjCMetadata;
+use macho_objc::types::ObjCCategory;
 
 #[derive(Debug, Clone, Serialize)]
+/// The ObjCGraph type.
 pub struct ObjCGraph {
+    /// The classes field.
     pub classes: BTreeMap<String, ClassNode>,
+    /// The protocols field.
     pub protocols: BTreeMap<String, ProtocolNode>,
+    /// The selectors field.
     pub selectors: BTreeMap<String, Vec<SelectorOwner>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The ClassNode type.
 pub struct ClassNode {
+    /// The name field.
     pub name: String,
+    /// The superclass field.
     pub superclass: Option<String>,
+    /// The is_swift field.
     pub is_swift: bool,
+    /// The instance_methods field.
     pub instance_methods: Vec<MethodEntry>,
+    /// The class_methods field.
     pub class_methods: Vec<MethodEntry>,
+    /// The effective_instance_methods field.
     pub effective_instance_methods: Vec<MethodEntry>,
+    /// The effective_class_methods field.
     pub effective_class_methods: Vec<MethodEntry>,
+    /// The properties field.
     pub properties: Vec<PropertyEntry>,
+    /// The ivars field.
     pub ivars: Vec<String>,
+    /// The protocols field.
     pub protocols: Vec<String>,
+    /// The categories field.
     pub categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The AllMethods type.
 pub struct AllMethods {
+    /// The instance field.
     pub instance: Vec<MethodEntry>,
+    /// The class field.
     pub class: Vec<MethodEntry>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The MethodEntry type.
 pub struct MethodEntry {
+    /// The selector field.
     pub selector: String,
+    /// The origin field.
     pub origin: MethodOrigin,
+    /// The imp field.
     pub imp: u64,
+    /// The imp_symbol field.
     pub imp_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", content = "category", rename_all = "snake_case")]
+/// The MethodOrigin type.
+#[non_exhaustive]
 pub enum MethodOrigin {
+    /// The Class variant.
     Class,
+    /// The Category variant.
     Category(String),
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The ProtocolNode type.
 pub struct ProtocolNode {
+    /// The name field.
     pub name: String,
+    /// The instance_methods field.
     pub instance_methods: Vec<String>,
+    /// The class_methods field.
     pub class_methods: Vec<String>,
+    /// The optional_instance_methods field.
     pub optional_instance_methods: Vec<String>,
+    /// The optional_class_methods field.
     pub optional_class_methods: Vec<String>,
+    /// The properties field.
     pub properties: Vec<PropertyEntry>,
+    /// The adopted_protocols field.
     pub adopted_protocols: Vec<String>,
+    /// The conforming_classes field.
     pub conforming_classes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+/// The PropertyEntry type.
 pub struct PropertyEntry {
+    /// The name field.
     pub name: String,
+    /// The is_class field.
     pub is_class: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+/// The MethodKind type.
+#[non_exhaustive]
 pub enum MethodKind {
+    /// The Instance variant.
     Instance,
+    /// The Class variant.
     Class,
 }
 
 impl MethodKind {
+    /// Performs prefix.
     pub fn prefix(self) -> char {
         match self {
             Self::Instance => '-',
@@ -85,36 +130,58 @@ impl MethodKind {
         }
     }
 
+    /// Performs is_class.
     pub fn is_class(self) -> bool {
         matches!(self, Self::Class)
     }
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The SelectorOwner type.
 pub struct SelectorOwner {
+    /// The class_name field.
     pub class_name: String,
+    /// The kind field.
     pub kind: MethodKind,
+    /// The origin field.
     pub origin: MethodOrigin,
+    /// The imp field.
     pub imp: u64,
+    /// The imp_symbol field.
     pub imp_symbol: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// The ResolvedMethod type.
 pub struct ResolvedMethod {
+    /// The class_name field.
     pub class_name: String,
+    /// The selector field.
     pub selector: String,
+    /// The kind field.
     pub kind: MethodKind,
+    /// The origin field.
     pub origin: MethodOrigin,
+    /// The imp field.
     pub imp: u64,
+    /// The imp_symbol field.
     pub imp_symbol: Option<String>,
+    /// The resolution field.
     pub resolution: MethodResolution,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "resolution", rename_all = "snake_case")]
+/// The MethodResolution type.
+#[non_exhaustive]
 pub enum MethodResolution {
+    /// The Direct variant.
     Direct,
-    Inherited { from: String },
+    /// The Inherited variant.
+    Inherited {
+        #[doc = "The from field."]
+        from: String,
+    },
 }
 
 impl ObjCGraph {
@@ -279,14 +346,17 @@ impl ObjCGraph {
         }
     }
 
+    /// Performs class.
     pub fn class(&self, name: &str) -> Option<&ClassNode> {
         self.classes.get(name)
     }
 
+    /// Performs protocol.
     pub fn protocol(&self, name: &str) -> Option<&ProtocolNode> {
         self.protocols.get(name)
     }
 
+    /// Performs selector_owners.
     pub fn selector_owners(&self, selector: &str) -> &[SelectorOwner] {
         self.selectors
             .get(selector)
@@ -294,6 +364,7 @@ impl ObjCGraph {
             .unwrap_or(&[])
     }
 
+    /// Performs implementations_of.
     pub fn implementations_of(&self, selector: &str, kind: MethodKind) -> Vec<SelectorOwner> {
         self.selector_owners(selector)
             .iter()
@@ -302,6 +373,7 @@ impl ObjCGraph {
             .collect()
     }
 
+    /// Performs superclass_chain.
     pub fn superclass_chain(&self, class_name: &str) -> Vec<&str> {
         let mut chain = Vec::new();
         let mut current = class_name;
@@ -320,6 +392,7 @@ impl ObjCGraph {
         chain
     }
 
+    /// Performs effective_instance_methods.
     pub fn effective_instance_methods(&self, class_name: &str) -> Vec<&MethodEntry> {
         self.classes
             .get(class_name)
@@ -327,6 +400,7 @@ impl ObjCGraph {
             .unwrap_or_default()
     }
 
+    /// Performs effective_class_methods.
     pub fn effective_class_methods(&self, class_name: &str) -> Vec<&MethodEntry> {
         self.classes
             .get(class_name)
@@ -334,6 +408,7 @@ impl ObjCGraph {
             .unwrap_or_default()
     }
 
+    /// Performs all_methods.
     pub fn all_methods(&self, class_name: &str) -> Option<AllMethods> {
         Some(AllMethods {
             instance: self.collect_all_methods(class_name, MethodKind::Instance)?,
@@ -341,6 +416,7 @@ impl ObjCGraph {
         })
     }
 
+    /// Performs find_method.
     pub fn find_method(
         &self,
         class_name: &str,
@@ -360,6 +436,7 @@ impl ObjCGraph {
         }
     }
 
+    /// Performs resolve_inherited.
     pub fn resolve_inherited(
         &self,
         class_name: &str,
@@ -399,6 +476,7 @@ impl ObjCGraph {
         None
     }
 
+    /// Performs method_impl_va.
     pub fn method_impl_va(
         &self,
         class_name: &str,
@@ -409,6 +487,7 @@ impl ObjCGraph {
             .map(|resolved| resolved.imp)
     }
 
+    /// Performs method_impl_offset.
     pub fn method_impl_offset(
         &self,
         macho: &MachoFile<'_>,
@@ -423,6 +502,7 @@ impl ObjCGraph {
             .ok()
     }
 
+    /// Performs responds_to.
     pub fn responds_to(&self, class_name: &str, selector: &str, kind: MethodKind) -> bool {
         self.resolve_inherited(class_name, selector, kind).is_some()
     }
@@ -467,7 +547,9 @@ impl ObjCGraph {
 }
 
 impl<'data> MachoExt<'data> for ObjCGraph {
-    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> macho_core::Result<Self>
+    type Error = crate::objc::ObjcError;
+
+    fn parse<'mf>(macho: &'mf MachoFile<'data>) -> crate::objc::Result<Self>
     where
         'data: 'mf,
     {

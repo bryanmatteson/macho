@@ -1,1 +1,1 @@
-pub use macho_core::rtti::typeinfo::build_typeinfo_index;
+pub use macho_cpp::typeinfo::build_typeinfo_index;

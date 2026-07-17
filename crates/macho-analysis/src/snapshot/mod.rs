@@ -1,74 +1,26 @@
-pub mod snapshot;
+/// The model module.
+pub mod model;
 
-use crate::core::codesign::CodeSignature;
-use crate::core::dyld::chained::parse_chained_fixups;
-use crate::core::dyld::exports::parse_exports;
-use crate::core::dyld::types::ExportKind;
-use crate::core::objc::ObjCMetadata;
+use crate::AnalysisIssue;
+use crate::codesign::CodeSignature;
+use crate::dyld::chained::parse_chained_fixups;
+use crate::dyld::exports::parse_exports;
+use crate::dyld::types::ExportKind;
+use crate::error::{
+    CODESIGN_FAILED_CODE, EXPORTS_FAILED_CODE, FIXUPS_FAILED_CODE, IMPORTS_FAILED_CODE,
+    OBJC_FAILED_CODE, SYMBOLS_FAILED_CODE,
+};
 use crate::format::constants::VmProtection;
-use crate::model::container::MachoContainer;
 use crate::model::load_command::LoadCommand;
 use crate::model::load_command::format_uuid;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use crate::model::validate;
+use crate::objc::ObjCMetadata;
 use crate::symbols::imports::{ImportRecord, collect_imports};
 
-pub use self::snapshot::*;
+pub use self::model::*;
 
-impl SliceSnapshot {
-    pub fn from_macho(macho: &MachoFile<'_>) -> Self {
-        let mut analysis_issues = Vec::new();
-
-        Self {
-            arch: macho.header().cpu_type.name().to_string(),
-            header: extract_header(macho),
-            load_commands: extract_load_commands(macho),
-            segments: extract_segments(macho),
-            symbols: extract_symbols(macho, &mut analysis_issues),
-            exports: extract_exports(macho, &mut analysis_issues),
-            imports: extract_imports(macho, &mut analysis_issues),
-            fixups: extract_fixups(macho, &mut analysis_issues),
-            objc: extract_objc(macho, &mut analysis_issues),
-            codesign: extract_codesign(macho, &mut analysis_issues),
-            analysis_issues,
-            diagnostics: extract_diagnostics(macho),
-        }
-    }
-}
-
-impl ContainerSnapshot {
-    pub fn from_container(container: &MachoContainer<'_>) -> Self {
-        match container {
-            MachoContainer::Thin(macho) => Self {
-                format: thin_container_format(macho),
-                slices: vec![SliceSnapshot::from_macho(macho)],
-            },
-            MachoContainer::Fat(fat) => Self {
-                format: ContainerFormat::Fat,
-                slices: fat
-                    .arches()
-                    .iter()
-                    .map(|arch| {
-                        let mut snap = SliceSnapshot::from_macho(&arch.macho);
-                        snap.arch = arch.spec.name();
-                        snap
-                    })
-                    .collect(),
-            },
-        }
-    }
-}
-
-fn thin_container_format(macho: &MachoFile<'_>) -> ContainerFormat {
-    if macho.header().file_type.name() == "MH_FILESET" {
-        ContainerFormat::Fileset
-    } else {
-        ContainerFormat::Thin
-    }
-}
-
-fn extract_header(macho: &MachoFile<'_>) -> HeaderSnapshot {
+pub(crate) fn extract_header(macho: &MachoFile<'_>) -> HeaderSnapshot {
     let h = macho.header();
 
     let uuid = macho.uuid().map(format_uuid);
@@ -77,7 +29,7 @@ fn extract_header(macho: &MachoFile<'_>) -> HeaderSnapshot {
 
     let flags: Vec<String> = {
         let mut out = Vec::new();
-        let bits = h.flags;
+        let bits = h.flags();
         for (name, _) in bits.iter_names() {
             out.push(name.to_string());
         }
@@ -85,22 +37,22 @@ fn extract_header(macho: &MachoFile<'_>) -> HeaderSnapshot {
     };
 
     HeaderSnapshot {
-        cpu_type: h.cpu_type.name().to_string(),
-        cpu_subtype: h.cpu_subtype.name(h.cpu_type).to_string(),
-        file_type: h.file_type.name().to_string(),
+        cpu_type: h.cpu_type().name().to_string(),
+        cpu_subtype: h.cpu_subtype().name(h.cpu_type()).to_string(),
+        file_type: h.file_type().name().to_string(),
         flags,
-        ncmds: h.ncmds,
+        ncmds: h.load_command_count(),
         uuid,
         platform,
     }
 }
 
-fn extract_load_commands(macho: &MachoFile<'_>) -> Vec<LoadCommandSnapshot> {
+pub(crate) fn extract_load_commands(macho: &MachoFile<'_>) -> Vec<LoadCommandSnapshot> {
     macho
         .load_commands()
         .iter()
         .map(|lc| {
-            let fileset_entry = match &lc.kind {
+            let fileset_entry = match lc.kind() {
                 LoadCommand::FilesetEntry(entry) => Some(FilesetEntrySnapshot {
                     entry_id: entry.entry_id.clone(),
                     vm_addr: entry.vm_addr,
@@ -110,44 +62,44 @@ fn extract_load_commands(macho: &MachoFile<'_>) -> Vec<LoadCommandSnapshot> {
             };
 
             LoadCommandSnapshot {
-                name: lc.kind.name().to_string(),
-                summary: lc.kind.summary(),
+                name: lc.kind().name().to_string(),
+                summary: lc.kind().summary(),
                 fileset_entry,
             }
         })
         .collect()
 }
 
-fn extract_segments(macho: &MachoFile<'_>) -> Vec<SegmentSnapshot> {
+pub(crate) fn extract_segments(macho: &MachoFile<'_>) -> Vec<SegmentSnapshot> {
     macho
         .segments()
         .iter()
         .map(|seg| SegmentSnapshot {
-            name: seg.name.to_string(),
-            vm_addr: seg.vm_addr.0,
-            vm_size: seg.vm_size,
-            file_offset: seg.file_offset.0,
-            file_size: seg.file_size,
-            max_prot: format_prot(seg.max_prot),
-            init_prot: format_prot(seg.init_prot),
+            name: seg.name().to_string(),
+            vm_addr: seg.vm_addr().0,
+            vm_size: seg.vm_size(),
+            file_offset: seg.file_offset().0,
+            file_size: seg.file_size(),
+            max_prot: format_prot(seg.max_prot()),
+            init_prot: format_prot(seg.init_prot()),
             sections: seg
-                .sections
+                .sections()
                 .iter()
                 .map(|s| SectionSnapshot {
-                    segment_name: s.segment_name.to_string(),
-                    section_name: s.section_name.to_string(),
-                    addr: s.addr.0,
-                    size: s.size,
-                    section_type: s.section_type.name().to_string(),
+                    segment_name: s.segment_name().to_string(),
+                    section_name: s.section_name().to_string(),
+                    addr: s.addr().0,
+                    size: s.size(),
+                    section_type: s.section_type().name().to_string(),
                 })
                 .collect(),
         })
         .collect()
 }
 
-fn extract_symbols(
+pub(crate) fn extract_symbols(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> Vec<SymbolSnapshot> {
     if !has_symbol_table(macho) {
         return Vec::new();
@@ -158,7 +110,7 @@ fn extract_symbols(
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
-                "symbols",
+                SYMBOLS_FAILED_CODE,
                 format!("failed to parse symbol table: {err}"),
             );
             return Vec::new();
@@ -178,9 +130,9 @@ fn extract_symbols(
         .collect()
 }
 
-fn extract_exports(
+pub(crate) fn extract_exports(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> Vec<ExportSnapshot> {
     if !has_export_trie(macho) {
         return Vec::new();
@@ -191,7 +143,7 @@ fn extract_exports(
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
-                "exports",
+                EXPORTS_FAILED_CODE,
                 format!("failed to parse exports trie: {err}"),
             );
             return Vec::new();
@@ -215,6 +167,7 @@ fn extract_exports(
                     stub_offset,
                     resolver_offset,
                 },
+                _ => ExportKindSnapshot::Unknown,
             };
             ExportSnapshot {
                 name: e.name,
@@ -225,22 +178,22 @@ fn extract_exports(
         .collect()
 }
 
-fn extract_imports(
+pub(crate) fn extract_imports(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> Vec<ImportRecord> {
     match collect_imports(macho) {
         Ok(imports) => imports,
         Err(err) => {
-            push_analysis_issue(analysis_issues, "imports", err.to_string());
+            push_analysis_issue(analysis_issues, IMPORTS_FAILED_CODE, err.to_string());
             Vec::new()
         }
     }
 }
 
-fn extract_fixups(
+pub(crate) fn extract_fixups(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> Vec<FixupSnapshot> {
     if !has_chained_fixups(macho) {
         return Vec::new();
@@ -251,7 +204,7 @@ fn extract_fixups(
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
-                "fixups",
+                FIXUPS_FAILED_CODE,
                 format!("failed to parse chained fixups: {err}"),
             );
             return Vec::new();
@@ -268,9 +221,9 @@ fn extract_fixups(
     snapshots
 }
 
-fn extract_objc(
+pub(crate) fn extract_objc(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> ObjCSnapshot {
     if !has_objc_metadata(macho) {
         return ObjCSnapshot {
@@ -285,7 +238,7 @@ fn extract_objc(
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
-                "objc",
+                OBJC_FAILED_CODE,
                 format!("failed to parse Objective-C metadata: {err}"),
             );
             return ObjCSnapshot {
@@ -343,9 +296,9 @@ fn extract_objc(
     }
 }
 
-fn extract_codesign(
+pub(crate) fn extract_codesign(
     macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
+    analysis_issues: &mut Vec<AnalysisIssue>,
 ) -> Option<CodesignSnapshot> {
     if !has_code_signature(macho) {
         return None;
@@ -356,7 +309,7 @@ fn extract_codesign(
         Err(err) => {
             push_analysis_issue(
                 analysis_issues,
-                "codesign",
+                CODESIGN_FAILED_CODE,
                 format!("failed to parse code signature: {err}"),
             );
             return None;
@@ -365,7 +318,7 @@ fn extract_codesign(
     let Some(cd) = sig.code_directories().first() else {
         push_analysis_issue(
             analysis_issues,
-            "codesign",
+            CODESIGN_FAILED_CODE,
             "failed to parse code signature: no CodeDirectory blobs found".to_string(),
         );
         return None;
@@ -386,7 +339,7 @@ fn extract_codesign(
     })
 }
 
-fn snap_property(property: &crate::core::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
+fn snap_property(property: &crate::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
     ObjCPropertySnapshot {
         name: property.name.clone(),
         attributes: property.attributes.clone(),
@@ -462,39 +415,15 @@ fn stable_fingerprint(bytes: &[u8]) -> String {
     format!("fnv1a64:{hash:016x}")
 }
 
-fn extract_diagnostics(macho: &MachoFile<'_>) -> Vec<DiagnosticSnapshot> {
-    validate::validate(macho)
-        .into_iter()
-        .map(|d| DiagnosticSnapshot {
-            severity: match d.severity {
-                validate::Severity::Error => "error".to_string(),
-                validate::Severity::Warning => "warning".to_string(),
-                validate::Severity::Info => "info".to_string(),
-            },
-            code: d.code.0.to_string(),
-            message: d.message,
-            spans: d
-                .spans
-                .into_iter()
-                .map(|span| DiagnosticSpanSnapshot {
-                    offset: span.offset.0,
-                    size: span.size,
-                    label: span.label,
-                })
-                .collect(),
-        })
-        .collect()
-}
-
-fn snap_method(m: &crate::core::objc::ObjCMethod) -> ObjCMethodSnapshot {
+fn snap_method(m: &crate::objc::ObjCMethod) -> ObjCMethodSnapshot {
     ObjCMethodSnapshot {
         name: m.name.clone(),
         type_encoding: m.type_encoding.clone(),
     }
 }
 
-fn snap_fixup(fixup: crate::core::dyld::types::Fixup) -> FixupSnapshot {
-    use crate::core::dyld::types::FixupKind;
+fn snap_fixup(fixup: crate::dyld::types::Fixup) -> FixupSnapshot {
+    use crate::dyld::types::FixupKind;
 
     let kind = match fixup.kind {
         FixupKind::Rebase { target } => FixupKindSnapshot::Rebase { target },
@@ -527,6 +456,7 @@ fn snap_fixup(fixup: crate::core::dyld::types::Fixup) -> FixupSnapshot {
             key,
             addr_div,
         },
+        _ => FixupKindSnapshot::Unknown,
     };
 
     FixupSnapshot {
@@ -541,12 +471,12 @@ fn format_prot(prot: VmProtection) -> String {
 }
 
 fn push_analysis_issue(
-    analysis_issues: &mut Vec<AnalysisIssueSnapshot>,
-    component: &'static str,
+    analysis_issues: &mut Vec<AnalysisIssue>,
+    code: &'static str,
     message: String,
 ) {
-    analysis_issues.push(AnalysisIssueSnapshot {
-        component: component.to_string(),
+    analysis_issues.push(AnalysisIssue {
+        code: code.into(),
         message,
     });
 }
@@ -558,7 +488,7 @@ fn has_symbol_table(macho: &MachoFile<'_>) -> bool {
 }
 
 fn has_export_trie(macho: &MachoFile<'_>) -> bool {
-    macho.load_commands().iter().any(|lc| match &lc.kind {
+    macho.load_commands().iter().any(|lc| match lc.kind() {
         LoadCommand::DyldExportsTrie(_) => true,
         LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => data.export_size > 0,
         _ => false,
@@ -574,7 +504,7 @@ fn has_chained_fixups(macho: &MachoFile<'_>) -> bool {
 fn has_objc_metadata(macho: &MachoFile<'_>) -> bool {
     macho.all_sections().any(|section| {
         matches!(
-            section.section_name.as_str_lossy().as_ref(),
+            section.section_name().as_str_lossy().as_ref(),
             "__objc_classlist" | "__objc_catlist" | "__objc_protolist"
         )
     })
@@ -591,7 +521,7 @@ fn extract_platform_snapshot(macho: &MachoFile<'_>) -> Option<PlatformSnapshot> 
     if let Some(bv) = macho
         .load_commands()
         .iter()
-        .find_map(|lc| lc.kind.as_build_version())
+        .find_map(|lc| lc.kind().as_build_version())
     {
         return Some(PlatformSnapshot {
             platform: bv.platform.name().to_string(),
@@ -602,7 +532,7 @@ fn extract_platform_snapshot(macho: &MachoFile<'_>) -> Option<PlatformSnapshot> 
 
     // Fall back to LC_VERSION_MIN_*
     for lc in macho.load_commands() {
-        match &lc.kind {
+        match lc.kind() {
             LoadCommand::VersionMinMacOS(d) => {
                 return Some(PlatformSnapshot {
                     platform: "macOS".to_string(),

@@ -1,0 +1,17 @@
+[package]
+name = "macho-symbols"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Mach-O symbol, import, export, and demangling helpers"
+
+[dependencies]
+macho-core.workspace = true
+macho-dyld.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+cpp_demangle.workspace = true
+rustc-demangle.workspace = true

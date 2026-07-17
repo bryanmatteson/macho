@@ -3,21 +3,26 @@ use serde::{Deserialize, Serialize};
 use crate::reconstruct::schema::{EvidenceBundle, HeaderLanguage, validate_bundle};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// The PromptSet type.
 pub struct PromptSet {
+    /// The system field.
     pub system: String,
+    /// The user field.
     pub user: String,
 }
 
+/// Performs build_prompt.
 pub fn build_prompt(bundle: &EvidenceBundle) -> crate::Result<PromptSet> {
     validate_bundle_or_err(bundle)?;
     let evidence_json = serde_json::to_string_pretty(bundle)
-        .map_err(|err| crate::Error::Validation(format!("serialize evidence bundle: {err}")))?;
+        .map_err(|err| crate::Error::validation(format!("serialize evidence bundle: {err}")))?;
     Ok(PromptSet {
         system: system_prompt(bundle.header_unit.language),
         user: user_prompt(bundle, &evidence_json),
     })
 }
 
+/// Performs build_repair_prompt.
 pub fn build_repair_prompt(
     bundle: &EvidenceBundle,
     previous_output_json: &str,
@@ -25,9 +30,9 @@ pub fn build_repair_prompt(
 ) -> crate::Result<PromptSet> {
     validate_bundle_or_err(bundle)?;
     let issues_json = serde_json::to_string_pretty(issues)
-        .map_err(|err| crate::Error::Validation(format!("serialize validation issues: {err}")))?;
+        .map_err(|err| crate::Error::validation(format!("serialize validation issues: {err}")))?;
     let evidence_json = serde_json::to_string_pretty(bundle)
-        .map_err(|err| crate::Error::Validation(format!("serialize evidence bundle: {err}")))?;
+        .map_err(|err| crate::Error::validation(format!("serialize evidence bundle: {err}")))?;
     let mut user = String::new();
     user.push_str("Language: ");
     user.push_str(bundle.header_unit.language.prompt_name());
@@ -56,6 +61,7 @@ pub fn build_repair_prompt(
     })
 }
 
+/// Performs build_parse_repair_prompt.
 pub fn build_parse_repair_prompt(
     bundle: &EvidenceBundle,
     previous_response: &str,
@@ -63,7 +69,7 @@ pub fn build_parse_repair_prompt(
 ) -> crate::Result<PromptSet> {
     validate_bundle_or_err(bundle)?;
     let evidence_json = serde_json::to_string_pretty(bundle)
-        .map_err(|err| crate::Error::Validation(format!("serialize evidence bundle: {err}")))?;
+        .map_err(|err| crate::Error::validation(format!("serialize evidence bundle: {err}")))?;
     let mut user = String::new();
     user.push_str("Language: ");
     user.push_str(bundle.header_unit.language.prompt_name());
@@ -152,7 +158,7 @@ fn validate_bundle_or_err(bundle: &EvidenceBundle) -> crate::Result<()> {
         .map(|issue| format!("{}: {}", issue.code, issue.message))
         .collect::<Vec<_>>()
         .join("; ");
-    Err(crate::Error::Validation(format!(
+    Err(crate::Error::validation(format!(
         "invalid evidence bundle: {joined}"
     )))
 }

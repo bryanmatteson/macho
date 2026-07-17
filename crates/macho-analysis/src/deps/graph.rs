@@ -1,45 +1,77 @@
 use crate::Result;
-use crate::core::dyld::bind::parse_bind_entries;
-use crate::core::dyld::chained::parse_chained_fixups;
-use crate::core::dyld::exports::parse_exports;
-use crate::core::dyld::types::ExportKind;
-use crate::core::image::DylibLinkKind;
+use crate::dyld::bind::parse_bind_entries;
+use crate::dyld::chained::parse_chained_fixups;
+use crate::dyld::exports::parse_exports;
+use crate::dyld::types::ExportKind;
+use crate::image::DylibLinkKind;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 
 #[derive(Debug, Clone)]
+/// The DepGraph type.
 pub struct DepGraph {
+    /// The install_name field.
     pub install_name: Option<String>,
+    /// The dylibs field.
     pub dylibs: Vec<NormalizedDylib>,
+    /// The imports field.
     pub imports: Vec<ResolvedImport>,
+    /// The exports field.
     pub exports: Vec<ResolvedExport>,
 }
 
 #[derive(Debug, Clone)]
+/// The NormalizedDylib type.
 pub struct NormalizedDylib {
+    /// The name field.
     pub name: String,
+    /// The ordinal field.
     pub ordinal: usize,
+    /// The current_version field.
     pub current_version: String,
+    /// The compat_version field.
     pub compat_version: String,
+    /// The kind field.
     pub kind: DylibLinkKind,
 }
 
 #[derive(Debug, Clone)]
+/// The ResolvedImport type.
 pub struct ResolvedImport {
+    /// The name field.
     pub name: String,
+    /// The provider field.
     pub provider: ImportProvider,
+    /// The weak field.
     pub weak: bool,
+    /// The addend field.
     pub addend: i64,
 }
 
 #[derive(Debug, Clone)]
+/// The ImportProvider type.
+#[non_exhaustive]
 pub enum ImportProvider {
-    Dylib { ordinal: usize, name: String },
+    /// The Dylib variant.
+    Dylib {
+        #[doc = "The ordinal field."]
+        ordinal: usize,
+        #[doc = "The name field."]
+        name: String,
+    },
+    /// The SelfImage variant.
     SelfImage,
+    /// The MainExecutable variant.
     MainExecutable,
+    /// The DynamicLookup variant.
     DynamicLookup,
+    /// The WeakLookup variant.
     WeakLookup,
-    Unknown { ordinal: i32 },
+    /// The Unknown variant.
+    Unknown {
+        #[doc = "The ordinal field."]
+        ordinal: i32,
+    },
 }
 
 impl std::fmt::Display for ImportProvider {
@@ -56,29 +88,45 @@ impl std::fmt::Display for ImportProvider {
 }
 
 #[derive(Debug, Clone)]
+/// The ResolvedExport type.
 pub struct ResolvedExport {
+    /// The name field.
     pub name: String,
+    /// The address field.
     pub address: Option<u64>,
+    /// The weak field.
     pub weak: bool,
+    /// The reexport field.
     pub reexport: Option<ReexportInfo>,
 }
 
 #[derive(Debug, Clone)]
+/// The ReexportInfo type.
 pub struct ReexportInfo {
+    /// The provider_ordinal field.
     pub provider_ordinal: u64,
+    /// The provider_name field.
     pub provider_name: Option<String>,
+    /// The original_name field.
     pub original_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
+/// The GraphIssue type.
 pub struct GraphIssue {
+    /// The severity field.
     pub severity: IssueSeverity,
+    /// The message field.
     pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// The IssueSeverity type.
+#[non_exhaustive]
 pub enum IssueSeverity {
+    /// The Error variant.
     Error,
+    /// The Warning variant.
     Warning,
 }
 
@@ -92,6 +140,7 @@ impl std::fmt::Display for IssueSeverity {
 }
 
 impl DepGraph {
+    /// Performs build.
     pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
         let (install_name, dylibs) = collect_dylibs(macho);
         let imports = collect_imports(macho, &dylibs)?;
@@ -105,6 +154,7 @@ impl DepGraph {
         })
     }
 
+    /// Performs provider_of.
     pub fn provider_of(&self, import_name: &str) -> Option<&ImportProvider> {
         self.imports
             .iter()
@@ -112,6 +162,7 @@ impl DepGraph {
             .map(|i| &i.provider)
     }
 
+    /// Performs imports_from.
     pub fn imports_from(&self, ordinal: usize) -> Vec<&ResolvedImport> {
         self.imports
             .iter()
@@ -122,10 +173,12 @@ impl DepGraph {
             .collect()
     }
 
+    /// Performs find_export.
     pub fn find_export(&self, name: &str) -> Option<&ResolvedExport> {
         self.exports.iter().find(|e| e.name == name)
     }
 
+    /// Performs reexports.
     pub fn reexports(&self) -> Vec<&ResolvedExport> {
         self.exports
             .iter()
@@ -133,6 +186,7 @@ impl DepGraph {
             .collect()
     }
 
+    /// Performs validate.
     pub fn validate(&self) -> Vec<GraphIssue> {
         let mut issues = Vec::new();
         let dylib_count = self.dylibs.len();
@@ -209,7 +263,7 @@ fn collect_dylibs(macho: &MachoFile<'_>) -> (Option<String>, Vec<NormalizedDylib
     let mut ordinal: usize = 0;
 
     for lc in macho.load_commands() {
-        match &lc.kind {
+        match lc.kind() {
             LoadCommand::IdDylib(d) => {
                 install_name = Some(d.name.clone());
             }
@@ -366,6 +420,7 @@ fn collect_exports(
                 stub_offset,
                 resolver_offset: _,
             } => (Some(*stub_offset), None),
+            _ => continue,
         };
 
         exports.push(ResolvedExport {

@@ -1,5 +1,5 @@
+use crate::audit::AuditInput;
 use crate::audit::{AuditFinding, AuditRule, AuditSeverity};
-use crate::snapshot::SliceSnapshot;
 
 pub struct UnreadableCodeSignature;
 
@@ -8,9 +8,9 @@ impl AuditRule for UnreadableCodeSignature {
         "CS000"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         let has_codesign_load_command = slice
-            .load_commands
+            .load_commands()
             .iter()
             .any(|lc| lc.name == "LC_CODE_SIGNATURE");
 
@@ -18,13 +18,9 @@ impl AuditRule for UnreadableCodeSignature {
             return;
         }
 
-        for issue in slice
-            .analysis_issues
-            .iter()
-            .filter(|issue| issue.component == "codesign")
-        {
+        for issue in &slice.analysis_issues {
             findings.push(AuditFinding {
-                rule_id: self.id(),
+                rule_id: self.id().to_owned(),
                 severity: AuditSeverity::Error,
                 title: "code signature data could not be analyzed".into(),
                 body: "The binary advertises LC_CODE_SIGNATURE data, but the signature payload \
@@ -47,19 +43,22 @@ impl AuditRule for UnsignedBinary {
         "CS001"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         // Only relevant for executables and dylibs
-        let ft = &slice.header.file_type;
+        let Some(header) = slice.header() else {
+            return;
+        };
+        let ft = &header.file_type;
         if ft != "MH_EXECUTE" && ft != "MH_DYLIB" && ft != "MH_BUNDLE" {
             return;
         }
         let has_codesign_load_command = slice
-            .load_commands
+            .load_commands()
             .iter()
             .any(|lc| lc.name == "LC_CODE_SIGNATURE");
         if !has_codesign_load_command {
             findings.push(AuditFinding {
-                rule_id: self.id(),
+                rule_id: self.id().to_owned(),
                 severity: AuditSeverity::Error,
                 title: "binary is not code-signed".into(),
                 body: "Executables and dylibs should be code-signed for macOS \
@@ -79,11 +78,11 @@ impl AuditRule for MissingEntitlements {
         "CS002"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         if let Some(ref cs) = slice.codesign {
             if cs.has_cms_signature && !cs.has_entitlements {
                 findings.push(AuditFinding {
-                    rule_id: self.id(),
+                    rule_id: self.id().to_owned(),
                     severity: AuditSeverity::Info,
                     title: "signed binary has no entitlements".into(),
                     body: "The binary has a CMS signature but no entitlements blob. \
@@ -105,11 +104,11 @@ impl AuditRule for WeakHashAlgorithm {
         "CS003"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         if let Some(ref cs) = slice.codesign {
             if cs.hash_type == "SHA-1" {
                 findings.push(AuditFinding {
-                    rule_id: self.id(),
+                    rule_id: self.id().to_owned(),
                     severity: AuditSeverity::Warning,
                     title: "code signature uses SHA-1".into(),
                     body: "SHA-1 is considered weak. Modern binaries should use SHA-256.".into(),
@@ -128,7 +127,7 @@ impl AuditRule for SuspiciousEntitlements {
         "CS005"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         let cs = match &slice.codesign {
             Some(cs) => cs,
             None => return,
@@ -188,7 +187,7 @@ impl AuditRule for SuspiciousEntitlements {
 
             if matched {
                 findings.push(AuditFinding {
-                    rule_id: self.id(),
+                    rule_id: self.id().to_owned(),
                     severity: *severity,
                     title: format!("suspicious entitlement: {key}"),
                     body: description.to_string(),
@@ -209,11 +208,11 @@ impl AuditRule for MissingTeamId {
         "CS004"
     }
 
-    fn run(&self, slice: &SliceSnapshot, findings: &mut Vec<AuditFinding>) {
+    fn run(&self, slice: &AuditInput, findings: &mut Vec<AuditFinding>) {
         if let Some(ref cs) = slice.codesign {
             if cs.team_id.is_none() && cs.has_cms_signature {
                 findings.push(AuditFinding {
-                    rule_id: self.id(),
+                    rule_id: self.id().to_owned(),
                     severity: AuditSeverity::Warning,
                     title: "signed binary missing team ID".into(),
                     body: "A CMS-signed binary without a team ID may fail notarization \

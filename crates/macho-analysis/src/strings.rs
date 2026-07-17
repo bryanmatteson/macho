@@ -1,56 +1,106 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::addr::{ThinFileOffset, Va};
 use crate::model::macho_file::MachoFile;
 use crate::model::section::SectionType;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The StringRegions type.
 pub struct StringRegions {
+    /// The regions field.
     pub regions: Vec<StringRegion>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The StringRegion type.
 pub struct StringRegion {
+    /// The section_segment field.
     pub section_segment: String,
+    /// The section_name field.
     pub section_name: String,
+    #[serde(
+        serialize_with = "crate::serde_addr::va",
+        deserialize_with = "crate::serde_addr::va_from"
+    )]
+    /// The start field.
     pub start: Va,
+    /// The size field.
     pub size: u64,
+    #[serde(
+        serialize_with = "crate::serde_addr::thin_file_offset",
+        deserialize_with = "crate::serde_addr::thin_file_offset_from"
+    )]
+    /// The file_offset field.
     pub file_offset: ThinFileOffset,
+    /// The kind field.
     pub kind: StringRegionKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+/// The StringRegionKind type.
+#[non_exhaustive]
 pub enum StringRegionKind {
+    /// The CString variant.
     CString,
+    /// The ObjCString variant.
     ObjCString,
+    /// The SwiftReflection variant.
     SwiftReflection,
+    /// The CFString variant.
     CFString,
+    /// The Heuristic variant.
     Heuristic,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The StringMatch type.
 pub struct StringMatch {
+    /// The value field.
     pub value: String,
+    #[serde(
+        serialize_with = "crate::serde_addr::va",
+        deserialize_with = "crate::serde_addr::va_from"
+    )]
+    /// The va field.
     pub va: Va,
+    #[serde(
+        serialize_with = "crate::serde_addr::thin_file_offset",
+        deserialize_with = "crate::serde_addr::thin_file_offset_from"
+    )]
+    /// The file_offset field.
     pub file_offset: ThinFileOffset,
+    /// The region_index field.
     pub region_index: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The FoundString type.
 pub struct FoundString {
+    /// The value field.
     pub value: String,
+    #[serde(
+        serialize_with = "crate::serde_addr::va",
+        deserialize_with = "crate::serde_addr::va_from"
+    )]
+    /// The va field.
     pub va: Va,
+    #[serde(
+        serialize_with = "crate::serde_addr::thin_file_offset",
+        deserialize_with = "crate::serde_addr::thin_file_offset_from"
+    )]
+    /// The file_offset field.
     pub file_offset: ThinFileOffset,
 }
 
 impl StringRegions {
+    /// Performs discover.
     pub fn discover(macho: &MachoFile<'_>) -> Self {
         let mut regions = Vec::new();
 
         for section in macho.all_sections() {
-            let seg = section.segment_name.as_str_lossy();
-            let sect = section.section_name.as_str_lossy();
+            let seg = section.segment_name().as_str_lossy();
+            let sect = section.section_name().as_str_lossy();
 
             // Check name-based classification first so ObjC/Swift sections
             // with S_CSTRING_LITERALS type get the more specific kind.
@@ -64,7 +114,7 @@ impl StringRegions {
                 Some(StringRegionKind::SwiftReflection)
             } else if sect == "__cfstring" {
                 Some(StringRegionKind::CFString)
-            } else if section.section_type == SectionType::CStringLiterals {
+            } else if section.section_type() == SectionType::CStringLiterals {
                 Some(StringRegionKind::CString)
             } else {
                 None
@@ -74,9 +124,9 @@ impl StringRegions {
                 regions.push(StringRegion {
                     section_segment: seg.into_owned(),
                     section_name: sect.into_owned(),
-                    start: section.addr,
-                    size: section.size,
-                    file_offset: section.offset,
+                    start: section.addr(),
+                    size: section.size(),
+                    file_offset: section.offset(),
                     kind,
                 });
             }
@@ -85,20 +135,21 @@ impl StringRegions {
         Self { regions }
     }
 
+    /// Performs with_heuristic.
     pub fn with_heuristic(macho: &MachoFile<'_>) -> Self {
         let mut result = Self::discover(macho);
 
         for section in macho.all_sections() {
-            if section.section_type != SectionType::Regular {
+            if section.section_type() != SectionType::Regular {
                 continue;
             }
 
-            let seg = section.segment_name.as_str_lossy();
+            let seg = section.segment_name().as_str_lossy();
             if seg != "__TEXT" && seg != "__RODATA" {
                 continue;
             }
 
-            let sect = section.section_name.as_str_lossy();
+            let sect = section.section_name().as_str_lossy();
 
             // Skip sections we already classified
             let already_present = result
@@ -109,11 +160,11 @@ impl StringRegions {
                 continue;
             }
 
-            if section.size == 0 {
+            if section.size() == 0 {
                 continue;
             }
 
-            let bytes = match macho.read_bytes_at(section.offset, section.size as usize) {
+            let bytes = match macho.read_bytes_at(section.offset(), section.size() as usize) {
                 Ok(b) => b,
                 Err(_) => continue,
             };
@@ -122,9 +173,9 @@ impl StringRegions {
                 result.regions.push(StringRegion {
                     section_segment: seg.into_owned(),
                     section_name: sect.into_owned(),
-                    start: section.addr,
-                    size: section.size,
-                    file_offset: section.offset,
+                    start: section.addr(),
+                    size: section.size(),
+                    file_offset: section.offset(),
                     kind: StringRegionKind::Heuristic,
                 });
             }
@@ -133,6 +184,7 @@ impl StringRegions {
         result
     }
 
+    /// Performs search.
     pub fn search(&self, macho: &MachoFile<'_>, query: &str) -> Vec<StringMatch> {
         let mut matches = Vec::new();
 
@@ -166,6 +218,7 @@ impl StringRegions {
         matches
     }
 
+    /// Performs search_exact.
     pub fn search_exact(&self, macho: &MachoFile<'_>, query: &str) -> Vec<StringMatch> {
         let mut matches = Vec::new();
 
@@ -197,6 +250,7 @@ impl StringRegions {
         matches
     }
 
+    /// Performs strings_in_region.
     pub fn strings_in_region(
         &self,
         macho: &MachoFile<'_>,
@@ -226,24 +280,65 @@ impl StringRegions {
             .collect()
     }
 
+    /// Performs all_strings.
     pub fn all_strings(&self, macho: &MachoFile<'_>) -> Vec<FoundString> {
-        let mut all = Vec::new();
-        for region in &self.regions {
-            all.extend(self.strings_in_region(macho, region));
-        }
-        all
+        self.all_strings_limited(macho, usize::MAX).0
     }
 
+    /// Collect at most `limit` strings and report whether additional input was skipped.
+    pub fn all_strings_limited(
+        &self,
+        macho: &MachoFile<'_>,
+        limit: usize,
+    ) -> (Vec<FoundString>, bool) {
+        let mut all = Vec::new();
+        for region in &self.regions {
+            if all.len() == limit {
+                return (all, true);
+            }
+            if region.kind == StringRegionKind::CFString {
+                continue;
+            }
+            let bytes = match macho.read_bytes_at(region.file_offset, region.size as usize) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+            let remaining = limit - all.len();
+            let (values, truncated) = extract_cstrings_limited(bytes, remaining);
+            all.extend(
+                values
+                    .into_iter()
+                    .map(|(value, offset_in_region)| FoundString {
+                        value,
+                        va: Va(region.start.0 + offset_in_region as u64),
+                        file_offset: ThinFileOffset(region.file_offset.0 + offset_in_region as u64),
+                    }),
+            );
+            if truncated {
+                return (all, true);
+            }
+        }
+        (all, false)
+    }
+
+    /// Performs regions.
     pub fn regions(&self) -> &[StringRegion] {
         &self.regions
     }
 }
 
 fn extract_cstrings(bytes: &[u8]) -> Vec<(String, usize)> {
+    extract_cstrings_limited(bytes, usize::MAX).0
+}
+
+fn extract_cstrings_limited(bytes: &[u8], limit: usize) -> (Vec<(String, usize)>, bool) {
     let mut results = Vec::new();
     let mut start = 0;
 
     while start < bytes.len() {
+        if results.len() == limit {
+            return (results, true);
+        }
         // Skip leading nulls
         if bytes[start] == 0 {
             start += 1;
@@ -267,7 +362,7 @@ fn extract_cstrings(bytes: &[u8]) -> Vec<(String, usize)> {
         start = end + 1;
     }
 
-    results
+    (results, false)
 }
 
 fn is_heuristic_string_section(bytes: &[u8]) -> bool {

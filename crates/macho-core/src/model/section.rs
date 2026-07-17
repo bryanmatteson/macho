@@ -4,34 +4,60 @@ use crate::model::addr::Va;
 use crate::model::names::{SectionName, SegmentName};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The SectionType type.
 pub enum SectionType {
+    /// The Regular variant.
     Regular,
+    /// The ZeroFill variant.
     ZeroFill,
+    /// The CStringLiterals variant.
     CStringLiterals,
+    /// The FourByteLiterals variant.
     FourByteLiterals,
+    /// The EightByteLiterals variant.
     EightByteLiterals,
+    /// The LiteralPointers variant.
     LiteralPointers,
+    /// The NonLazySymbolPointers variant.
     NonLazySymbolPointers,
+    /// The LazySymbolPointers variant.
     LazySymbolPointers,
+    /// The SymbolStubs variant.
     SymbolStubs,
+    /// The ModInitFuncPointers variant.
     ModInitFuncPointers,
+    /// The ModTermFuncPointers variant.
     ModTermFuncPointers,
+    /// The Coalesced variant.
     Coalesced,
+    /// The GbZeroFill variant.
     GbZeroFill,
+    /// The Interposing variant.
     Interposing,
+    /// The SixteenByteLiterals variant.
     SixteenByteLiterals,
+    /// The DTraceDof variant.
     DTraceDof,
+    /// The LazyDylibSymbolPointers variant.
     LazyDylibSymbolPointers,
+    /// The ThreadLocalRegular variant.
     ThreadLocalRegular,
+    /// The ThreadLocalZeroFill variant.
     ThreadLocalZeroFill,
+    /// The ThreadLocalVariables variant.
     ThreadLocalVariables,
+    /// The ThreadLocalVariablePointers variant.
     ThreadLocalVariablePointers,
+    /// The ThreadLocalInitFunctionPointers variant.
     ThreadLocalInitFunctionPointers,
+    /// The InitFuncOffsets variant.
     InitFuncOffsets,
+    /// The Unknown variant.
     Unknown(u8),
 }
 
 impl SectionType {
+    /// Performs from_flags.
     pub fn from_flags(flags: u32) -> Self {
         let ty = (flags & SECTION_TYPE_MASK) as u8;
         match ty {
@@ -62,6 +88,7 @@ impl SectionType {
         }
     }
 
+    /// Performs name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Regular => "S_REGULAR",
@@ -91,6 +118,7 @@ impl SectionType {
         }
     }
 
+    /// Performs is_zerofill.
     pub fn is_zerofill(&self) -> bool {
         matches!(
             self,
@@ -100,18 +128,74 @@ impl SectionType {
 }
 
 #[derive(Debug, Clone)]
+/// The Section type.
 pub struct Section {
-    pub segment_name: SegmentName,
-    pub section_name: SectionName,
-    pub addr: Va,
-    pub size: u64,
-    pub offset: ThinFileOffset,
-    pub align: u32,
-    pub reloff: ThinFileOffset,
-    pub nreloc: u32,
-    pub section_type: SectionType,
-    pub attributes: SectionAttributes,
-    pub reserved1: u32,
-    pub reserved2: u32,
-    pub reserved3: u32,
+    pub(crate) segment_name: SegmentName,
+    pub(crate) section_name: SectionName,
+    pub(crate) addr: Va,
+    pub(crate) size: u64,
+    pub(crate) offset: ThinFileOffset,
+    pub(crate) align: u32,
+    pub(crate) reloff: ThinFileOffset,
+    pub(crate) nreloc: u32,
+    pub(crate) section_type: SectionType,
+    pub(crate) attributes: SectionAttributes,
+    pub(crate) reserved1: u32,
+    pub(crate) reserved2: u32,
+    pub(crate) reserved3: u32,
+}
+
+impl Section {
+    /// Fixed-width containing segment name.
+    pub const fn segment_name(&self) -> &SegmentName {
+        &self.segment_name
+    }
+    /// Fixed-width section name.
+    pub const fn section_name(&self) -> &SectionName {
+        &self.section_name
+    }
+    /// Section virtual start address.
+    pub const fn addr(&self) -> Va {
+        self.addr
+    }
+    /// Section virtual size in bytes.
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+    /// Slice-relative file offset.
+    pub const fn offset(&self) -> ThinFileOffset {
+        self.offset
+    }
+    /// Base-two alignment exponent.
+    pub const fn align(&self) -> u32 {
+        self.align
+    }
+    /// Slice-relative relocation-table offset.
+    pub const fn relocation_offset(&self) -> ThinFileOffset {
+        self.reloff
+    }
+    /// Number of relocation records.
+    pub const fn relocation_count(&self) -> u32 {
+        self.nreloc
+    }
+    /// Decoded section type.
+    pub const fn section_type(&self) -> SectionType {
+        self.section_type
+    }
+    /// Parsed section attributes.
+    pub const fn attributes(&self) -> SectionAttributes {
+        self.attributes
+    }
+    /// First type-specific reserved word.
+    pub const fn reserved1(&self) -> u32 {
+        self.reserved1
+    }
+    /// Second type-specific reserved word.
+    pub const fn reserved2(&self) -> u32 {
+        self.reserved2
+    }
+    /// Third type-specific reserved word.
+    pub const fn reserved3(&self) -> u32 {
+        self.reserved3
+    }
 }

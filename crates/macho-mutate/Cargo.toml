@@ -9,9 +9,14 @@
     description            = "Mach-O mutation and patching"
 
 [dependencies]
-    macho-core.workspace     = true
-    macho-insn.workspace     = true
-    macho-analysis.workspace = true
-    serde.workspace          = true
-    zerocopy.workspace       = true
-    sha2.workspace           = true
+    macho-core.workspace = true
+    macho-insn.workspace = true
+    macho-dyld.workspace = true
+    macho-codesign.workspace = true
+    serde.workspace = true
+    zerocopy.workspace = true
+    sha2.workspace = true
+    thiserror.workspace = true
+
+[dev-dependencies]
+    macho-test-support.workspace = true

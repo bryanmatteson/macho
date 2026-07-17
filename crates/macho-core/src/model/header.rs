@@ -4,12 +4,16 @@ use crate::format::io::endian::Endian;
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The Bitness type.
 pub enum Bitness {
+    /// The Bits32 variant.
     Bits32,
+    /// The Bits64 variant.
     Bits64,
 }
 
 impl Bitness {
+    /// Performs header_size.
     pub fn header_size(self) -> usize {
         match self {
             Bitness::Bits32 => 28,
@@ -28,26 +32,33 @@ impl fmt::Display for Bitness {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The MagicNumber type.
 pub enum MagicNumber {
+    /// The MachO32 variant.
     MachO32,
+    /// The MachO64 variant.
     MachO64,
+    /// The MachO32Swapped variant.
     MachO32Swapped,
+    /// The MachO64Swapped variant.
     MachO64Swapped,
 }
 
 impl MagicNumber {
+    /// Performs from_u32.
     pub fn from_u32(v: u32) -> Result<Self> {
         match v {
             MH_MAGIC => Ok(Self::MachO32),
             MH_MAGIC_64 => Ok(Self::MachO64),
             MH_CIGAM => Ok(Self::MachO32Swapped),
             MH_CIGAM_64 => Ok(Self::MachO64Swapped),
-            _ => Err(Error::Format(format!(
+            _ => Err(Error::format(format!(
                 "unrecognized Mach-O magic: {v:#010x}"
             ))),
         }
     }
 
+    /// Performs endian.
     pub fn endian(self) -> Endian {
         match self {
             Self::MachO32 | Self::MachO64 => {
@@ -70,6 +81,7 @@ impl MagicNumber {
         }
     }
 
+    /// Performs bitness.
     pub fn bitness(self) -> Bitness {
         match self {
             Self::MachO32 | Self::MachO32Swapped => Bitness::Bits32,
@@ -79,35 +91,59 @@ impl MagicNumber {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The FatMagic type.
 pub enum FatMagic {
+    /// The Fat32 variant.
     Fat32,
+    /// The Fat64 variant.
     Fat64,
 }
 
 impl FatMagic {
+    /// Performs from_u32.
     pub fn from_u32(v: u32) -> Result<Self> {
         match v {
             FAT_MAGIC => Ok(Self::Fat32),
             FAT_MAGIC_64 => Ok(Self::Fat64),
-            _ => Err(Error::Format(format!("unrecognized fat magic: {v:#010x}"))),
+            _ => Err(Error::format(format!("unrecognized fat magic: {v:#010x}"))),
         }
     }
 
+    /// Performs is_64bit.
     pub fn is_64bit(self) -> bool {
         matches!(self, Self::Fat64)
     }
 }
 
 #[derive(Debug, Clone)]
+/// The FatHeader type.
 pub struct FatHeader {
-    pub magic: FatMagic,
-    pub nfat_arch: u32,
+    magic: FatMagic,
+    nfat_arch: u32,
+}
+
+impl FatHeader {
+    pub(crate) const fn new(magic: FatMagic, nfat_arch: u32) -> Self {
+        Self { magic, nfat_arch }
+    }
+
+    /// Fat container encoding width.
+    pub const fn magic(&self) -> FatMagic {
+        self.magic
+    }
+
+    /// Number of architecture entries declared by the validated table.
+    pub const fn architecture_count(&self) -> u32 {
+        self.nfat_arch
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// The CpuType type.
 pub struct CpuType(pub i32);
 
 impl CpuType {
+    /// Performs name.
     pub fn name(self) -> &'static str {
         match self.0 {
             CPU_TYPE_X86 => "x86",
@@ -121,6 +157,7 @@ impl CpuType {
         }
     }
 
+    /// Performs is_64bit.
     pub fn is_64bit(self) -> bool {
         (self.0 & CPU_ARCH_ABI64) != 0
     }
@@ -139,6 +176,7 @@ impl fmt::Display for CpuType {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// The CpuSubtype type.
 pub struct CpuSubtype(pub i32);
 
 impl CpuSubtype {
@@ -147,6 +185,7 @@ impl CpuSubtype {
         self.0 & CPU_SUBTYPE_MASK
     }
 
+    /// Performs name.
     pub fn name(self, cpu_type: CpuType) -> &'static str {
         let masked = self.masked();
         match (cpu_type.0, masked) {
@@ -168,24 +207,31 @@ impl fmt::Debug for CpuSubtype {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+/// The ArchSpec type.
 pub struct ArchSpec {
+    /// The cpu_type field.
     pub cpu_type: CpuType,
+    /// The cpu_subtype field.
     pub cpu_subtype: CpuSubtype,
 }
 
 impl ArchSpec {
+    /// Performs is_x86_64.
     pub fn is_x86_64(&self) -> bool {
         self.cpu_type.0 == CPU_TYPE_X86_64
     }
 
+    /// Performs is_arm64.
     pub fn is_arm64(&self) -> bool {
         self.cpu_type.0 == CPU_TYPE_ARM64 && self.cpu_subtype.masked() != CPU_SUBTYPE_ARM64E
     }
 
+    /// Performs is_arm64e.
     pub fn is_arm64e(&self) -> bool {
         self.cpu_type.0 == CPU_TYPE_ARM64 && self.cpu_subtype.masked() == CPU_SUBTYPE_ARM64E
     }
 
+    /// Performs name.
     pub fn name(&self) -> String {
         if self.is_arm64e() {
             "arm64e".to_string()
@@ -208,25 +254,42 @@ impl fmt::Display for ArchSpec {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The FileType type.
 pub enum FileType {
+    /// The Object variant.
     Object,
+    /// The Execute variant.
     Execute,
+    /// The Fvmlib variant.
     Fvmlib,
+    /// The Core variant.
     Core,
+    /// The Preload variant.
     Preload,
+    /// The Dylib variant.
     Dylib,
+    /// The Dylinker variant.
     Dylinker,
+    /// The Bundle variant.
     Bundle,
+    /// The DylibStub variant.
     DylibStub,
+    /// The Dsym variant.
     Dsym,
+    /// The KextBundle variant.
     KextBundle,
+    /// The Fileset variant.
     Fileset,
+    /// The GpuExecute variant.
     GpuExecute,
+    /// The GpuDylib variant.
     GpuDylib,
+    /// The Unknown variant.
     Unknown(u32),
 }
 
 impl FileType {
+    /// Performs from_u32.
     pub fn from_u32(v: u32) -> Self {
         match v {
             MH_OBJECT => Self::Object,
@@ -247,6 +310,7 @@ impl FileType {
         }
     }
 
+    /// Performs name.
     pub fn name(&self) -> &'static str {
         match self {
             Self::Object => "MH_OBJECT",
@@ -269,13 +333,49 @@ impl FileType {
 }
 
 #[derive(Debug, Clone)]
+/// The MachoHeader type.
 pub struct MachoHeader {
-    pub magic: MagicNumber,
-    pub cpu_type: CpuType,
-    pub cpu_subtype: CpuSubtype,
-    pub file_type: FileType,
-    pub ncmds: u32,
-    pub sizeofcmds: u32,
-    pub flags: MachoHeaderFlags,
-    pub reserved: u32,
+    pub(crate) magic: MagicNumber,
+    pub(crate) cpu_type: CpuType,
+    pub(crate) cpu_subtype: CpuSubtype,
+    pub(crate) file_type: FileType,
+    pub(crate) ncmds: u32,
+    pub(crate) sizeofcmds: u32,
+    pub(crate) flags: MachoHeaderFlags,
+    pub(crate) reserved: u32,
+}
+
+impl MachoHeader {
+    /// Parsed Mach-O magic and byte-order encoding.
+    pub const fn magic(&self) -> MagicNumber {
+        self.magic
+    }
+    /// Declared CPU family.
+    pub const fn cpu_type(&self) -> CpuType {
+        self.cpu_type
+    }
+    /// Declared CPU subtype.
+    pub const fn cpu_subtype(&self) -> CpuSubtype {
+        self.cpu_subtype
+    }
+    /// Declared Mach-O file type.
+    pub const fn file_type(&self) -> FileType {
+        self.file_type
+    }
+    /// Number of validated load commands.
+    pub const fn load_command_count(&self) -> u32 {
+        self.ncmds
+    }
+    /// Declared load-command byte size.
+    pub const fn load_commands_size(&self) -> u32 {
+        self.sizeofcmds
+    }
+    /// Validated header flags.
+    pub const fn flags(&self) -> MachoHeaderFlags {
+        self.flags
+    }
+    /// Reserved 64-bit header word.
+    pub const fn reserved(&self) -> u32 {
+        self.reserved
+    }
 }

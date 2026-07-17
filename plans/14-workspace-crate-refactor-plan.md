@@ -2,7 +2,17 @@
 
 ## Status
 
-This is the concrete plan for splitting `macho` from one large package into a
+**Superseded by
+[`15-architecture-coherence-implementation-plan.md`](15-architecture-coherence-implementation-plan.md).**
+This document is retained as historical context for the first workspace split.
+It describes the pre-workspace tree and must not be used as an execution
+authority.
+
+Plan 15 starts from the live workspace, replaces this document's target graph
+and calendar-phased migration, and is the sole authority for completing the
+crate architecture.
+
+The original plan proposed splitting `macho` from one large package into a
 workspace with a small number of real, reusable crates.
 
 The goal is not to create a crate per directory. The goal is to produce crate

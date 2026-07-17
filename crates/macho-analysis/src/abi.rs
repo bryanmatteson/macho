@@ -7,14 +7,14 @@
 //! 4. **Export only** (Unknown confidence): provider exports the symbol, no ABI data
 
 use crate::Result;
-use crate::core::dwarf::DwarfFunctionIndex;
-use crate::core::dwarf::types::{DwarfFunctionInfo, DwarfType};
 use crate::core::model::macho_file::MachoFile;
 use crate::core::model::symbol::SymbolTable;
-use crate::core::objc::ObjCMetadata;
-use crate::core::objc::compat::{self, IssueSeverity as ObjCSeverity};
-use crate::core::objc::encoding::ObjCMethodSignature;
-use crate::core::rtti::VtableIndex;
+use crate::cpp::VtableIndex;
+use crate::dwarf::DwarfFunctionIndex;
+use crate::dwarf::types::{DwarfFunctionInfo, DwarfType};
+use crate::objc::ObjCMetadata;
+use crate::objc::compat::{self, IssueSeverity as ObjCSeverity};
+use crate::objc::encoding::ObjCMethodSignature;
 
 /// Result of an ABI compatibility check.
 #[derive(Debug, Clone)]
@@ -29,6 +29,7 @@ pub struct AbiCompatResult {
 
 /// Confidence in the compatibility verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
 pub enum AbiConfidence {
     /// Verdict from DWARF debug info (parameter types, return type).
     High,
@@ -42,6 +43,7 @@ pub enum AbiConfidence {
 
 /// Severity of a compatibility finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AbiSeverity {
     /// Definite incompatibility.
     Error,
@@ -54,7 +56,9 @@ pub enum AbiSeverity {
 /// A single finding from the compatibility check.
 #[derive(Debug, Clone)]
 pub struct AbiFinding {
+    /// The severity field.
     pub severity: AbiSeverity,
+    /// The message field.
     pub message: String,
 }
 
@@ -81,26 +85,28 @@ pub fn check_symbol_compat(
         .iter()
         .find(|s| s.name == provider_symbol);
 
-    if t_sym.is_none() {
-        findings.push(AbiFinding {
-            severity: AbiSeverity::Error,
-            message: format!("target symbol '{target_symbol}' not found"),
-        });
-    }
-    if p_sym.is_none() {
-        findings.push(AbiFinding {
-            severity: AbiSeverity::Error,
-            message: format!("provider symbol '{provider_symbol}' not found"),
-        });
-    }
-
-    if t_sym.is_none() || p_sym.is_none() {
-        return Ok(AbiCompatResult {
-            compatible: false,
-            confidence: AbiConfidence::Unknown,
-            findings,
-        });
-    }
+    let (t_sym_ref, p_sym_ref) = match (t_sym, p_sym) {
+        (Some(t), Some(p)) => (t, p),
+        (t, p) => {
+            if t.is_none() {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Error,
+                    message: format!("target symbol '{target_symbol}' not found"),
+                });
+            }
+            if p.is_none() {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Error,
+                    message: format!("provider symbol '{provider_symbol}' not found"),
+                });
+            }
+            return Ok(AbiCompatResult {
+                compatible: false,
+                confidence: AbiConfidence::Unknown,
+                findings,
+            });
+        }
+    };
 
     // --- 2. Try DWARF comparison (highest confidence) ---
     let t_dwarf = DwarfFunctionIndex::build(target).ok();
@@ -116,8 +122,6 @@ pub fn check_symbol_compat(
     }
 
     // --- 3. Try body analysis heuristic (low confidence) ---
-    let t_sym_ref = t_sym.unwrap();
-    let p_sym_ref = p_sym.unwrap();
 
     let t_body =
         crate::reconstruct::cpp::abi::analyze_symbol_body(target, &t_symtab, t_sym_ref, None);
@@ -185,17 +189,34 @@ pub fn check_symbol_compat(
 
 // ───────────────────────────── ObjC compat ─────────────────────────────
 
+/// Identifies one Objective-C method for an ABI comparison.
+#[derive(Debug, Clone, Copy)]
+pub struct ObjcMethodRef<'a> {
+    /// The class field.
+    pub class: &'a str,
+    /// The selector field.
+    pub selector: &'a str,
+    /// The is_instance field.
+    pub is_instance: bool,
+}
+
 /// Check ABI compatibility between two ObjC methods.
 pub fn check_objc_compat(
     target: &MachoFile<'_>,
-    target_class: &str,
-    target_selector: &str,
-    target_is_instance: bool,
+    target_method: ObjcMethodRef<'_>,
     provider: &MachoFile<'_>,
-    provider_class: &str,
-    provider_selector: &str,
-    provider_is_instance: bool,
+    provider_method: ObjcMethodRef<'_>,
 ) -> Result<AbiCompatResult> {
+    let ObjcMethodRef {
+        class: target_class,
+        selector: target_selector,
+        is_instance: target_is_instance,
+    } = target_method;
+    let ObjcMethodRef {
+        class: provider_class,
+        selector: provider_selector,
+        is_instance: provider_is_instance,
+    } = provider_method;
     let t_meta = target.ext::<ObjCMetadata>()?;
     let p_meta = provider.ext::<ObjCMetadata>()?;
 
@@ -209,35 +230,37 @@ pub fn check_objc_compat(
 
     let mut findings = Vec::new();
 
-    if t_method.is_none() {
-        findings.push(AbiFinding {
-            severity: AbiSeverity::Error,
-            message: format!(
-                "target method {}[{target_class} {target_selector}] not found",
-                if target_is_instance { "-" } else { "+" }
-            ),
-        });
-    }
-    if p_method.is_none() {
-        findings.push(AbiFinding {
-            severity: AbiSeverity::Error,
-            message: format!(
-                "provider method {}[{provider_class} {provider_selector}] not found",
-                if provider_is_instance { "-" } else { "+" }
-            ),
-        });
-    }
+    let (t_m, p_m) = match (t_method, p_method) {
+        (Some(t), Some(p)) => (t, p),
+        (t, p) => {
+            if t.is_none() {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Error,
+                    message: format!(
+                        "target method {}[{target_class} {target_selector}] not found",
+                        if target_is_instance { "-" } else { "+" }
+                    ),
+                });
+            }
+            if p.is_none() {
+                findings.push(AbiFinding {
+                    severity: AbiSeverity::Error,
+                    message: format!(
+                        "provider method {}[{provider_class} {provider_selector}] not found",
+                        if provider_is_instance { "-" } else { "+" }
+                    ),
+                });
+            }
+            return Ok(AbiCompatResult {
+                compatible: false,
+                confidence: AbiConfidence::Unknown,
+                findings,
+            });
+        }
+    };
 
-    if t_method.is_none() || p_method.is_none() {
-        return Ok(AbiCompatResult {
-            compatible: false,
-            confidence: AbiConfidence::Unknown,
-            findings,
-        });
-    }
-
-    let t_encoding = &t_method.unwrap().type_encoding;
-    let p_encoding = &p_method.unwrap().type_encoding;
+    let t_encoding = &t_m.type_encoding;
+    let p_encoding = &p_m.type_encoding;
 
     // Parse type encodings into signatures.
     let t_sig = ObjCMethodSignature::parse(t_encoding);
@@ -251,6 +274,7 @@ pub fn check_objc_compat(
                     severity: match issue.severity {
                         ObjCSeverity::Error => AbiSeverity::Error,
                         ObjCSeverity::Warning => AbiSeverity::Warning,
+                        _ => AbiSeverity::Warning,
                     },
                     message: issue.message.clone(),
                 });
@@ -504,7 +528,7 @@ fn find_objc_method<'a>(
     class_name: &str,
     selector: &str,
     is_instance: bool,
-) -> Option<&'a crate::core::objc::types::ObjCMethod> {
+) -> Option<&'a crate::objc::types::ObjCMethod> {
     for class in &meta.classes {
         if class.name == class_name {
             let methods = if is_instance {

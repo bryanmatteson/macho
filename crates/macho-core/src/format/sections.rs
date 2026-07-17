@@ -7,6 +7,7 @@ use crate::model::addr::Va;
 use crate::model::names::{SectionName, SegmentName};
 use crate::model::section::{Section, SectionType};
 
+/// Performs parse_sections_32.
 pub fn parse_sections_32(
     data: &[u8],
     endian: Endian,
@@ -41,6 +42,7 @@ pub fn parse_sections_32(
     Ok(sections)
 }
 
+/// Performs parse_sections_64.
 pub fn parse_sections_64(
     data: &[u8],
     endian: Endian,
