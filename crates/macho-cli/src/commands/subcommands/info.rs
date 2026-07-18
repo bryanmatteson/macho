@@ -44,10 +44,11 @@ pub struct InfoArgs {
 /// Performs run.
 pub(crate) fn run(
     args: InfoArgs,
-    format: OutputFormat,
+    output: crate::commands::output::Options,
     out: &mut dyn Write,
     warnings: &mut Vec<CliWarning>,
 ) -> Result<()> {
+    let format = output.format();
     let scope = match args.scope {
         None => InspectScope::Full,
         Some(InfoScope::Header) => InspectScope::Header,
@@ -81,9 +82,9 @@ pub(crate) fn run(
             plan = plan.with_slices([arch]);
         }
         let document = Analyzer.run(&outcome.container, &plan)?;
-        writeln!(out, "{}", serde_json::to_string_pretty(&document)?)?;
+        crate::commands::output::json::write_pretty(out, &document)?;
         return Ok(());
     }
     let inspect_args = InspectArgs::new(args.input.path, args.selection.arch, args.validate);
-    super::inspect::run_scoped(inspect_args, scope, out, warnings)
+    super::inspect::run_scoped(inspect_args, scope, output.style(), out, warnings)
 }

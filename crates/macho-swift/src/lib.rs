@@ -8,6 +8,7 @@ pub use macho_symbols as symbols;
 /// The error module.
 pub mod error;
 pub use error::{Result, SwiftError, SwiftErrorKind};
+mod context_descriptors;
 /// The types module.
 pub mod types;
 
@@ -18,7 +19,6 @@ use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
 use crate::objc::ObjCMetadata;
 use crate::symbols::demangle::demangle_symbol;
-use std::collections::btree_map::Entry;
 
 /// Injectable Swift symbol demangler.
 pub trait SwiftDemangler: Send + Sync {
@@ -51,8 +51,12 @@ impl<'data> MachoExt<'data> for SwiftTypeIndex {
 impl SwiftTypeIndex {
     /// Performs build.
     pub fn build(macho: &MachoFile<'_>) -> Self {
-        Self::build_with_demangler(macho, &PureSwiftDemangler)
-            .unwrap_or_else(|_| Self { types: Vec::new() })
+        Self::build_with_demangler(macho, &PureSwiftDemangler).unwrap_or_else(|_| Self {
+            types: Vec::new(),
+            parents: Vec::new(),
+            conformances: Vec::new(),
+            associated_types: Vec::new(),
+        })
     }
 
     /// Build the index with an injected demangler and retain typed failures.
@@ -60,14 +64,21 @@ impl SwiftTypeIndex {
         macho: &MachoFile<'_>,
         demangler: &dyn SwiftDemangler,
     ) -> Result<Self> {
-        let mut types = std::collections::BTreeMap::new();
+        let mut types = Vec::new();
 
-        // 1. From demangled symbols — process descriptors first (they carry
+        // 1. Native Swift context descriptors. These are the authoritative
+        //    source for nominal kinds and include types that are neither
+        //    Objective-C-visible nor represented by exported symbols.
+        for swift_type in context_descriptors::discover(macho) {
+            insert_swift_type(&mut types, swift_type);
+        }
+
+        // 2. From demangled symbols — process descriptors first (they carry
         //    accurate kind info), then metadata accessors for anything not yet
         //    covered.
         if let Ok(symtab) = macho.ext::<SymbolTable<'_>>() {
             // First pass: descriptors (high-confidence kind)
-            for sym in symtab.symbols() {
+            for sym in symtab.symbols().iter().filter(|symbol| symbol.is_defined()) {
                 if !is_swift_mangled(sym.name) {
                     continue;
                 }
@@ -81,7 +92,7 @@ impl SwiftTypeIndex {
                 }
             }
             // Second pass: metadata accessors (fills in types not covered by descriptors)
-            for sym in symtab.symbols() {
+            for sym in symtab.symbols().iter().filter(|symbol| symbol.is_defined()) {
                 if !is_swift_mangled(sym.name) {
                     continue;
                 }
@@ -96,29 +107,74 @@ impl SwiftTypeIndex {
             }
         }
 
-        // 2. From ObjC classes marked as Swift
+        // 3. From ObjC classes and protocols visible to the runtime.
         if let Ok(meta) = macho.ext::<ObjCMetadata>() {
             for cls in &meta.classes {
                 if cls.is_swift {
                     insert_swift_type(
                         &mut types,
-                        types::SwiftType {
-                            name: cls.name.clone(),
-                            kind: types::SwiftTypeKind::Class,
-                            mangled_name: None,
-                            address: None,
-                            source: types::SwiftTypeSource::ObjCMetadata,
-                            confidence: types::SwiftTypeConfidence::High,
-                        },
+                        swift_type_from_objc_runtime_name(
+                            &cls.name,
+                            types::SwiftTypeKind::Class,
+                            demangler,
+                        )?,
+                    );
+                }
+            }
+            for protocol in &meta.protocols {
+                if is_swift_objc_protocol_name(&protocol.name) {
+                    insert_swift_type(
+                        &mut types,
+                        swift_type_from_objc_runtime_name(
+                            &protocol.name,
+                            types::SwiftTypeKind::Protocol,
+                            demangler,
+                        )?,
                     );
                 }
             }
         }
 
+        types.sort_by(|left, right| {
+            left.name
+                .cmp(&right.name)
+                .then_with(|| left.address.cmp(&right.address))
+                .then_with(|| source_rank(right.source).cmp(&source_rank(left.source)))
+                .then_with(|| left.mangled_name.cmp(&right.mangled_name))
+        });
+        let parents = context_descriptors::discover_parents(macho, &types);
+        let conformances = context_descriptors::discover_conformances(macho);
+        let associated_types = context_descriptors::discover_associated_types(macho);
         Ok(SwiftTypeIndex {
-            types: types.into_values().collect(),
+            types,
+            parents,
+            conformances,
+            associated_types,
         })
     }
+}
+
+fn swift_type_from_objc_runtime_name(
+    runtime_name: &str,
+    kind: types::SwiftTypeKind,
+    demangler: &dyn SwiftDemangler,
+) -> Result<types::SwiftType> {
+    let demangled = demangler.demangle(runtime_name)?;
+    Ok(types::SwiftType {
+        name: demangled.unwrap_or_else(|| runtime_name.to_owned()),
+        kind,
+        mangled_name: runtime_name
+            .starts_with("_Tt")
+            .then(|| runtime_name.to_owned()),
+        address: None,
+        source: types::SwiftTypeSource::ObjCMetadata,
+        confidence: types::SwiftTypeConfidence::High,
+        fields: None,
+    })
+}
+
+fn is_swift_objc_protocol_name(name: &str) -> bool {
+    name.starts_with("_TtP")
 }
 
 fn is_swift_mangled(name: &str) -> bool {
@@ -168,6 +224,7 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
         } else {
             types::SwiftTypeConfidence::High
         },
+        fields: None,
     })
 }
 
@@ -234,26 +291,42 @@ fn clean_type_name(raw: &str) -> String {
     name.to_string()
 }
 
-fn insert_swift_type(
-    types: &mut std::collections::BTreeMap<String, types::SwiftType>,
-    candidate: types::SwiftType,
-) {
-    match types.entry(candidate.name.clone()) {
-        Entry::Vacant(entry) => {
-            entry.insert(candidate);
-        }
-        Entry::Occupied(mut entry) => {
-            let merged = merge_swift_types(entry.get(), candidate);
-            if merged.confidence != entry.get().confidence
-                || merged.kind != entry.get().kind
-                || merged.mangled_name != entry.get().mangled_name
-                || merged.address != entry.get().address
-                || merged.source != entry.get().source
-            {
-                entry.insert(merged);
-            }
-        }
+fn insert_swift_type(types: &mut Vec<types::SwiftType>, candidate: types::SwiftType) {
+    let matches = types
+        .iter()
+        .enumerate()
+        .filter(|(_, existing)| same_swift_identity(existing, &candidate))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if let [index] = matches.as_slice() {
+        types[*index] = merge_swift_types(&types[*index], candidate);
+    } else {
+        // Zero matches is a new occurrence. Multiple matches are ambiguous and
+        // must also remain a distinct occurrence rather than name-deduplicating
+        // descriptors or symbols that happen to share a spelling.
+        types.push(candidate);
     }
+}
+
+fn same_swift_identity(existing: &types::SwiftType, candidate: &types::SwiftType) -> bool {
+    if existing.address.is_some() && existing.address == candidate.address {
+        return true;
+    }
+    let descriptor_and_symbol = matches!(
+        (existing.source, candidate.source),
+        (
+            types::SwiftTypeSource::SwiftMetadata,
+            types::SwiftTypeSource::DemangledSymbol
+        ) | (
+            types::SwiftTypeSource::DemangledSymbol,
+            types::SwiftTypeSource::SwiftMetadata
+        )
+    );
+    descriptor_and_symbol
+        && existing.name == candidate.name
+        && (existing.kind == candidate.kind
+            || existing.kind == types::SwiftTypeKind::Unknown
+            || candidate.kind == types::SwiftTypeKind::Unknown)
 }
 
 fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
@@ -263,28 +336,39 @@ fn confidence_rank(confidence: types::SwiftTypeConfidence) -> u8 {
     }
 }
 
+fn source_rank(source: types::SwiftTypeSource) -> u8 {
+    match source {
+        types::SwiftTypeSource::SwiftMetadata => 2,
+        types::SwiftTypeSource::DemangledSymbol => 1,
+        types::SwiftTypeSource::ObjCMetadata => 0,
+    }
+}
+
 fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -> types::SwiftType {
     let existing_rank = confidence_rank(existing.confidence);
     let candidate_rank = confidence_rank(candidate.confidence);
+    let mangled_name = existing
+        .mangled_name
+        .clone()
+        .or_else(|| candidate.mangled_name.clone());
+    let address = existing.address.or(candidate.address);
+    let fields = existing.fields.clone().or_else(|| candidate.fields.clone());
     let mut preferred = if candidate_rank > existing_rank
         || (candidate_rank == existing_rank
             && existing.kind == types::SwiftTypeKind::Unknown
             && candidate.kind != types::SwiftTypeKind::Unknown)
         || (candidate_rank == existing_rank
-            && (existing.mangled_name.is_none() && candidate.mangled_name.is_some()
-                || existing.address.is_none() && candidate.address.is_some()))
+            && existing.kind == candidate.kind
+            && source_rank(candidate.source) > source_rank(existing.source))
     {
         candidate
     } else {
         existing.clone()
     };
 
-    if preferred.mangled_name.is_none() {
-        preferred.mangled_name = existing.mangled_name.clone();
-    }
-    if preferred.address.is_none() {
-        preferred.address = existing.address;
-    }
+    preferred.mangled_name = mangled_name;
+    preferred.address = address;
+    preferred.fields = fields;
     preferred
 }
 
@@ -292,9 +376,44 @@ fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    struct RuntimeNameDemangler;
+
+    impl SwiftDemangler for RuntimeNameDemangler {
+        fn demangle(&self, symbol: &str) -> Result<Option<String>> {
+            Ok(match symbol {
+                "_TtC4Demo6Widget" => Some("Demo.Widget".to_owned()),
+                "_TtP4Demo8Drawable_" => Some("Demo.Drawable".to_owned()),
+                _ => None,
+            })
+        }
+    }
+
+    #[test]
+    fn objc_runtime_names_become_swift_names_and_retain_identity() {
+        let ty = swift_type_from_objc_runtime_name(
+            "_TtC4Demo6Widget",
+            types::SwiftTypeKind::Class,
+            &RuntimeNameDemangler,
+        )
+        .expect("runtime name demangles");
+        assert_eq!(ty.name, "Demo.Widget");
+        assert_eq!(ty.mangled_name.as_deref(), Some("_TtC4Demo6Widget"));
+        assert_eq!(ty.kind, types::SwiftTypeKind::Class);
+
+        let protocol = swift_type_from_objc_runtime_name(
+            "_TtP4Demo8Drawable_",
+            types::SwiftTypeKind::Protocol,
+            &RuntimeNameDemangler,
+        )
+        .expect("protocol name demangles");
+        assert_eq!(protocol.name, "Demo.Drawable");
+        assert_eq!(protocol.kind, types::SwiftTypeKind::Protocol);
+    }
+
     #[test]
     fn prefers_high_confidence_over_partial() {
-        let mut types = std::collections::BTreeMap::new();
+        let mut types = Vec::new();
         insert_swift_type(
             &mut types,
             types::SwiftType {
@@ -304,6 +423,7 @@ mod tests {
                 address: Some(0x1000),
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
+                fields: None,
             },
         );
         insert_swift_type(
@@ -313,14 +433,18 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
-                source: types::SwiftTypeSource::ObjCMetadata,
+                source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
+                fields: None,
             },
         );
 
-        let ty = types.get("Demo.Widget").expect("type should be present");
+        let ty = types
+            .iter()
+            .find(|value| value.name == "Demo.Widget")
+            .unwrap();
         assert_eq!(ty.kind, types::SwiftTypeKind::Class);
-        assert_eq!(ty.source, types::SwiftTypeSource::ObjCMetadata);
+        assert_eq!(ty.source, types::SwiftTypeSource::SwiftMetadata);
         assert_eq!(ty.confidence, types::SwiftTypeConfidence::High);
         assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
         assert_eq!(ty.address, Some(0x1000));
@@ -328,7 +452,7 @@ mod tests {
 
     #[test]
     fn preserves_symbol_details_when_replacing_partial_metadata() {
-        let mut types = std::collections::BTreeMap::new();
+        let mut types = Vec::new();
         insert_swift_type(
             &mut types,
             types::SwiftType {
@@ -338,6 +462,7 @@ mod tests {
                 address: Some(0x2000),
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
+                fields: None,
             },
         );
         insert_swift_type(
@@ -347,14 +472,18 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
-                source: types::SwiftTypeSource::ObjCMetadata,
+                source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
+                fields: None,
             },
         );
 
-        let ty = types.get("Demo.Widget").expect("type should be present");
+        let ty = types
+            .iter()
+            .find(|value| value.name == "Demo.Widget")
+            .unwrap();
         assert_eq!(ty.kind, types::SwiftTypeKind::Class);
-        assert_eq!(ty.source, types::SwiftTypeSource::ObjCMetadata);
+        assert_eq!(ty.source, types::SwiftTypeSource::SwiftMetadata);
         assert_eq!(ty.confidence, types::SwiftTypeConfidence::High);
         assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
         assert_eq!(ty.address, Some(0x2000));
@@ -362,7 +491,7 @@ mod tests {
 
     #[test]
     fn equal_confidence_merge_keeps_richer_symbol_details() {
-        let mut types = std::collections::BTreeMap::new();
+        let mut types = Vec::new();
         insert_swift_type(
             &mut types,
             types::SwiftType {
@@ -370,8 +499,9 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
-                source: types::SwiftTypeSource::ObjCMetadata,
+                source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
+                fields: None,
             },
         );
         insert_swift_type(
@@ -383,12 +513,75 @@ mod tests {
                 address: Some(0x3000),
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::High,
+                fields: None,
             },
         );
 
-        let ty = types.get("Demo.Widget").expect("type should be present");
-        assert_eq!(ty.source, types::SwiftTypeSource::DemangledSymbol);
+        let ty = types
+            .iter()
+            .find(|value| value.name == "Demo.Widget")
+            .unwrap();
+        assert_eq!(ty.source, types::SwiftTypeSource::SwiftMetadata);
         assert_eq!(ty.mangled_name.as_deref(), Some("$s4Demo6WidgetC"));
         assert_eq!(ty.address, Some(0x3000));
+    }
+
+    #[test]
+    fn native_metadata_remains_authoritative_when_objc_adds_a_runtime_name() {
+        let mut types = Vec::new();
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: None,
+                address: Some(0x4000),
+                source: types::SwiftTypeSource::SwiftMetadata,
+                confidence: types::SwiftTypeConfidence::High,
+                fields: None,
+            },
+        );
+        insert_swift_type(
+            &mut types,
+            types::SwiftType {
+                name: "Demo.Widget".into(),
+                kind: types::SwiftTypeKind::Class,
+                mangled_name: Some("_TtC4Demo6Widget".into()),
+                address: None,
+                source: types::SwiftTypeSource::ObjCMetadata,
+                confidence: types::SwiftTypeConfidence::High,
+                fields: None,
+            },
+        );
+
+        let native = types
+            .iter()
+            .find(|value| value.source == types::SwiftTypeSource::SwiftMetadata)
+            .unwrap();
+        assert_eq!(types.len(), 2, "name-only ObjC evidence must not merge");
+        let ty = native;
+        assert_eq!(ty.source, types::SwiftTypeSource::SwiftMetadata);
+        assert_eq!(ty.mangled_name, None);
+        assert_eq!(ty.address, Some(0x4000));
+    }
+
+    #[test]
+    fn duplicate_descriptor_names_at_distinct_addresses_remain_occurrences() {
+        let mut types = Vec::new();
+        for address in [0x1000, 0x2000] {
+            insert_swift_type(
+                &mut types,
+                types::SwiftType {
+                    name: "Demo.Widget".into(),
+                    kind: types::SwiftTypeKind::Struct,
+                    mangled_name: None,
+                    address: Some(address),
+                    source: types::SwiftTypeSource::SwiftMetadata,
+                    confidence: types::SwiftTypeConfidence::High,
+                    fields: None,
+                },
+            );
+        }
+        assert_eq!(types.len(), 2);
     }
 }

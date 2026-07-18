@@ -137,7 +137,9 @@ fn interpret_bind_opcodes<'data>(
                 segment_offset = reader.read_uleb128()?;
             }
             BIND_OPCODE_ADD_ADDR_ULEB => {
-                segment_offset += reader.read_uleb128()?;
+                // Some linkers encode backward movement as a two's-complement
+                // ULEB delta. Dyld applies the addition modulo 2^64.
+                segment_offset = add_segment_offset(segment_offset, reader.read_uleb128()?);
             }
             BIND_OPCODE_DO_BIND => {
                 entries.push(BindEntry {
@@ -225,4 +227,18 @@ fn interpret_bind_opcodes<'data>(
     }
 
     Ok(entries)
+}
+
+fn add_segment_offset(offset: u64, uleb_delta: u64) -> u64 {
+    offset.wrapping_add(uleb_delta)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::add_segment_offset;
+
+    #[test]
+    fn address_delta_accepts_twos_complement_backward_uleb() {
+        assert_eq!(add_segment_offset(0x100, u64::MAX), 0xff);
+    }
 }

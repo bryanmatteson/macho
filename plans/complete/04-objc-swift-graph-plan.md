@@ -1,10 +1,15 @@
-# Plan: ObjC/Swift Semantic Analysis
+# Historical Completion Record: ObjC/Swift Semantic Analysis
 
 ## Status
 
-This is the canonical ObjC/Swift plan. It consolidates the earlier graph draft
-and the separate ObjC resolver draft into one track centered on
-`src/objc/graph.rs`.
+This document records the completed pre-workspace ObjC/Swift graph work. It is
+not an implementation authority. Plan 10 now owns Objective-C behavior, and plan
+15 owns crate placement, `Analyzer`, selective execution, Swift behavior, and
+CLI delivery.
+
+Names and paths below describe the implementation at the time of completion.
+In particular, references to plan 06's `ImageInspector` are historical and do
+not authorize restoring that type; plan 15 requires its deletion.
 
 ## Objective
 
@@ -101,7 +106,8 @@ Goal: make the semantic graph the shared product surface.
 
 Work:
 
-- expose `objc_graph()` and Swift helpers from plan 06's `ImageInspector`
+- expose `objc_graph()` and Swift helpers from the then-current plan 06
+  `ImageInspector` (historical only; superseded by plan 15's `Analyzer`)
 - align `macho objc` and `macho swift` with the shared model
 - add stable JSON output paths for graph queries
 

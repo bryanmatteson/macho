@@ -68,10 +68,10 @@ pub enum AnalysisDomain {
     Dependencies,
     /// The Audit variant.
     Audit,
-    /// The CHeaders variant.
-    CHeaders,
-    /// The CppHeaders variant.
-    CppHeaders,
+    /// The CSurface variant.
+    CSurface,
+    /// The CppSurface variant.
+    CppSurface,
     /// The ObjcHeaders variant.
     ObjcHeaders,
 }
@@ -169,7 +169,7 @@ impl AnalysisError {
     /// Performs validation.
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new(
-            AnalysisDomain::CHeaders,
+            AnalysisDomain::CSurface,
             AnalysisErrorKind::Validation,
             message,
         )
@@ -228,7 +228,7 @@ from_source!(
 from_source!(DwarfError, Dwarf, Dwarf, Dwarf, "analysis.dwarf");
 from_source!(ObjcError, Objc, Objc, Objc, "analysis.objc");
 from_source!(SwiftError, Swift, Swift, Swift, "analysis.swift");
-from_source!(CppError, Cpp, Cpp, CppHeaders, "analysis.cpp");
+from_source!(CppError, Cpp, Cpp, CppSurface, "analysis.cpp");
 
 impl fmt::Display for AnalysisError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

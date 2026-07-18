@@ -13,8 +13,8 @@ use gimli::{
     DW_TAG_base_type, DW_TAG_class_type, DW_TAG_const_type, DW_TAG_enumeration_type,
     DW_TAG_formal_parameter, DW_TAG_pointer_type, DW_TAG_reference_type, DW_TAG_restrict_type,
     DW_TAG_rvalue_reference_type, DW_TAG_structure_type, DW_TAG_subprogram, DW_TAG_subroutine_type,
-    DW_TAG_typedef, DW_TAG_union_type, DW_TAG_unspecified_parameters, DW_TAG_volatile_type,
-    EndianSlice, LittleEndian, UnitOffset,
+    DW_TAG_typedef, DW_TAG_union_type, DW_TAG_unspecified_parameters, DW_TAG_variable,
+    DW_TAG_volatile_type, EndianSlice, LittleEndian, UnitOffset,
 };
 
 use super::types::*;
@@ -34,6 +34,86 @@ pub struct DwarfFunctionIndex {
     by_linkage_name: HashMap<String, usize>,
     by_address: BTreeMap<u64, usize>,
     functions: Vec<DwarfFunctionInfo>,
+}
+
+/// An index of global variables extracted from DWARF debug information.
+#[derive(Debug, Clone)]
+pub struct DwarfVariableIndex {
+    by_linkage_name: HashMap<String, usize>,
+    by_name: HashMap<String, usize>,
+    variables: Vec<DwarfVariableInfo>,
+}
+
+impl DwarfVariableIndex {
+    /// Builds a variable index from all `DW_TAG_variable` entries.
+    pub fn build(macho: &MachoFile<'_>) -> Result<Self> {
+        let sections = super::load_dwarf(macho)?;
+        let Some(sections) = sections else {
+            return Ok(Self::empty());
+        };
+        let dwarf = sections.borrow(|section| EndianSlice::new(section, LittleEndian));
+        let mut variables = Vec::new();
+        let mut headers = dwarf.units();
+        while let Ok(Some(header)) = headers.next() {
+            let Ok(unit) = dwarf.unit(header) else {
+                continue;
+            };
+            let mut entries = unit.entries();
+            while let Ok(Some(entry)) = entries.next_dfs() {
+                if entry.tag() == DW_TAG_variable
+                    && let Some(variable) = parse_variable(&dwarf, &unit, entry)
+                {
+                    variables.push(variable);
+                }
+            }
+        }
+        let mut by_linkage_name = HashMap::new();
+        let mut by_name = HashMap::new();
+        for (index, variable) in variables.iter().enumerate() {
+            if let Some(name) = &variable.linkage_name {
+                by_linkage_name.insert(name.clone(), index);
+            }
+            if let Some(name) = &variable.name {
+                by_name.insert(name.clone(), index);
+            }
+        }
+        Ok(Self {
+            by_linkage_name,
+            by_name,
+            variables,
+        })
+    }
+
+    /// Creates an empty variable index.
+    pub fn empty() -> Self {
+        Self {
+            by_linkage_name: HashMap::new(),
+            by_name: HashMap::new(),
+            variables: Vec::new(),
+        }
+    }
+
+    /// Finds a variable by its linkage spelling.
+    pub fn find_by_linkage_name(&self, name: &str) -> Option<&DwarfVariableInfo> {
+        self.by_linkage_name
+            .get(name)
+            .map(|index| &self.variables[*index])
+    }
+
+    /// Finds a variable by its source spelling.
+    pub fn find_by_name(&self, name: &str) -> Option<&DwarfVariableInfo> {
+        self.by_name.get(name).map(|index| &self.variables[*index])
+    }
+
+    /// Returns whether the index contains no variables.
+    pub fn is_empty(&self) -> bool {
+        self.variables.is_empty()
+    }
+
+    /// Returns the number of indexed variables.
+    pub fn len(&self) -> usize {
+        self.variables.len()
+    }
 }
 
 impl DwarfFunctionIndex {
@@ -139,6 +219,8 @@ fn parse_subprogram(
     unit: &GUnit<'_>,
     entry: &GDie<'_>,
 ) -> Option<DwarfFunctionInfo> {
+    let unit_offset = unit.header.offset().0 as u64;
+    let die_offset = entry.offset().0 as u64;
     let name = attr_string(dwarf, unit, entry, DW_AT_name);
     let linkage_name = attr_string(dwarf, unit, entry, DW_AT_linkage_name);
 
@@ -205,6 +287,8 @@ fn parse_subprogram(
     }
 
     Some(DwarfFunctionInfo {
+        unit_offset,
+        die_offset,
         name,
         linkage_name,
         address,
@@ -213,6 +297,30 @@ fn parse_subprogram(
         parameters,
         is_variadic,
         calling_convention,
+    })
+}
+
+fn parse_variable(
+    dwarf: &GDwarf<'_>,
+    unit: &GUnit<'_>,
+    entry: &GDie<'_>,
+) -> Option<DwarfVariableInfo> {
+    let name = attr_string(dwarf, unit, entry, DW_AT_name);
+    let linkage_name = attr_string(dwarf, unit, entry, DW_AT_linkage_name);
+    if name.is_none() && linkage_name.is_none() {
+        return None;
+    }
+    let ty = entry
+        .attr_value(DW_AT_type)
+        .and_then(type_ref_offset)
+        .map(|offset| resolve_type(dwarf, unit, offset, &mut HashSet::new()))
+        .unwrap_or(DwarfType::Unresolved);
+    Some(DwarfVariableInfo {
+        unit_offset: unit.header.offset().0 as u64,
+        die_offset: entry.offset().0 as u64,
+        name,
+        linkage_name,
+        ty,
     })
 }
 

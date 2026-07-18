@@ -1,9 +1,8 @@
 use crate::analysis::deps::compat::{CompatReport, CompatSeverity};
 use crate::analysis::deps::graph::{DepGraph, ImportProvider};
-use crate::commands::OutputFormat;
 use crate::commands::args::{ArchitectureArgs, InputArgs};
+use crate::commands::output::{Options as OutputOptions, Style, columns};
 use crate::commands::subcommands::common::map_input;
-use crate::metadata::image::DylibLinkKind;
 use crate::model::container::MachoContainer;
 use crate::model::macho_file::MachoFile;
 use anyhow::{Context, Result};
@@ -24,8 +23,9 @@ pub struct DepsArgs {
 }
 
 /// Performs run.
-pub fn run(args: DepsArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
-    let json = format == OutputFormat::Json;
+pub fn run(args: DepsArgs, output: OutputOptions, out: &mut dyn Write) -> Result<()> {
+    let json = output.format() == crate::commands::OutputFormat::Json;
+    let style = output.style();
     let mmap = map_input(&args.input.path)?;
     let container = macho::parse(&mmap)
         .with_context(|| format!("failed to parse {}", args.input.path.display()))?;
@@ -55,6 +55,7 @@ pub fn run(args: DepsArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
                     .map(|p| p.display().to_string())
                     .as_deref(),
                 json,
+                style,
                 out,
             )?;
         }
@@ -67,7 +68,7 @@ pub fn run(args: DepsArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
                     }
                 }
                 if !json && fat.arches().len() > 1 {
-                    let _ = writeln!(out, "=== {name} ===");
+                    let _ = writeln!(out, "{}", style.title(&format!("=== {name} ===")));
                 }
                 let prov_mach = provider.and_then(|c| {
                     c.find_arch(arch.macho().header().cpu_type())
@@ -82,6 +83,7 @@ pub fn run(args: DepsArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
                         .map(|p| p.display().to_string())
                         .as_deref(),
                     json,
+                    style,
                     out,
                 )?;
                 if !json {
@@ -105,6 +107,7 @@ fn print_deps(
     provider: Option<&MachoFile<'_>>,
     provider_path: Option<&str>,
     json: bool,
+    style: Style,
     out: &mut dyn Write,
 ) -> Result<bool> {
     let graph = DepGraph::build(macho).with_context(|| "failed to build dependency graph")?;
@@ -138,35 +141,26 @@ fn print_deps(
             })).collect::<Vec<_>>(),
             "compat_report": compat_report.as_ref().map(|r| serde_json::to_value(r).ok()),
         });
-        let _ = writeln!(out, "{}", serde_json::to_string_pretty(&output)?);
+        crate::commands::output::json::write_pretty(out, &output)?;
         return Ok(compat_report.as_ref().is_some_and(|r| r.has_incompatible()));
     }
 
     if let Some(ref install_name) = graph.install_name {
-        let _ = writeln!(out, "install name: {install_name}");
-    }
-
-    let _ = writeln!(out, "linked dylibs ({}):", graph.dylibs.len());
-    for dylib in &graph.dylibs {
-        let kind_tag = match dylib.kind {
-            DylibLinkKind::Required => "",
-            DylibLinkKind::Weak => " [weak]",
-            DylibLinkKind::Reexport => " [reexport]",
-            DylibLinkKind::Lazy => " [lazy]",
-            DylibLinkKind::Upward => " [upward]",
-            _ => " [unknown]",
-        };
-        let import_count = graph.imports_from(dylib.ordinal).len();
         let _ = writeln!(
             out,
-            "  [{:>2}] {}{} (compat: {}, current: {}) -- {} imports",
-            dylib.ordinal,
-            dylib.name,
-            kind_tag,
-            dylib.compat_version,
-            dylib.current_version,
-            import_count,
+            "{} {}",
+            style.muted("install name:"),
+            style.info(install_name)
         );
+    }
+
+    let _ = writeln!(
+        out,
+        "{}",
+        style.heading(&format!("Linked dylibs ({}):", graph.dylibs.len()))
+    );
+    for line in linked_dylib_lines(&graph, style) {
+        let _ = writeln!(out, "{line}");
     }
 
     // Count imports by provider category
@@ -184,55 +178,169 @@ fn print_deps(
         }
     }
 
+    let _ = writeln!(out, "{}", style.heading("Imports:"));
     let _ = writeln!(
         out,
-        "imports: {} total, {} exports, {} reexports",
-        graph.imports.len(),
-        graph.exports.len(),
-        graph.reexports().len(),
+        "  {}  {}  {}",
+        style.property("total", &graph.imports.len().to_string()),
+        style.property("exports", &graph.exports.len().to_string()),
+        style.property("reexports", &graph.reexports().len().to_string()),
     );
 
     if self_count > 0 {
-        let _ = writeln!(out, "  self-image: {self_count}");
+        let _ = writeln!(
+            out,
+            "  {}",
+            style.property("self-image", &self_count.to_string())
+        );
     }
     if main_count > 0 {
-        let _ = writeln!(out, "  main-executable: {main_count}");
+        let _ = writeln!(
+            out,
+            "  {}",
+            style.property("main-executable", &main_count.to_string())
+        );
     }
     if dynamic_count > 0 {
-        let _ = writeln!(out, "  dynamic-lookup: {dynamic_count}");
+        let _ = writeln!(
+            out,
+            "  {}",
+            style.property("dynamic-lookup", &dynamic_count.to_string())
+        );
     }
     if weak_lookup_count > 0 {
-        let _ = writeln!(out, "  weak-lookup: {weak_lookup_count}");
+        let _ = writeln!(
+            out,
+            "  {}",
+            style.property("weak-lookup", &weak_lookup_count.to_string())
+        );
     }
 
     let issues = graph.validate();
     if !issues.is_empty() {
-        let _ = writeln!(out, "validation issues ({}):", issues.len());
+        let _ = writeln!(
+            out,
+            "{}",
+            style.heading(&format!("Validation issues ({}):", issues.len()))
+        );
         for issue in &issues {
-            let _ = writeln!(out, "  [{}] {}", issue.severity, issue.message);
+            let severity = issue.severity.to_string();
+            let severity = if severity == "error" {
+                style.error(&severity)
+            } else {
+                style.warning(&severity)
+            };
+            let _ = writeln!(out, "  {severity}  {}", issue.message);
         }
     }
 
     if let Some(report) = &compat_report {
         let _ = writeln!(out,);
-        let _ = writeln!(out, "--- compatibility check ---");
+        let _ = writeln!(out, "{}", style.heading("Compatibility check:"));
 
         for finding in &report.findings {
-            let icon = match finding.severity {
-                CompatSeverity::Incompatible => "FAIL",
-                CompatSeverity::Warning => "WARN",
-                CompatSeverity::Info => "INFO",
-                _ => "WARN",
+            let label = match finding.severity {
+                CompatSeverity::Incompatible => style.error("FAIL"),
+                CompatSeverity::Warning => style.warning("WARN"),
+                CompatSeverity::Info => style.info("INFO"),
+                _ => style.warning("WARN"),
             };
-            let _ = writeln!(out, "  [{icon}] [{}] {}", finding.category, finding.message);
+            let _ = writeln!(
+                out,
+                "  {label}  {}  {}",
+                style.enum_value(&finding.category.to_string()),
+                finding.message
+            );
         }
 
         if report.has_incompatible() {
-            let _ = writeln!(out, "result: INCOMPATIBLE");
+            let _ = writeln!(
+                out,
+                "{} {}",
+                style.muted("result:"),
+                style.error("INCOMPATIBLE")
+            );
         } else {
-            let _ = writeln!(out, "result: compatible");
+            let _ = writeln!(
+                out,
+                "{} {}",
+                style.muted("result:"),
+                style.success("compatible")
+            );
         }
     }
 
     Ok(compat_report.as_ref().is_some_and(|r| r.has_incompatible()))
+}
+
+fn linked_dylib_lines(graph: &DepGraph, style: Style) -> Vec<String> {
+    let ordinal_width = graph
+        .dylibs
+        .iter()
+        .map(|dylib| dylib.ordinal.to_string().len())
+        .max()
+        .unwrap_or(1)
+        .max(2);
+    let rows = graph
+        .dylibs
+        .iter()
+        .map(|dylib| {
+            vec![
+                style.muted(&format!("  {:>ordinal_width$}", dylib.ordinal)),
+                style.info(&dylib.name),
+                style.enum_value(&dylib.kind.to_string()),
+                style.property("compat", &dylib.compat_version),
+                style.property("current", &dylib.current_version),
+                style.property(
+                    "imports",
+                    &graph.imports_from(dylib.ordinal).len().to_string(),
+                ),
+            ]
+        })
+        .collect::<Vec<_>>();
+    columns::align(&rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linked_dylib_lines;
+    use crate::analysis::deps::graph::{DepGraph, NormalizedDylib};
+    use crate::commands::output::Style;
+    use crate::metadata::image::DylibLinkKind;
+
+    #[test]
+    fn linked_dylib_ordinals_are_bare_and_right_aligned() {
+        let graph = DepGraph {
+            install_name: None,
+            dylibs: vec![
+                NormalizedDylib {
+                    name: "/usr/lib/libShort.dylib".to_owned(),
+                    ordinal: 1,
+                    current_version: "1.0.0".to_owned(),
+                    compat_version: "1.0.0".to_owned(),
+                    kind: DylibLinkKind::Required,
+                },
+                NormalizedDylib {
+                    name: "/System/Library/Frameworks/Long.framework/Long".to_owned(),
+                    ordinal: 12,
+                    current_version: "12.3.0".to_owned(),
+                    compat_version: "2.0.0".to_owned(),
+                    kind: DylibLinkKind::Weak,
+                },
+            ],
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+
+        let lines = linked_dylib_lines(&graph, Style::new(false));
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("   1  "));
+        assert!(lines[1].starts_with("  12  "));
+        assert!(lines.iter().all(|line| !line.contains('[')));
+        let compat_offsets = lines
+            .iter()
+            .map(|line| line.find("compat=").expect("compat property"))
+            .collect::<Vec<_>>();
+        assert_eq!(compat_offsets[0], compat_offsets[1]);
+    }
 }

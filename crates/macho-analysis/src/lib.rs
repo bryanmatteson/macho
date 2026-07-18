@@ -39,6 +39,8 @@ pub mod paths;
 pub mod planner;
 /// The reconstruct module.
 pub mod reconstruct;
+/// Canonical language-recovery wire reports and schema registry.
+pub mod report;
 /// The snapshot module.
 pub mod snapshot;
 /// The strings module.

@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct TempBinaryFixture {
     path: PathBuf,
@@ -38,7 +41,11 @@ pub fn temp_file_path(name: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
         .as_nanos();
-    std::env::temp_dir().join(format!("macho-{name}-{nanos}.bin"))
+    let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "macho-{name}-{}-{nanos}-{sequence}.bin",
+        std::process::id()
+    ))
 }
 
 pub fn copy_macho_fixture(source: &str, name: &str) -> TempBinaryFixture {

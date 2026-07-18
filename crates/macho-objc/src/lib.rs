@@ -47,6 +47,45 @@ pub struct ObjCMetadata {
     pub protocols: Vec<ObjCProtocol>,
 }
 
+/// Runtime-list source for one Objective-C metadata observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjCRecordKind {
+    /// `__objc_classlist` entry.
+    Class,
+    /// `__objc_catlist` entry.
+    Category,
+    /// `__objc_protolist` entry.
+    Protocol,
+}
+
+/// Lossless accounting for one runtime-list entry.
+#[derive(Debug, Clone)]
+pub struct ObjCRecordObservation {
+    /// Runtime-list source.
+    pub kind: ObjCRecordKind,
+    /// Zero-based list ordinal.
+    pub ordinal: usize,
+    /// File offset of the pointer-list entry.
+    pub pointer_file_offset: u64,
+    /// Resolved runtime object address, when readable.
+    pub runtime_address: Option<u64>,
+    /// Parsed entity name, when the record was decoded.
+    pub parsed_name: Option<String>,
+    /// Typed parser failure rendered for diagnostics.
+    pub error: Option<String>,
+    /// Bounded raw runtime record bytes, or pointer bytes when unresolved.
+    pub raw: Vec<u8>,
+}
+
+/// Parsed metadata plus a conservation ledger for every runtime-list entry.
+#[derive(Debug)]
+pub struct ObjCMetadataScan {
+    /// Successfully decoded semantic metadata.
+    pub metadata: ObjCMetadata,
+    /// Every class/category/protocol list entry, including malformed entries.
+    pub observations: Vec<ObjCRecordObservation>,
+}
+
 impl<'data> MachoExt<'data> for ObjCMetadata {
     type Error = ObjcError;
 
@@ -60,53 +99,123 @@ impl<'data> MachoExt<'data> for ObjCMetadata {
 
 /// Performs parse_objc_metadata.
 pub fn parse_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadata> {
+    Ok(scan_objc_metadata(macho)?.metadata)
+}
+
+/// Scans Objective-C runtime lists without silently dropping malformed records.
+pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
     if !macho.is_64bit() {
         return Err(Error::unsupported(
             "ObjC metadata parsing is only supported for 64-bit binaries",
         ));
     }
     let resolver = ObjCResolver::new(macho);
-    // Parse classes from __objc_classlist
-    let classes = parse_pointer_list(macho, "__objc_classlist")
-        .map(|ptrs| {
-            ptrs.into_iter()
-                .filter_map(|file_off| {
-                    let va = resolver.read_pointer_at_offset(file_off).ok()??;
-                    class::parse_class(&resolver, va).ok()
-                })
-                .filter(|c| !c.is_meta) // filter out metaclasses
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut observations = Vec::new();
+    let mut classes = Vec::new();
+    let mut categories = Vec::new();
+    let mut protocols = Vec::new();
 
-    // Parse categories from __objc_catlist
-    let categories = parse_pointer_list(macho, "__objc_catlist")
-        .map(|ptrs| {
-            ptrs.into_iter()
-                .filter_map(|file_off| {
-                    let va = resolver.read_pointer_at_offset(file_off).ok()??;
-                    category::parse_category(&resolver, va).ok()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    for (kind, section_name) in [
+        (ObjCRecordKind::Class, "__objc_classlist"),
+        (ObjCRecordKind::Category, "__objc_catlist"),
+        (ObjCRecordKind::Protocol, "__objc_protolist"),
+    ] {
+        let offsets = parse_pointer_list(macho, section_name).unwrap_or_default();
+        for (ordinal, pointer_file_offset) in offsets.into_iter().enumerate() {
+            let pointer_raw = macho
+                .bytes()
+                .get(pointer_file_offset as usize..pointer_file_offset as usize + 8)
+                .unwrap_or_default()
+                .to_vec();
+            let runtime_address = match resolver.read_pointer_at_offset(pointer_file_offset) {
+                Ok(Some(address)) => address,
+                Ok(None) => {
+                    observations.push(ObjCRecordObservation {
+                        kind,
+                        ordinal,
+                        pointer_file_offset,
+                        runtime_address: None,
+                        parsed_name: None,
+                        error: Some("runtime pointer is null or unresolved".to_owned()),
+                        raw: pointer_raw,
+                    });
+                    continue;
+                }
+                Err(error) => {
+                    observations.push(ObjCRecordObservation {
+                        kind,
+                        ordinal,
+                        pointer_file_offset,
+                        runtime_address: None,
+                        parsed_name: None,
+                        error: Some(error.to_string()),
+                        raw: pointer_raw,
+                    });
+                    continue;
+                }
+            };
+            let raw_size = match kind {
+                ObjCRecordKind::Class => 40,
+                ObjCRecordKind::Category => 48,
+                ObjCRecordKind::Protocol => 72,
+            };
+            let raw = macho
+                .read_bytes_at_va(runtime_address, raw_size)
+                .map(ToOwned::to_owned)
+                .unwrap_or(pointer_raw);
+            let parsed = match kind {
+                ObjCRecordKind::Class => {
+                    class::parse_class(&resolver, runtime_address).map(|value| {
+                        let name = value.name.clone();
+                        if !value.is_meta {
+                            classes.push(value);
+                        }
+                        name
+                    })
+                }
+                ObjCRecordKind::Category => category::parse_category(&resolver, runtime_address)
+                    .map(|value| {
+                        let name = value.name.clone();
+                        categories.push(value);
+                        name
+                    }),
+                ObjCRecordKind::Protocol => protocol::parse_protocol(&resolver, runtime_address)
+                    .map(|value| {
+                        let name = value.name.clone();
+                        protocols.push(value);
+                        name
+                    }),
+            };
+            observations.push(match parsed {
+                Ok(parsed_name) => ObjCRecordObservation {
+                    kind,
+                    ordinal,
+                    pointer_file_offset,
+                    runtime_address: Some(runtime_address.0),
+                    parsed_name: Some(parsed_name),
+                    error: None,
+                    raw,
+                },
+                Err(error) => ObjCRecordObservation {
+                    kind,
+                    ordinal,
+                    pointer_file_offset,
+                    runtime_address: Some(runtime_address.0),
+                    parsed_name: None,
+                    error: Some(error.to_string()),
+                    raw,
+                },
+            });
+        }
+    }
 
-    // Parse protocols from __objc_protolist
-    let protocols = parse_pointer_list(macho, "__objc_protolist")
-        .map(|ptrs| {
-            ptrs.into_iter()
-                .filter_map(|file_off| {
-                    let va = resolver.read_pointer_at_offset(file_off).ok()??;
-                    protocol::parse_protocol(&resolver, va).ok()
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Ok(ObjCMetadata {
-        classes,
-        categories,
-        protocols,
+    Ok(ObjCMetadataScan {
+        metadata: ObjCMetadata {
+            classes,
+            categories,
+            protocols,
+        },
+        observations,
     })
 }
 

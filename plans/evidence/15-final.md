@@ -1,6 +1,14 @@
 # Plan 15 Final Evidence
 
-## Verdict
+> **Historical evidence — current acceptance invalidated.** This file records
+> the July 16 implementation of the earlier Plan 15 contract (18 packages,
+> snapshot schema 2, and host SDK/demangler adapters). The July 18 active plans
+> add `macho-header-syntax`, snapshot schema 3, evidence-first recovery,
+> process-free inspection/header validation, and revised language/CLI contracts.
+> None of the PASS or COMPLETE statements below proves the current plans. The
+> next implementation must replace this verdict and rerun every active gate.
+
+## Historical Verdict (Superseded)
 
 **COMPLETE.** Plan 15 is implemented as one coherent workspace change. Every
 work package WP0-WP10 and every locked obligation S001-S015 is satisfied. No

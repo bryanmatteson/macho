@@ -11,4 +11,5 @@ description = "Objective-C metadata parsing for Mach-O images"
 [dependencies]
 macho-core.workspace = true
 macho-dyld.workspace = true
+macho-header-syntax.workspace = true
 thiserror.workspace = true

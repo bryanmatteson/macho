@@ -1,159 +1,218 @@
-use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::{OutputFormat, usage_message};
-use anyhow::{Context, Result};
-use macho::metadata::swift::SwiftTypeIndex;
+use std::collections::BTreeSet;
 use std::io::Write;
 
-use crate::commands::subcommands::common::{for_each_selected_mach, map_input};
+use anyhow::{Context, Result};
+use macho::analysis::report::{
+    SwiftEntity, SwiftEntityState, SwiftReport, SwiftTypeKind, SwiftValue, recover_swift_container,
+};
+
+use crate::commands::args::{ArchitectureArgs, InputArgs};
+use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::subcommands::common::map_input;
+use crate::commands::{OutputFormat, usage_message};
 
 #[derive(clap::Args)]
-/// The SwiftArgs type.
+/// Evidence-accountable Swift metadata recovery.
 pub struct SwiftArgs {
-    /// Path to Mach-O binary
+    /// Path to Mach-O binary.
     #[command(flatten)]
     input: InputArgs,
-    /// Filter to a specific architecture
+    /// Filter to a specific architecture.
     #[command(flatten)]
     selection: ArchitectureArgs,
-    /// Filter by type kind (class, struct, enum, protocol)
+    /// Filter by type kind.
     #[arg(long)]
     kind: Option<String>,
 }
 
-/// Performs run.
-pub fn run(args: SwiftArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
+/// Runs Swift recovery.
+pub fn run(args: SwiftArgs, output: OutputOptions, out: &mut dyn Write) -> Result<()> {
+    if output.format() == OutputFormat::Sarif {
+        return Err(usage_message("Swift recovery supports only text and JSON"));
+    }
     let mmap = map_input(&args.input.path)?;
     let container = macho::parse(&mmap)
         .with_context(|| format!("failed to parse {}", args.input.path.display()))?;
-    let kind_filter = match args.kind.as_deref() {
-        Some(kind) => Some(parse_kind_filter(kind)?),
-        None => None,
-    };
+    let mut report = recover_swift_container(&container, args.selection.arch.as_deref())?;
+    let kind_filter = args.kind.as_deref().map(parse_kind_filter).transpose()?;
+    apply_filter(&mut report, kind_filter);
 
-    if format == OutputFormat::Json {
-        // Collect all slices into a single JSON object keyed by arch
-        let mut result = serde_json::Map::new();
-        for_each_selected_mach(
-            &container,
-            args.selection.arch.as_deref(),
-            |macho, arch_name, _| {
-                let index = macho.ext::<macho::swift::SwiftTypeIndex>()?;
-                let value = if let Some(kind) = kind_filter {
-                    let filtered = SwiftTypeIndex {
-                        types: index
-                            .types
-                            .iter()
-                            .filter(|t| t.kind == kind)
-                            .cloned()
-                            .collect(),
-                    };
-                    serde_json::to_value(&filtered)?
-                } else {
-                    serde_json::to_value(&index)?
-                };
-                result.insert(arch_name.to_string(), value);
-                Ok(())
-            },
-        )?;
-        if result.len() == 1 {
-            // Single arch — emit the index directly
-            let (_, val) = result.into_iter().next().unwrap();
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&val)?);
-        } else {
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&result)?);
-        }
-    } else {
-        for_each_selected_mach(
-            &container,
-            args.selection.arch.as_deref(),
-            |macho, arch_name, show_header| {
-                let index = macho.ext::<macho::swift::SwiftTypeIndex>()?;
-                if show_header {
-                    let _ = writeln!(out, "=== {arch_name} ===");
-                }
-                print_swift_text(&index, kind_filter, out);
-                if show_header {
-                    let _ = writeln!(out,);
-                }
-                Ok(())
-            },
-        )?;
+    match output.format() {
+        OutputFormat::Json => crate::commands::output::json::write_pretty(out, &report)?,
+        OutputFormat::Text => print_swift_text(&report, output.style(), out),
+        OutputFormat::Sarif => unreachable!("rejected above"),
     }
     Ok(())
 }
 
-fn parse_kind_filter(kind: &str) -> Result<macho::metadata::swift::types::SwiftTypeKind> {
+fn parse_kind_filter(kind: &str) -> Result<SwiftTypeKind> {
     match kind {
-        "class" => Ok(macho::metadata::swift::types::SwiftTypeKind::Class),
-        "struct" => Ok(macho::metadata::swift::types::SwiftTypeKind::Struct),
-        "enum" => Ok(macho::metadata::swift::types::SwiftTypeKind::Enum),
-        "protocol" => Ok(macho::metadata::swift::types::SwiftTypeKind::Protocol),
-        "unknown" => Ok(macho::metadata::swift::types::SwiftTypeKind::Unknown),
+        "class" => Ok(SwiftTypeKind::Class),
+        "struct" => Ok(SwiftTypeKind::Struct),
+        "enum" => Ok(SwiftTypeKind::Enum),
+        "protocol" => Ok(SwiftTypeKind::Protocol),
+        "type-alias" => Ok(SwiftTypeKind::TypeAlias),
+        "opaque" => Ok(SwiftTypeKind::Opaque),
+        "unknown" => Ok(SwiftTypeKind::Unknown),
         _ => Err(usage_message(format!(
-            "invalid kind '{kind}', expected one of: class, struct, enum, protocol, unknown"
+            "invalid kind '{kind}', expected one of: class, struct, enum, protocol, type-alias, opaque, unknown"
         ))),
     }
 }
 
-fn print_swift_text(
-    index: &SwiftTypeIndex,
-    kind_filter: Option<macho::metadata::swift::types::SwiftTypeKind>,
-    out: &mut dyn Write,
-) {
-    if index.types.is_empty() {
-        let _ = writeln!(out, "No Swift types discovered.");
-        return;
+fn apply_filter(report: &mut SwiftReport, kind_filter: Option<SwiftTypeKind>) {
+    for slice in report.slices.as_mut_slice() {
+        slice.selection.selected_entity_ids = slice
+            .entities
+            .iter()
+            .filter(|entity| kind_filter.is_none_or(|kind| entity_kind(entity) == kind))
+            .map(|entity| entity.id.clone())
+            .collect();
     }
+}
 
-    let filtered: Vec<_> = if let Some(kind) = kind_filter {
-        index.types.iter().filter(|t| t.kind == kind).collect()
-    } else {
-        index.types.iter().collect()
-    };
+fn print_swift_text(report: &SwiftReport, style: Style, out: &mut dyn Write) {
+    let _ = writeln!(out, "{}", style.title("Swift recovery"));
+    for slice in report.slices.as_slice() {
+        let selected_ids = slice
+            .selection
+            .selected_entity_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<BTreeSet<_>>();
+        let selected = slice
+            .entities
+            .iter()
+            .filter(|entity| selected_ids.contains(entity.id.as_str()))
+            .collect::<Vec<_>>();
+        let totals = &slice.selection.totals;
+        let _ = writeln!(
+            out,
+            "  {}  {}  {}  {}  {}  {}  {}",
+            style.enum_property("arch", &architecture_name(slice.architecture)),
+            style.property("metadata-defined", &totals.metadata_defined.to_string()),
+            style.property("referenced", &totals.referenced.to_string()),
+            style.property("symbol-only", &totals.symbol_only.to_string()),
+            style.property("partial", &totals.partial.to_string()),
+            style.property("unknown", &totals.unknown.to_string()),
+            style.property("selected", &selected.len().to_string()),
+        );
+        if selected.is_empty() {
+            let _ = writeln!(
+                out,
+                "  {}",
+                style.muted("No Swift entities matched the selection.")
+            );
+            continue;
+        }
+        for state in [
+            SwiftEntityState::MetadataDefined,
+            SwiftEntityState::Referenced,
+            SwiftEntityState::SymbolOnly,
+            SwiftEntityState::Partial,
+            SwiftEntityState::Unknown,
+        ] {
+            let entities = selected
+                .iter()
+                .copied()
+                .filter(|entity| entity.state == state)
+                .collect::<Vec<_>>();
+            if entities.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "  {}", style.heading(state_heading(state)));
+            let rows = entities
+                .into_iter()
+                .map(|entity| {
+                    vec![
+                        style.enum_value(kind_name(entity_kind(entity))),
+                        style.accent(&entity_name(entity)),
+                        entity_address(entity)
+                            .map(|address| style.address(&format!("0x{address:016x}")))
+                            .unwrap_or_else(|| style.muted("-")),
+                        style.property("fields", &entity_field_count(entity).to_string()),
+                        style.property("gaps", &entity.gaps.len().to_string()),
+                    ]
+                })
+                .collect::<Vec<_>>();
+            for row in columns::align(&rows) {
+                let _ = writeln!(out, "    {row}");
+            }
+        }
+        for diagnostic in &slice.diagnostics {
+            let _ = writeln!(
+                out,
+                "  {}  {}",
+                style.warning(&format!("{:?}", diagnostic.code).to_lowercase()),
+                diagnostic.message
+            );
+        }
+    }
+}
 
-    let high_confidence = filtered.iter().filter(|t| t.confidence.is_high()).count();
-    let partial = filtered.len().saturating_sub(high_confidence);
-    let classes = filtered
-        .iter()
-        .filter(|t| t.kind == macho::metadata::swift::types::SwiftTypeKind::Class)
-        .count();
-    let structs = filtered
-        .iter()
-        .filter(|t| t.kind == macho::metadata::swift::types::SwiftTypeKind::Struct)
-        .count();
-    let enums = filtered
-        .iter()
-        .filter(|t| t.kind == macho::metadata::swift::types::SwiftTypeKind::Enum)
-        .count();
-    let protos = filtered
-        .iter()
-        .filter(|t| t.kind == macho::metadata::swift::types::SwiftTypeKind::Protocol)
-        .count();
+fn entity_kind(entity: &SwiftEntity) -> SwiftTypeKind {
+    match &entity.kind {
+        SwiftValue::Known { value, .. } => *value,
+        _ => SwiftTypeKind::Unknown,
+    }
+}
 
-    let _ = writeln!(
-        out,
-        "Swift types: {} total ({} high-confidence, {} partial; {} classes, {} structs, {} enums, {} protocols)",
-        filtered.len(),
-        high_confidence,
-        partial,
-        classes,
-        structs,
-        enums,
-        protos,
-    );
+fn entity_name(entity: &SwiftEntity) -> String {
+    match &entity.qualified_name {
+        SwiftValue::Known { value, .. } => value.path.as_slice().join("."),
+        _ => "<unknown>".to_owned(),
+    }
+}
 
-    for t in &filtered {
-        let addr = t.address.map(|a| format!(" {a:#x}")).unwrap_or_default();
-        let source = match t.source {
-            macho::metadata::swift::types::SwiftTypeSource::DemangledSymbol => "",
-            macho::metadata::swift::types::SwiftTypeSource::ObjCMetadata => " [objc]",
-            _ => " [unknown]",
-        };
-        let confidence = if t.confidence.is_high() {
-            ""
-        } else {
-            " [partial]"
-        };
-        let _ = writeln!(out, "  {:>8} {}{addr}{source}{confidence}", t.kind, t.name);
+fn entity_address(entity: &SwiftEntity) -> Option<u64> {
+    match &entity.descriptor {
+        SwiftValue::Known { value, .. } => Some(value.virtual_address),
+        _ => None,
+    }
+}
+
+fn entity_field_count(entity: &SwiftEntity) -> usize {
+    match &entity.fields_or_cases {
+        SwiftValue::Known { value, .. } => value.len(),
+        _ => 0,
+    }
+}
+
+fn state_heading(state: SwiftEntityState) -> &'static str {
+    match state {
+        SwiftEntityState::MetadataDefined => "Metadata-defined",
+        SwiftEntityState::Referenced => "Referenced",
+        SwiftEntityState::SymbolOnly => "Symbol-only",
+        SwiftEntityState::Partial => "Partial",
+        SwiftEntityState::Unknown => "Unknown",
+    }
+}
+
+fn kind_name(kind: SwiftTypeKind) -> &'static str {
+    match kind {
+        SwiftTypeKind::Class => "class",
+        SwiftTypeKind::Struct => "struct",
+        SwiftTypeKind::Enum => "enum",
+        SwiftTypeKind::Protocol => "protocol",
+        SwiftTypeKind::TypeAlias => "type-alias",
+        SwiftTypeKind::Opaque => "opaque",
+        SwiftTypeKind::Unknown => "unknown",
+    }
+}
+
+fn architecture_name(architecture: macho::analysis::report::Architecture) -> String {
+    let cpu = macho::core::model::header::CpuType(architecture.cpu_type);
+    let subtype = macho::core::model::header::CpuSubtype(architecture.cpu_subtype);
+    format!("{} ({})", cpu.name(), subtype.name(cpu))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kind_filter_is_closed() {
+        assert_eq!(parse_kind_filter("class").unwrap(), SwiftTypeKind::Class);
+        assert!(parse_kind_filter("actorish").is_err());
     }
 }

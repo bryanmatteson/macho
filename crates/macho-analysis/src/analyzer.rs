@@ -1,4 +1,8 @@
-//! Dependency-driven, selective analysis and schema-v2 snapshots.
+//! Dependency-driven, selective analysis and schema-v3 snapshots.
+
+mod payload;
+
+pub use payload::DomainPayload;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -12,7 +16,7 @@ use crate::error::{AnalysisDomain, AnalysisError, AnalysisErrorKind, Result};
 use crate::planner::{AnalysisLimits, AnalysisPlan, DependencyKind, dependencies, resolve_domains};
 
 /// The SNAPSHOT_SCHEMA_VERSION constant.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 const ADVISORY_DEPENDENCY_FAILED_CODE: &str = "analysis.dependency.advisory_failed";
 const ADVISORY_DEPENDENCY_UNSUPPORTED_CODE: &str = "analysis.dependency.advisory_unsupported";
@@ -20,6 +24,7 @@ const REQUIRED_DEPENDENCY_FAILED_CODE: &str = "analysis.dependency.required_fail
 const LIMIT_TRUNCATED_CODE: &str = "analysis.limit.truncated";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The AnalysisIssue type.
 pub struct AnalysisIssue {
     /// The code field.
@@ -29,6 +34,7 @@ pub struct AnalysisIssue {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The AnalysisFailure type.
 pub struct AnalysisFailure {
     /// The code field.
@@ -38,6 +44,7 @@ pub struct AnalysisFailure {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The UnsupportedReason type.
 pub struct UnsupportedReason {
     /// The code field.
@@ -47,7 +54,7 @@ pub struct UnsupportedReason {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case")]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 /// The DomainState type.
 #[non_exhaustive]
 pub enum DomainState<T> {
@@ -74,116 +81,8 @@ pub enum DomainState<T> {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "domain", content = "value", rename_all = "snake_case")]
-/// The DomainPayload type.
-#[non_exhaustive]
-pub enum DomainPayload {
-    /// The Container variant.
-    Container(Value),
-    /// The Header variant.
-    Header(Value),
-    /// The LoadCommands variant.
-    LoadCommands(Value),
-    /// The Segments variant.
-    Segments(Value),
-    /// The Relocations variant.
-    Relocations(Value),
-    /// The Symbols variant.
-    Symbols(Value),
-    /// The Exports variant.
-    Exports(Value),
-    /// The Imports variant.
-    Imports(Value),
-    /// The Fixups variant.
-    Fixups(Value),
-    /// The Codesign variant.
-    Codesign(Value),
-    /// The Objc variant.
-    Objc(Value),
-    /// The Swift variant.
-    Swift(Value),
-    /// The Dwarf variant.
-    Dwarf(Value),
-    /// The Vtables variant.
-    Vtables(Value),
-    /// The Strings variant.
-    Strings(Value),
-    /// The Ranges variant.
-    Ranges(Value),
-    /// The Xrefs variant.
-    Xrefs(Value),
-    /// The Dependencies variant.
-    Dependencies(Value),
-    /// The Audit variant.
-    Audit(Value),
-    /// The CHeaders variant.
-    CHeaders(Value),
-    /// The CppHeaders variant.
-    CppHeaders(Value),
-    /// The ObjcHeaders variant.
-    ObjcHeaders(Value),
-}
-
-impl DomainPayload {
-    /// Performs domain.
-    pub const fn domain(&self) -> AnalysisDomain {
-        match self {
-            Self::Container(_) => AnalysisDomain::Container,
-            Self::Header(_) => AnalysisDomain::Header,
-            Self::LoadCommands(_) => AnalysisDomain::LoadCommands,
-            Self::Segments(_) => AnalysisDomain::Segments,
-            Self::Relocations(_) => AnalysisDomain::Relocations,
-            Self::Symbols(_) => AnalysisDomain::Symbols,
-            Self::Exports(_) => AnalysisDomain::Exports,
-            Self::Imports(_) => AnalysisDomain::Imports,
-            Self::Fixups(_) => AnalysisDomain::Fixups,
-            Self::Codesign(_) => AnalysisDomain::Codesign,
-            Self::Objc(_) => AnalysisDomain::Objc,
-            Self::Swift(_) => AnalysisDomain::Swift,
-            Self::Dwarf(_) => AnalysisDomain::Dwarf,
-            Self::Vtables(_) => AnalysisDomain::Vtables,
-            Self::Strings(_) => AnalysisDomain::Strings,
-            Self::Ranges(_) => AnalysisDomain::Ranges,
-            Self::Xrefs(_) => AnalysisDomain::Xrefs,
-            Self::Dependencies(_) => AnalysisDomain::Dependencies,
-            Self::Audit(_) => AnalysisDomain::Audit,
-            Self::CHeaders(_) => AnalysisDomain::CHeaders,
-            Self::CppHeaders(_) => AnalysisDomain::CppHeaders,
-            Self::ObjcHeaders(_) => AnalysisDomain::ObjcHeaders,
-        }
-    }
-
-    /// Return the owned JSON value carried by this typed domain payload.
-    pub const fn value(&self) -> &Value {
-        match self {
-            Self::Container(value)
-            | Self::Header(value)
-            | Self::LoadCommands(value)
-            | Self::Segments(value)
-            | Self::Relocations(value)
-            | Self::Symbols(value)
-            | Self::Exports(value)
-            | Self::Imports(value)
-            | Self::Fixups(value)
-            | Self::Codesign(value)
-            | Self::Objc(value)
-            | Self::Swift(value)
-            | Self::Dwarf(value)
-            | Self::Vtables(value)
-            | Self::Strings(value)
-            | Self::Ranges(value)
-            | Self::Xrefs(value)
-            | Self::Dependencies(value)
-            | Self::Audit(value)
-            | Self::CHeaders(value)
-            | Self::CppHeaders(value)
-            | Self::ObjcHeaders(value) => value,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The ContainerIdentity type.
 pub struct ContainerIdentity {
     /// The format field.
@@ -193,6 +92,7 @@ pub struct ContainerIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The SliceIdentity type.
 pub struct SliceIdentity {
     /// The index field.
@@ -202,6 +102,7 @@ pub struct SliceIdentity {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The SliceSnapshot type.
 pub struct SliceSnapshot {
     /// The identity field.
@@ -211,6 +112,7 @@ pub struct SliceSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// The SnapshotDocument type.
 pub struct SnapshotDocument {
     /// The schema_version field.
@@ -245,7 +147,7 @@ impl SnapshotDocument {
         }
         let document: Self = serde_json::from_value(value).map_err(|error| {
             snapshot_error(format!(
-                "invalid schema-v2 snapshot: {error}; regenerate it"
+                "invalid schema-v3 snapshot: {error}; regenerate it"
             ))
         })?;
         document.validate()?;
@@ -258,6 +160,16 @@ impl SnapshotDocument {
             return Err(snapshot_error(format!(
                 "unsupported snapshot schema version {}; expected {}",
                 self.schema_version, SNAPSHOT_SCHEMA_VERSION
+            )));
+        }
+        if self.slices.is_empty() {
+            return Err(snapshot_error("snapshot must contain at least one slice"));
+        }
+        if self.container.slice_count != self.slices.len() {
+            return Err(snapshot_error(format!(
+                "container declares {} slice(s), but snapshot contains {}",
+                self.container.slice_count,
+                self.slices.len()
             )));
         }
         for slice in &self.slices {
@@ -314,8 +226,8 @@ impl AnalysisDomain {
         Self::Xrefs,
         Self::Dependencies,
         Self::Audit,
-        Self::CHeaders,
-        Self::CppHeaders,
+        Self::CSurface,
+        Self::CppSurface,
         Self::ObjcHeaders,
     ];
 
@@ -341,8 +253,8 @@ impl AnalysisDomain {
             Self::Xrefs => "xrefs",
             Self::Dependencies => "dependencies",
             Self::Audit => "audit",
-            Self::CHeaders => "c_headers",
-            Self::CppHeaders => "cpp_headers",
+            Self::CSurface => "c_surface",
+            Self::CppSurface => "cpp_surface",
             Self::ObjcHeaders => "objc_headers",
         }
     }
@@ -649,13 +561,13 @@ fn run_domain(
             DomainPayload::Codesign(serialize(domain, value)?)
         }
         D::Objc => {
-            let value = crate::snapshot::extract_objc(macho, &mut issues);
-            DomainPayload::Objc(serialize(domain, value)?)
+            let report = crate::report::recover_objc_surface(macho)?;
+            DomainPayload::Objc(serialize(domain, report)?)
         }
-        D::Swift => DomainPayload::Swift(serialize(
-            domain,
-            macho_swift::SwiftTypeIndex::build(macho),
-        )?),
+        D::Swift => {
+            let report = crate::report::recover_swift_surface(macho)?;
+            DomainPayload::Swift(serialize(domain, report)?)
+        }
         D::Dwarf => {
             let index = macho_dwarf::DwarfFunctionIndex::build(macho)?;
             DomainPayload::Dwarf(json!({ "function_count": index.len() }))
@@ -771,27 +683,21 @@ fn run_domain(
             };
             DomainPayload::Audit(serialize(domain, crate::audit::audit_slice(&input))?)
         }
-        D::CHeaders => {
-            let analysis = crate::reconstruct::c::analyze_headers(macho, &Default::default())?;
-            DomainPayload::CHeaders(
-                json!({ "header": crate::reconstruct::c::render_header(&analysis), "analysis": serialize(domain, analysis)? }),
-            )
-        }
-        D::CppHeaders => {
-            let report = crate::reconstruct::cpp::reconstruct(
+        D::CSurface => {
+            let report = crate::report::recover_symbol_surface(
                 macho,
-                &crate::reconstruct::cpp::CppReconstructionPlan {
-                    class_filter: None,
-                    render_header: true,
-                },
+                crate::report::RecoveryLanguage::CAbi,
             )?;
-            DomainPayload::CppHeaders(json!({ "header": report.header.unwrap_or_default() }))
+            DomainPayload::CSurface(serialize(domain, report)?)
+        }
+        D::CppSurface => {
+            let report =
+                crate::report::recover_symbol_surface(macho, crate::report::RecoveryLanguage::Cpp)?;
+            DomainPayload::CppSurface(serialize(domain, report)?)
         }
         D::ObjcHeaders => {
-            let report = crate::reconstruct::objc::reconstruct(
-                macho,
-                &crate::reconstruct::objc::ObjcReconstructionPlan::default(),
-            )?;
+            let mut report = crate::report::recover_objc_surface(macho)?;
+            crate::report::project_objc_headers(&mut report)?;
             DomainPayload::ObjcHeaders(serialize(domain, report)?)
         }
     };

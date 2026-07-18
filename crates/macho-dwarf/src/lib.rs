@@ -13,7 +13,7 @@ pub use error::{DwarfError, DwarfErrorKind, Result};
 pub mod functions;
 pub mod types;
 
-pub use functions::DwarfFunctionIndex;
+pub use functions::{DwarfFunctionIndex, DwarfVariableIndex};
 
 use gimli::{DwarfSections, SectionId};
 

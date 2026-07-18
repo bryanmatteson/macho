@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use crate::{AnalysisDomain, DomainState, SnapshotDocument};
 
-/// Selective schema-v2 container report.
+/// Selective schema-v3 container report.
 #[derive(Debug, Clone, Serialize)]
 pub struct ContainerDocumentReport {
     /// The format field.

@@ -13,8 +13,10 @@ mise run verify
 ```
 
 The CLI uses one flat command grammar. Every command accepts `--format text` or
-`--format json`; `audit` additionally accepts `--format sarif`. JSON results use
-a versioned envelope and errors are written only to stderr.
+`--format json` and `--color auto|always|never`; `audit` additionally accepts
+`--format sarif`. JSON results use a versioned envelope, machine formats never
+contain ANSI escapes, and errors are written only to stderr. Human output uses
+color by default on interactive terminals and stays plain when redirected.
 
 ## Examples
 

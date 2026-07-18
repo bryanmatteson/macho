@@ -22,6 +22,7 @@ const PRODUCT_CRATES: &[&str] = &[
     "macho-mutate",
     "macho-dyld-cache",
     "macho-header-infer",
+    "macho-header-syntax",
     "macho-workflow",
     "macho",
     "macho-cli",
@@ -112,7 +113,11 @@ fn dependency_violation(
             "delivery dependency {dependency} is owned by {package}"
         ));
     }
-    if matches!(dependency, "cpp_demangle" | "rustc-demangle") && package != "macho-symbols" {
+    if matches!(
+        dependency,
+        "cpp_demangle" | "rustc-demangle" | "swift-demangler"
+    ) && package != "macho-symbols"
+    {
         return Some(format!(
             "symbol-demangling dependency {dependency} is owned by macho-symbols, not {package}"
         ));
@@ -137,6 +142,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
                 "dep:macho-objc",
                 "dep:macho-swift",
                 "dep:macho-symbols",
+                "dep:macho-header-syntax",
             ]),
         ),
         (
@@ -184,12 +190,16 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
 fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
     let rows: &[(&str, &[&str])] = &[
         ("macho-core", &[]),
+        ("macho-header-syntax", &[]),
         ("macho-insn", &[]),
         ("macho-dyld", &["macho-core"]),
         ("macho-symbols", &["macho-core", "macho-dyld"]),
         ("macho-codesign", &["macho-core"]),
         ("macho-dwarf", &["macho-core"]),
-        ("macho-objc", &["macho-core", "macho-dyld"]),
+        (
+            "macho-objc",
+            &["macho-core", "macho-dyld", "macho-header-syntax"],
+        ),
         (
             "macho-swift",
             &["macho-core", "macho-symbols", "macho-objc"],
@@ -216,6 +226,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-objc",
                 "macho-swift",
                 "macho-cpp",
+                "macho-header-syntax",
             ],
         ),
         (
@@ -223,7 +234,10 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
             &["macho-core", "macho-insn", "macho-dyld", "macho-codesign"],
         ),
         ("macho-dyld-cache", &["macho-core", "macho-dyld"]),
-        ("macho-header-infer", &["macho-core", "macho-analysis"]),
+        (
+            "macho-header-infer",
+            &["macho-analysis", "macho-header-syntax"],
+        ),
         (
             "macho-workflow",
             &["macho-core", "macho-analysis", "macho-mutate"],
@@ -245,6 +259,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-workflow",
                 "macho-dyld-cache",
                 "macho-header-infer",
+                "macho-header-syntax",
             ],
         ),
         ("macho-cli", &["macho"]),
@@ -554,7 +569,7 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
     facts.visit_file(&syntax);
     let allowed_process = crate_name == "xtask"
         || is_test
-        || crate_name == "macho-cli" && path == "crates/macho-cli/src/adapters.rs";
+        || crate_name == "macho-cli" && path == "crates/macho-cli/src/adapters/signing.rs";
     if !allowed_process && facts.process_call {
         violations.push(format!(
             "host process reference outside adapters/tooling/tests: {path}"
@@ -671,7 +686,7 @@ mod tests {
                 None
             );
         }
-        for dependency in ["cpp_demangle", "rustc-demangle"] {
+        for dependency in ["cpp_demangle", "rustc-demangle", "swift-demangler"] {
             assert!(
                 dependency_violation("macho-analysis", dependency, &workspace_names, &allowed)
                     .is_some()
@@ -694,6 +709,11 @@ mod tests {
             (
                 "macho-cli",
                 "crates/macho-cli/src/commands/x.rs",
+                "fn fixture() { Command::new(\"xcrun\"); }",
+            ),
+            (
+                "macho-cli",
+                "crates/macho-cli/src/adapters.rs",
                 "fn fixture() { Command::new(\"xcrun\"); }",
             ),
             (
@@ -764,7 +784,7 @@ mod tests {
         assert!(
             scan_source(
                 "macho-cli",
-                Path::new("crates/macho-cli/src/adapters.rs"),
+                Path::new("crates/macho-cli/src/adapters/signing.rs"),
                 "fn fixture() { let tool = std::process::Command::new(\"xcrun\"); }"
             )
             .is_empty()

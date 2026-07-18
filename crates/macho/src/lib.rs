@@ -26,6 +26,8 @@ pub use macho_dyld as dyld;
 pub use macho_dyld_cache as dyld_cache;
 #[cfg(feature = "header-infer")]
 pub use macho_header_infer as header_infer;
+#[cfg(feature = "metadata")]
+pub use macho_header_syntax as header_syntax;
 #[cfg(feature = "mutation")]
 pub use macho_insn as insn;
 #[cfg(feature = "mutation")]

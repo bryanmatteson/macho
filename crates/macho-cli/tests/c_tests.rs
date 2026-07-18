@@ -1,7 +1,6 @@
 mod support;
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use macho::analysis::reconstruct::c::{CReconstructionPlan, analyze_headers, render_header};
@@ -16,70 +15,13 @@ fn unique_path(stem: &str, ext: &str) -> PathBuf {
     std::env::temp_dir().join(format!("macho-{stem}-{nanos}.{ext}"))
 }
 
-fn compile_c_fixture(name: &str, source: &str) -> std::path::PathBuf {
-    let c_path = unique_path(name, "c");
-    let out_path = unique_path(name, "o");
-    std::fs::write(&c_path, source).expect("write source");
-
-    let output = Command::new("clang")
-        .arg("-g")
-        .arg("-c")
-        .arg(&c_path)
-        .arg("-o")
-        .arg(&out_path)
-        .output()
-        .expect("run clang");
-    assert!(
-        output.status.success(),
-        "clang failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let _ = std::fs::remove_file(&c_path);
-    out_path
-}
-
 #[test]
-#[ignore = "real clang and DWARF smoke test"]
-fn dwarf_analysis_recovers_c_surface() {
-    let object = compile_c_fixture(
-        "c-dwarf-surface",
-        r#"
-        typedef struct Widget {
-            int count;
-            const char *name;
-        } Widget;
-
-        enum Mode {
-            MODE_IDLE = 0,
-            MODE_BUSY = 1,
-        };
-
-        int shared_value = 7;
-        enum Mode current_mode = MODE_BUSY;
-
-        int widget_sum(Widget *widget, int extra) {
-            return widget->count + extra + current_mode;
-        }
-        "#,
-    );
-
-    let bytes = std::fs::read(&object).expect("read object");
-    let container = macho::parse(&bytes).expect("parse object");
-    let macho = container
-        .first_macho()
-        .expect("test container contains a Mach-O image");
-
-    let analysis = analyze_headers(macho, &CReconstructionPlan::default()).expect("analyze");
-    let header = render_header(&analysis);
-
-    assert!(header.contains("struct Widget"));
-    assert!(header.contains("typedef struct Widget Widget;"));
-    assert!(header.contains("enum Mode"));
-    assert!(header.contains("int widget_sum"));
-    validate_c_header(&header).expect("validate header");
-
-    let _ = std::fs::remove_file(&object);
+fn c_header_validation_is_in_process_and_portable() {
+    validate_c_header(
+        "typedef struct Widget { int count; const char *name; } Widget;\n\
+         int widget_sum(Widget *widget, int extra);\n",
+    )
+    .expect("validate a complete C header");
 }
 
 #[test]
@@ -142,18 +84,182 @@ fn c_command_outputs_json() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["command"], "c");
-    let data = json["data"].clone();
-    let payload = if data.get("functions").is_some() {
-        data
-    } else {
-        data.as_object()
-            .and_then(|map| map.values().next())
-            .cloned()
-            .expect("single-arch payload")
-    };
-    assert!(payload["functions"].is_array());
+    assert_eq!(json["data"]["schema_version"], 1);
+    assert_eq!(json["data"]["language"], "c_abi");
+    let slice = &json["data"]["slices"][0];
+    assert!(slice["observations"].is_array());
+    assert!(slice["entities"].is_array());
+    assert_eq!(
+        slice["resolved_plan"]["selected_entity_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
 
     let _ = std::fs::remove_file(&object);
+}
+
+#[test]
+fn recovery_header_root_correlates_typed_signature_and_projects_it() {
+    let object = unique_path("c-correlated-header", "o");
+    let root = unique_path("c-correlated-root", "headers");
+    std::fs::create_dir(&root).expect("create header root");
+    std::fs::write(root.join("widget.h"), "int widget_sum(void);\n")
+        .expect("write correlated header");
+    std::fs::write(
+        &object,
+        macho_test_support::thin64_x86_64_with_symbols(&[macho_test_support::SymbolFixture {
+            name: "_widget_sum",
+            external: true,
+            defined: true,
+        }]),
+    )
+    .expect("write object");
+
+    let header_root = format!("fixture={}", root.display());
+    let output = run_cli([
+        "c",
+        "--view",
+        "header",
+        "--header-root",
+        &header_root,
+        object.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "C header projection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 header");
+    assert!(stdout.contains("int widget_sum("), "{stdout}");
+    assert!(!stdout.contains("0 declarations emitted"), "{stdout}");
+
+    let _ = std::fs::remove_file(&object);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn recovery_header_root_correlates_global_value_type_and_projects_variable() {
+    let object = unique_path("c-correlated-global", "o");
+    let root = unique_path("c-correlated-global-root", "headers");
+    std::fs::create_dir(&root).expect("create header root");
+    std::fs::write(
+        root.join("globals.h"),
+        "extern unsigned long global_count;\n",
+    )
+    .expect("write correlated header");
+    std::fs::write(
+        &object,
+        macho_test_support::thin64_x86_64_with_data_symbols(&[macho_test_support::SymbolFixture {
+            name: "_global_count",
+            external: true,
+            defined: true,
+        }]),
+    )
+    .expect("write object");
+
+    let header_root = format!("fixture={}", root.display());
+    let output = run_cli([
+        "c",
+        "--view",
+        "header",
+        "--header-root",
+        &header_root,
+        object.to_str().expect("UTF-8 path"),
+    ]);
+
+    assert!(
+        output.status.success(),
+        "C global projection failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 header");
+    assert!(
+        stdout.contains("extern unsigned long global_count;"),
+        "{stdout}"
+    );
+
+    let _ = std::fs::remove_file(&object);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn image_header_is_reported_as_runtime_artifact() {
+    let object = unique_path("c-runtime-artifact", "o");
+    std::fs::write(
+        &object,
+        macho_test_support::thin64_x86_64_with_symbols(&[macho_test_support::SymbolFixture {
+            name: "_mh_execute_header",
+            external: true,
+            defined: true,
+        }]),
+    )
+    .expect("write object");
+    let output = run_cli([
+        "c",
+        "--format",
+        "json",
+        object.to_str().expect("UTF-8 path"),
+    ]);
+    let _ = std::fs::remove_file(&object);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    assert_eq!(
+        json["data"]["slices"][0]["entities"][0]["role"]["value"],
+        "runtime_artifact"
+    );
+}
+
+#[test]
+fn unknown_kind_filter_does_not_expand_to_all_kinds() {
+    let object = unique_path("c-unknown-kind", "o");
+    std::fs::write(
+        &object,
+        macho_test_support::thin64_x86_64_with_symbols(&[
+            macho_test_support::SymbolFixture {
+                name: "_defined_function",
+                external: true,
+                defined: true,
+            },
+            macho_test_support::SymbolFixture {
+                name: "_imported_unknown",
+                external: true,
+                defined: false,
+            },
+        ]),
+    )
+    .expect("write object");
+    let output = run_cli([
+        "c",
+        "--scope",
+        "all",
+        "--kind",
+        "unknown",
+        "--format",
+        "json",
+        object.to_str().expect("UTF-8 path"),
+    ]);
+    let _ = std::fs::remove_file(&object);
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).expect("JSON");
+    let slice = &json["data"]["slices"][0];
+    assert_eq!(
+        slice["resolved_plan"]["selected_entity_ids"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    let selected = slice["resolved_plan"]["selected_entity_ids"][0]
+        .as_str()
+        .unwrap();
+    let entity = slice["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entity| entity["id"] == selected)
+        .unwrap();
+    assert_eq!(entity["role"]["value"], "unknown");
 }
 
 #[test]

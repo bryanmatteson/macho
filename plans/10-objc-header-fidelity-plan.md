@@ -1,222 +1,470 @@
-# Plan: ObjC Header Fidelity
+# Plan 10: Objective-C Runtime Surface and Header Fidelity
 
-## Status
+## Status and Authority
 
-This is the concrete plan for bringing `macho objc --headers` as close as
-practical to `class-dump` output while staying honest about what Mach-O
-metadata can and cannot recover.
+This document is the single-pass behavioral authority for Objective-C runtime
+surface and header output. Plan 15 owns crate placement, `Analyzer`, selective
+execution, shared CLI delivery, snapshot state, and process boundaries.
+`complete/04-objc-swift-graph-plan.md` is a historical completion record, not an
+implementation authority; its surviving graph obligations are absorbed here and
+in plan 15.
+
+[`schemas/language-recovery-wire-v1.md`](schemas/language-recovery-wire-v1.md)
+is the normative wire contract and closed registry for every serialized type,
+reason, diagnostic code, and AST projection named here. The Rust blocks below
+are API projections of that contract.
+
+The implementation is complete only when the parser, graph, report, surface,
+header, JSON, invalid fixtures, and live-corpus acceptance below pass together.
+The dependency checkpoints are not release phases.
 
 ## Objective
 
-Raise Objective-C header reconstruction from today's lightweight
-best-effort output to a high-fidelity runtime-surface renderer that can:
+`macho objc` must expose the most useful runtime truth present in a Mach-O image:
+classes, categories, protocols, selectors, effective method ownership,
+properties, ivars, and reference/definition state. `--headers` must render
+only declarations supported by valid runtime metadata and must retain a complete
+unresolved ledger for malformed or incomplete records.
 
-- render full method signatures instead of return-type-only stubs
-- render richer property declarations and category surfaces
-- preserve raw metadata while exposing structured type/signature models
-- make remaining gaps explicit when source-level recovery is impossible
+The target is ABI-faithful deterministic output, not source reproduction or
+cosmetic imitation of a particular host tool.
 
-## Why This Matters
+## Coherence Boundary
 
-The repository already parses enough ObjC runtime metadata to identify classes,
-categories, protocols, methods, ivars, and properties. That is the hard
-foundation. The remaining gap versus `class-dump` is mostly modeling and
-rendering fidelity, not access to the underlying data.
+This plan resolves:
 
-High-fidelity headers matter because they make `macho` useful for API recovery,
-binary review, regression diffs, and downstream automation without forcing
-consumers to parse raw type encodings themselves.
+- Objective-C type, method, property, ivar, class, category, and protocol
+  metadata parsing;
+- `ObjCGraph` category folding, inheritance, selector ownership, and cycle-safe
+  resolution;
+- explicit defined, referenced, partial, malformed, and excluded states;
+- one canonical report consumed by text, JSON, headers, snapshots, and diffs;
+- typed Objective-C header AST parsing/rendering/validation in
+  `macho-header-syntax`, with runtime-to-header projection in `macho-objc`;
+- thin/fat, architecture selection, columns, color, diagnostics, and exit rules;
+- deterministic fixtures plus a recorded iMazing acceptance run; and
+- process-free cross-platform operation.
 
-## Current Repo Leverage
+It permanently excludes original parameter names, typedef aliases not encoded
+in metadata, most nullability and lightweight generics, source comments/macros,
+source ordering/formatting, decompilation, and full Swift ABI recovery.
 
-- `src/objc/class.rs`
-- `src/objc/category.rs`
-- `src/objc/method.rs`
-- `src/objc/property.rs`
-- `src/objc/protocol.rs`
-- `src/objc/render.rs`
-- `src/commands/objc.rs`
-- `tests/objc_tests.rs`
-- `tests/cli_feature_tests.rs`
+## Falsification Criteria
 
-## Fidelity Contract
+The design is wrong if:
 
-### Recoverable
+- malformed metadata is silently replaced with `id`, `void`, or an empty
+  parameter list;
+- an external class/protocol reference appears as a local definition;
+- category folding loses the originating category or silently chooses an
+  ambiguous implementation;
+- selector spelling and encoded argument count disagree without a diagnostic;
+- header output contains arbitrary strings rather than typed declarations;
+- a syntactically tidy declaration has an unresolved type, owner, or protocol;
+- text, JSON, header, snapshot, and diff use different semantic models;
+- an ObjC command launches `class-dump`, `xcrun`, a compiler, or any process;
+- a zero-result surface hides partial, malformed, excluded, or referenced
+  counts; or
+- a required corpus result is obtained through an iMazing-specific exception.
 
-- class, category, protocol names
-- superclass relationships
-- selector names
-- method type encodings
-- ivar names, offsets, sizes, alignments, and encoded types
-- property names and encoded attribute strings
-- adopted protocols
+## Canonical Model
 
-### Best-Effort
+`macho-objc` owns validated runtime values and the semantic graph. `macho-analysis`
+owns the plan/domain wrapper and snapshot/diff integration.
 
-- human-readable type spellings from ObjC encodings
-- placeholder method argument names
-- block and protocol-qualified object rendering
-- formatting choices to match `class-dump` style closely
-- superclass resolution for internal and external references
+```rust
+pub struct ObjCReport {
+    schema_version: ObjCReportVersion, // exactly 1
+    slices: NonEmpty<ObjCSliceReport>,
+}
 
-### Not Recoverable From Mach-O Metadata Alone
+pub struct ObjCSliceReport {
+    architecture: Architecture,
+    image: ImageIdentity,
+    graph: ObjCGraph,
+    entities: Vec<ObjCEntity>,
+    observations: Vec<ObjCObservation>,
+    evidence: Vec<ObjCEvidence>,
+    selection: ObjCSelectionResult,
+    header: Option<ObjCHeaderProjection>,
+    diagnostics: Vec<ObjCDiagnostic>,
+    executions: NonEmpty<ObjCCollectorExecution>,
+}
 
-- original parameter variable names
-- typedef aliases instead of canonical underlying types
-- nullability and most lightweight generics
-- source comments, macros, and formatting
-- many source-only annotations
+pub enum ObjCEntity {
+    Class(ObjCClassEntity),
+    Category(ObjCCategoryEntity),
+    Protocol(ObjCProtocolEntity),
+}
 
-## Scope
+pub enum ObjCPresence {
+    Defined,
+    Referenced,
+    Partial,
+}
 
-### In Scope
+pub struct ObjCSelectionResult {
+    selected_entity_ids: Vec<ObjCEntityId>,
+    totals: ObjCPartitionCounts,
+}
 
-- parsed ASTs for ObjC types, property attributes, and method signatures
-- high-fidelity header rendering for classes, categories, and protocols
-- category property recovery and rendering
-- deterministic output suitable for golden tests and diffs
-- differential validation against `class-dump` on real binaries
+pub struct ObjCCollectorExecution {
+    collector: ObjCCollectorId,
+    outcome: ObjCCollectorOutcome,
+    input_records: u64,
+    output_records: u64,
+}
 
-### Out of Scope
+pub enum ObjCCollectorId {
+    RuntimeMetadata,
+    SemanticGraph,
+    HeaderProjection,
+}
 
-- exact source reproduction
-- decompiler-style semantic recovery
-- Swift ABI modeling beyond current ObjC-adjacent surfacing
+pub enum ObjCCollectorOutcome {
+    Complete,
+    Unsupported { reason: ObjCUnavailableReason },
+    Failed { diagnostic_id: ObjCDiagnosticId },
+    Truncated { omitted_lower_bound: u64 },
+}
 
-## Design
+pub enum ObjCValue<T> {
+    Known { value: T, evidence: NonEmpty<ObjCEvidenceId> },
+    Conflicted { candidates: AtLeastTwo<ObjCCandidate<T>> },
+    Unavailable { reason: ObjCUnavailableReason },
+}
 
-Split the work into three layers:
+pub struct ObjCCandidate<T> {
+    value: T,
+    evidence: NonEmpty<ObjCEvidenceId>,
+}
 
-- parsing: raw ObjC encodings into structured ASTs
-- modeling: attach parsed signatures and attributes to ObjC metadata types
-- rendering: one deterministic high-fidelity header printer for CLI output
+pub struct ObjCEntityCommon {
+    id: ObjCEntityId,
+    presence: ObjCPresence,
+    name: ObjCValue<String>,
+    observation_ids: NonEmpty<ObjCObservationId>,
+}
 
-Keep raw strings alongside parsed representations so callers can inspect the
-original runtime metadata and so parsing improvements do not destroy source
-evidence.
+pub struct ObjCClassEntity {
+    common: ObjCEntityCommon,
+    superclass: ObjCValue<Option<ObjCTypeRef>>,
+    adopted_protocols: Vec<ObjCTypeRef>,
+    ivars: Vec<ObjCIvar>,
+    properties: Vec<ObjCProperty>,
+    instance_methods: Vec<ObjCMethod>,
+    class_methods: Vec<ObjCMethod>,
+}
 
-## Milestones
+pub struct ObjCCategoryEntity {
+    common: ObjCEntityCommon,
+    extended_class: ObjCValue<ObjCTypeRef>,
+    adopted_protocols: Vec<ObjCTypeRef>,
+    properties: Vec<ObjCProperty>,
+    instance_methods: Vec<ObjCMethod>,
+    class_methods: Vec<ObjCMethod>,
+    fold_order: ObjCValue<u64>,
+}
 
-### Milestone 1: Type and Signature AST
+pub struct ObjCProtocolEntity {
+    common: ObjCEntityCommon,
+    adopted_protocols: Vec<ObjCTypeRef>,
+    required_instance_methods: Vec<ObjCMethod>,
+    required_class_methods: Vec<ObjCMethod>,
+    optional_instance_methods: Vec<ObjCMethod>,
+    optional_class_methods: Vec<ObjCMethod>,
+    properties: Vec<ObjCProperty>,
+}
 
-Goal: replace ad hoc string decoding with a reusable parser.
+pub struct ObjCMethod {
+    id: ObjCMemberId,
+    selector: ObjCValue<Selector>,
+    kind: MethodKind,
+    raw_encoding: Vec<u8>,
+    signature: ObjCValue<ObjCMethodSignature>,
+    implementation: ObjCValue<Option<ImplementationLocation>>,
+    origin: ObjCEntityId,
+}
 
-Work:
+pub struct ObjCProperty {
+    id: ObjCMemberId,
+    name: ObjCValue<String>,
+    raw_attributes: Vec<u8>,
+    parsed_attributes: ObjCValue<ObjCPropertyAttributes>,
+    origin: ObjCEntityId,
+}
 
-- add a dedicated ObjC encoding parser module
-- parse primitive, object, pointer, array, struct, union, bitfield, block, and
-  qualifier encodings
-- parse method signature strings into return type plus ordered argument list
-- keep stack offsets and raw encodings available for debugging
+pub struct ObjCIvar {
+    id: ObjCMemberId,
+    name: ObjCValue<String>,
+    raw_encoding: Vec<u8>,
+    parsed_type: ObjCValue<ObjCEncodedType>,
+    offset: ObjCValue<u64>,
+    size: ObjCValue<u64>,
+    alignment: ObjCValue<u64>,
+}
 
-Acceptance:
+pub struct ObjCObservation {
+    id: ObjCObservationId,
+    source: ObjCObservationSource,
+    location: ObjCMetadataLocation,
+    raw: Vec<u8>,
+    disposition: ObjCObservationDisposition,
+}
 
-- renderer code no longer needs to hand-parse encodings inline
-- unit tests cover representative nested and qualified encodings
-- method signatures can be rendered without losing argument ordering
+pub enum ObjCObservationDisposition {
+    Included { entity_ids: NonEmpty<ObjCEntityId> },
+    Referenced { entity_id: ObjCEntityId },
+    Malformed { diagnostic_id: ObjCDiagnosticId },
+    Excluded { reason: ObjCExclusionReason },
+}
+```
 
-### Milestone 2: Header Rendering Upgrade
+The concrete class/category/protocol values contain stable IDs, presence,
+origin observations, raw addresses/references, parsed names, superclass or
+extended-class references, adopted protocols, ivars, properties, instance/class
+methods, and unresolved items. All invariant-bearing fields use private
+constructors and validated serde DTOs. IDs and references are unique and
+bidirectionally valid.
 
-Goal: move header output from summary strings to structured declarations.
+Raw metadata bytes/strings remain available beside parsed values. Parse failure
+never destroys the original evidence and never creates a known typed value.
+Diagnostic codes, unavailable reasons, evidence payloads, graph edges,
+partition counts, and header projection DTOs use the exact closed registry in
+the normative wire contract.
 
-Work:
+The report validator enforces unique IDs, non-empty included dispositions,
+bidirectional observation/entity references, valid owner/origin edges, resolved
+member IDs, valid graph edges, and execution/count consistency. Class and
+protocol cross-build IDs use unique runtime names. Category IDs use extended
+class plus category name only when that pair is unique; duplicates become
+distinct occurrence-scoped entities using metadata location. Methods and
+properties include owner, kind, and selector/name in their identity. Same-name
+records at distinct metadata locations never merge without an explicit runtime
+alias/reference edge.
 
-- render full typed method signatures with generated placeholder parameter names
-- render richer ivar type spellings
-- render protocol-qualified object types and blocks
-- normalize formatting for interfaces, categories, protocols, and `@optional`
-  sections
+## Encoding AST and Parser
 
-Acceptance:
+`macho-objc` owns one typed Objective-C encoding AST covering:
 
-- methods no longer appear as `- (ret) selector;` when arguments exist
-- output is deterministic and stable across runs
-- golden tests compare directly against expected header fragments
+- scalar and special primitives;
+- object, class, selector, block, protocol-qualified object, and unknown-object
+  forms;
+- pointers, fixed arrays, structs, unions, bitfields, and nested composites;
+- const/in/out/inout/bycopy/byref/oneway qualifiers;
+- method return and ordered arguments with raw frame/offset data;
+- property type, readonly/readwrite, copy/retain/strong/weak/assign,
+  atomic/non-atomic, dynamic, custom getter/setter, backing ivar, and raw unknown
+  attributes; and
+- ivar alignment/size/offset metadata without pretending those values are a
+  source declaration when the encoded type is incomplete.
 
-### Milestone 3: Property Fidelity
+The parser is bounded, total over bytes, and returns either a complete typed
+node or a typed error span. It rejects trailing unconsumed encoding data except
+for grammar-defined offsets/attributes. Selector colon count, implicit `self`
+and `_cmd`, and explicit encoded argument count are reconciled; disagreement is
+a conflict and makes the method header-ineligible.
 
-Goal: reconstruct property declarations with materially better accuracy.
+Unknown or future encodings remain raw unresolved evidence. They are never
+coerced to a convenient type.
 
-Work:
+## Semantic Graph
 
-- parse the full property attribute grammar
-- render ownership, atomicity, mutability, dynamic, getter, setter, and ivar
-  attributes where recoverable
-- distinguish object, scalar, block, struct, and protocol-qualified property
-  types
+`ObjCGraph` is the only runtime query authority. It provides cycle-safe,
+deterministic queries for:
 
-Acceptance:
+- direct and inherited instance/class method lookup;
+- all implementations of a selector with class/category origin;
+- effective method ownership after deterministic category folding;
+- class superclass and adopted-protocol traversal;
+- protocol required/optional and instance/class method partitions; and
+- VA/file-offset resolution when the metadata proves an implementation target.
 
-- property output contains substantially complete attribute lists
-- custom accessors and backing ivars are surfaced when present
+Category folding preserves both effective order and origin. Where load order is
+not provable, the graph reports all candidates and an ambiguity diagnostic
+instead of selecting one. Missing or external superclasses/protocols remain
+typed references. Graph cycles are diagnostics and terminate traversal.
 
-### Milestone 4: Category and Resolution Completeness
+`objc graph` and `objc selectors` are typed projections of `ObjCReport` and
+never rebuild metadata. `objc xrefs` is a typed composite report produced in
+`macho-analysis` from one explicit `AnalysisPlan` requesting the `objc` and
+standard `xrefs` domains. It joins only through proven implementation
+VA/file-offset identities and retains both source IDs. The CLI does not match
+selector or symbol strings to invent cross-references, and the composite does
+not serialize a second ObjC graph.
 
-Goal: close the main metadata-surface gaps outside method/property decoding.
+## Header Projection
 
-Work:
+`macho-header-syntax` owns the typed `ObjCHeaderAst`, bundled Objective-C parser,
+deterministic renderer, and syntax/semantic validators. `macho-objc` owns the
+projection from validated runtime values into that AST. The renderer cannot
+accept raw declaration strings.
 
-- parse and render category properties
-- render adopted protocols on categories
-- improve superclass resolution for internal classes
-- normalize protocol adoption ordering and category folding side effects for
-  deterministic output
+Eligibility is exact:
 
-Acceptance:
+- a method requires a valid selector, complete parsed return type, complete
+  parsed explicit argument types, consistent argument count, and known
+  instance/class kind;
+- an ivar requires a complete parsed type plus valid owning class;
+- a property requires a complete type and non-conflicting attributes/accessors;
+- a class/category/protocol declaration requires a proven local definition;
+- superclass, extended class, and adopted protocol references must resolve to a
+  local declaration or an explicit external forward declaration; and
+- blocks, structs, unions, nested types, protocol qualifications, and property
+  attributes must be representable by the supported AST.
 
-- category headers include all recoverable methods, protocols, and properties
-- superclass output is correct for more than bind-backed cases
+Rendered source is reparsed in-process before delivery. The semantic validator
+then checks unique declarations, owner/reference closure, selector/argument
+agreement, duplicate/conflicting methods and properties, required/optional
+protocol sections, class/category/protocol kind consistency, and deterministic
+dependency order. Every ineligible entity/member appears in
+`ObjCHeaderProjection.unresolved` with stable ID, reason, raw evidence, and
+diagnostic references. An empty projection succeeds only when that ledger is
+complete.
 
-### Milestone 5: Validation and CLI Integration
+Placeholder names `arg1`, `arg2`, and so on are permitted only for source
+parameter identifiers, which runtime metadata does not preserve. They do not
+stand in for missing types or selectors.
 
-Goal: make the higher-fidelity path the reliable product surface.
+## CLI Contract
 
-Work:
+```text
+macho objc PATH [--arch ARCH] [--headers] [--class NAME]
+macho objc graph PATH [--arch ARCH] [--class NAME]
+macho objc selectors PATH [--arch ARCH] [--name SELECTOR]
+macho objc xrefs PATH [--arch ARCH] [--class NAME]
+```
 
-- add real-binary golden tests
-- compare output against `class-dump` on a curated corpus and classify deltas
-- route `macho objc --headers` through the structured renderer
-- document remaining intentional gaps
+The base command is the runtime surface; `--headers` changes that view to header
+source. `graph`, `selectors`, and `xrefs` are actions and therefore remain
+subcommands rather than mode flags. Every form inherits `--format text|json` and
+`--color auto|always|never`; a fat header source requires `--arch`.
 
-Acceptance:
+`graph` renders entity/edge and category-folding state. `selectors` renders
+selector, method kind, effective owner, origin, implementation location, and
+ambiguity. `xrefs` renders the composite typed joins above and clearly separates
+resolved, ambiguous, and unresolved references. All three preserve stable IDs
+in JSON and use the shared column/color engine in text.
 
-- known mismatches are either fixed or documented as non-recoverable
-- CLI output is stable enough for regression testing and diff workflows
+Surface text uses distinct sections for defined, referenced, partial, malformed,
+and excluded records. Class/category/protocol rows and child method/property/
+ivar rows have distinct indentation and shared ANSI-aware columns. Enum values,
+origin, and `key=value` fragments use the shared palette. A zero selected result
+still prints unselected/reference/partial/malformed/excluded counts and the flag
+that expands them.
 
-## Dependencies
+Header text is deterministic source with no ANSI. JSON uses the common envelope
+and always contains an `ObjCReport` with a `slices` array; header view stores its
+projection once in the selected slice. Class/selector filters select displayed
+IDs without destroying observations or unfiltered totals. JSON and header source
+reject explicit `--color always`.
 
-- builds on the current ObjC metadata parsing in `src/objc/`
-- complements `04-objc-swift-graph-plan.md` by improving fidelity rather than
-  semantic query breadth
-- may reuse symbol information from `07-symbol-and-xref-resolution-plan.md` for
-  diagnostics, but should not depend on symbol presence for core header output
+Unresolved runtime metadata is a successful analysis result. Invalid arguments
+use the usage exit class. Bounds, graph invariants, report validation, or header
+semantic failure use the execution-failure class.
 
-## Risks
+## Ownership
 
-- ObjC type encodings have edge cases that can sprawl into parser complexity
-- chasing `class-dump` formatting exactly can waste time on cosmetic parity
-- some binaries contain malformed or partial metadata that must degrade
-  gracefully
+- `macho-objc` owns runtime metadata/encoding parsing, validated owned values,
+  graph semantics, and runtime-to-header projection.
+- `macho-header-syntax` owns shared C-family types plus the Objective-C header
+  AST, parser, renderer, and syntax/semantic validators.
+- `macho-analysis` owns selective domain execution, report/snapshot/diff
+  integration, and collector ledgers.
+- `macho-cli` owns arguments, files, text/JSON/header delivery, color, and exit
+  policy.
 
-## Mitigations
+`macho-objc` depends only on `macho-core`, `macho-dyld`, and
+`macho-header-syntax`. No reverse edge or CLI dependency is permitted.
 
-- keep parsing and rendering separate so failures can fall back cleanly
-- prioritize declaration correctness over exact whitespace parity
-- preserve raw encodings and surface parse uncertainty explicitly in tests
+## Cross-Platform and Tool Boundary
 
-## Recommended Sequence
+All metadata parsing, graph resolution, encoding parsing, header construction,
+reparsing, and validation are in-process. `class-dump` is a non-authoritative design
+reference only. Curated expected declarations are committed as fixture text;
+no test or product path shells out to reproduce them. The architecture scanner
+rejects process execution and known host-tool strings in Objective-C production
+paths.
 
-1. add the type/signature AST and parser
-2. switch method rendering to structured signatures
-3. expand property parsing and rendering
-4. add category-property and superclass-resolution fixes
-5. add golden tests and differential validation
-6. promote the high-fidelity renderer to the default header path
+## Verification
+
+Required deterministic fixtures cover:
+
+- defined and referenced classes, protocols, and categories;
+- category folding with preserved origin and ambiguous ordering;
+- inherited method lookup, superclass/protocol gaps, and graph cycles;
+- resolved, ambiguous, and unresolved ObjC/xref joins with a negative fixture
+  proving same-name selector/symbol text cannot create a join;
+- required/optional protocol methods and instance/class partitions;
+- primitive/object/block/protocol/pointer/array/struct/union/bitfield/nested and
+  qualified type encodings;
+- full method offsets, multi-colon selectors, malformed/trailing encodings, and
+  selector/argument conflicts;
+- every property attribute, custom accessors, backing ivars, unknown attributes,
+  and contradictory attributes;
+- complete header projection, external forwards, duplicate declarations,
+  unresolved types/owners/protocols, and empty-but-accounted projection;
+- thin/fat, arm64/x86_64, text/JSON/header parity, ANSI stripping, Unicode
+  alignment, channel purity, and exit behavior;
+- symbols-only and unrelated analysis plans with a panicking ObjC collector to
+  prove selective execution; and
+- `PATH=/nonexistent` plus the process-boundary architecture scan.
+
+The current implementation acceptance runs
+`macho objc /Applications/iMazing.app/Contents/MacOS/iMazing` for every contained
+architecture and records path, SHA-256, architectures, commands, outputs, and
+assertions in `plans/evidence/10-imazing-objc.md`. The live binary is an
+environment-specific acceptance probe, not a portable CI dependency. Synthetic
+fixtures encode every required behavior and cannot be skipped when iMazing is
+absent elsewhere.
+
+The live probe proves that output is non-empty and accounted, referenced
+framework classes are not local definitions, categories/protocols/methods retain
+origin and presence, malformed metadata is explicit, headers are semantically
+valid or fully unresolved, and no process launches. Binary-name exceptions are
+forbidden.
+
+## Negative STOP Conditions
+
+Stop implementation and report exact evidence if:
+
+1. raw metadata must be discarded to build the typed graph;
+2. a malformed encoding can reach a known rendered type;
+3. an external reference must be represented as a local definition;
+4. category ambiguity must be hidden to provide one answer;
+5. a header declaration requires unresolved owner/type/protocol information;
+6. source text must bypass the shared typed ObjC header AST;
+7. a library or test contract requires a host process;
+8. any iMazing result requires a binary-name exception;
+9. an invalid fixture passes only after weakening a validator; or
+10. a required check is skipped, ignored, or converted to a warning.
+
+## Dependency Checkpoints
+
+1. Define validated report/encoding/header ASTs and malformed-wire/encoding
+   fixtures.
+2. Complete graph resolution, presence/origin semantics, and all graph invalid
+   fixtures.
+3. Make surface text and JSON consume only the canonical report.
+4. Implement typed header eligibility, shared rendering, render/reparse plus
+   semantic validation, and the complete unresolved ledger.
+5. Complete shared CLI alignment/color/channel/exit tests, selective-execution
+   tests, architecture gates, workspace gates, and the recorded live probe.
+
+A checkpoint cannot pass while any CLI or snapshot consumer uses an ad hoc
+metadata parser or a model different from `ObjCReport`/`ObjCGraph`.
 
 ## Done Means
 
-- `macho objc --headers` reconstructs the highest-fidelity ObjC declarations
-  reasonably possible from runtime metadata
-- remaining differences versus `class-dump` are narrow, understood, and mostly
-  limited to non-recoverable source details
-- the ObjC renderer has a structured foundation instead of string heuristics
+- Objective-C runtime output is useful for defined, referenced, partial,
+  malformed, and excluded surfaces;
+- methods, properties, ivars, categories, and protocols preserve raw evidence
+  and expose validated typed values;
+- graph queries are deterministic, cycle-safe, origin-preserving, and honest
+  about ambiguity;
+- headers contain only eligible typed declarations and a complete unresolved
+  ledger;
+- text, JSON, header, snapshot, and diff consume one canonical report;
+- every path is process-free and cross-platform; and
+- all positive/negative fixtures, STOP conditions, workspace gates, and the
+  current iMazing acceptance ledger pass without verifier weakening.

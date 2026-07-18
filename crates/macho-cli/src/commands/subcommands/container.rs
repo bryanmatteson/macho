@@ -58,7 +58,7 @@ pub fn run(args: ContainerArgs, format: OutputFormat, out: &mut dyn Write) -> Re
     let report = ContainerDocumentReport::from_document(&document, &parity_domains, args.resolve);
 
     if format == OutputFormat::Json {
-        let _ = writeln!(out, "{}", serde_json::to_string_pretty(&report)?);
+        crate::commands::output::json::write_pretty(out, &report)?;
         return Ok(());
     }
 

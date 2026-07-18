@@ -417,11 +417,16 @@ pub(crate) fn dependencies(domain: AnalysisDomain) -> Vec<Dependency> {
             advisory(D::Imports),
             advisory(D::Exports),
         ],
-        D::CHeaders => vec![required(D::Dwarf), advisory(D::Symbols)],
-        D::CppHeaders => vec![
+        D::CSurface => vec![
             required(D::Segments),
+            required(D::Symbols),
+            advisory(D::Dwarf),
+            advisory(D::Ranges),
+        ],
+        D::CppSurface => vec![
+            required(D::Segments),
+            required(D::Symbols),
             required(D::Vtables),
-            advisory(D::Symbols),
             advisory(D::Dwarf),
             advisory(D::Ranges),
         ],

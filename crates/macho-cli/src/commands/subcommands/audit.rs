@@ -196,7 +196,7 @@ fn print_json(reports: &[AuditReport], out: &mut dyn Write) -> Result<()> {
             findings: &report.findings,
         })
         .collect();
-    let _ = writeln!(out, "{}", serde_json::to_string_pretty(&payload)?);
+    crate::commands::output::json::write_pretty(out, &payload)?;
     Ok(())
 }
 

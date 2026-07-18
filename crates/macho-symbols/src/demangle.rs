@@ -23,8 +23,6 @@ impl SymbolDemangler {
             return;
         }
 
-        let mut swift_candidates = Vec::new();
-
         for name in names {
             if self.cache.contains_key(name) {
                 continue;
@@ -35,15 +33,13 @@ impl SymbolDemangler {
                 continue;
             }
 
-            if let Some(candidate) = swift_candidate(name) {
-                swift_candidates.push((name.to_owned(), candidate.to_owned()));
+            if let Some(demangled) = demangle_swift_symbol(name) {
+                self.cache.insert(name.to_owned(), Some(demangled));
                 continue;
             }
 
             self.cache.insert(name.to_owned(), None);
         }
-
-        self.precompute_swift(&swift_candidates);
     }
 
     /// Performs format.
@@ -59,19 +55,6 @@ impl SymbolDemangler {
         match self.cache.get(name).and_then(|entry| entry.as_ref()) {
             Some(demangled) => Cow::Owned(demangled.clone()),
             None => Cow::Borrowed(name),
-        }
-    }
-
-    fn precompute_swift(&mut self, names: &[(String, String)]) {
-        if names.is_empty() {
-            return;
-        }
-
-        // Swift demangling is an injected delivery capability. The reusable
-        // leaf remains pure and degrades to the original symbol when no
-        // adapter supplied by the caller has populated the cache.
-        for (name, _) in names {
-            self.cache.insert(name.clone(), None);
         }
     }
 }
@@ -94,6 +77,98 @@ pub fn demangle_cpp_symbol_without_return_type(name: &str) -> Option<String> {
         name,
         cpp_demangle::DemangleOptions::default().no_return_type(),
     )
+}
+
+/// Demangle a legacy Swift Objective-C runtime name in-process.
+pub fn demangle_swift_symbol(name: &str) -> Option<String> {
+    let candidate = swift_candidate(name)?;
+    swift_demangler::demangle(candidate).or_else(|| demangle_legacy_swift_runtime_name(candidate))
+}
+
+fn demangle_legacy_swift_runtime_name(name: &str) -> Option<String> {
+    let mut parser = LegacySwiftRuntimeName::new(name.strip_prefix("_Tt")?);
+    let components = parser.parse_nominal_type()?;
+    if parser.remaining() == "_" {
+        parser.advance(1)?;
+    }
+    parser.remaining().is_empty().then(|| components.join("."))
+}
+
+struct LegacySwiftRuntimeName<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl<'a> LegacySwiftRuntimeName<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn parse_nominal_type(&mut self) -> Option<Vec<&'a str>> {
+        match self.next_byte()? {
+            b'C' | b'V' | b'O' | b'P' => {}
+            _ => return None,
+        }
+
+        let mut components = self.parse_context()?;
+        components.push(self.parse_decl_name()?);
+        Some(components)
+    }
+
+    fn parse_context(&mut self) -> Option<Vec<&'a str>> {
+        match self.peek_byte()? {
+            b'C' | b'V' | b'O' | b'P' => self.parse_nominal_type(),
+            b's' => {
+                self.advance(1)?;
+                Some(vec!["Swift"])
+            }
+            _ => Some(vec![self.parse_identifier()?]),
+        }
+    }
+
+    fn parse_decl_name(&mut self) -> Option<&'a str> {
+        if self.peek_byte() == Some(b'P') {
+            self.advance(1)?;
+            self.parse_identifier()?;
+        }
+        self.parse_identifier()
+    }
+
+    fn parse_identifier(&mut self) -> Option<&'a str> {
+        let start = self.offset;
+        while self.peek_byte().is_some_and(|byte| byte.is_ascii_digit()) {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            return None;
+        }
+        let length = self.input[start..self.offset].parse::<usize>().ok()?;
+        let identifier_start = self.offset;
+        self.advance(length)?;
+        let identifier = &self.input[identifier_start..self.offset];
+        (!identifier.is_empty()).then_some(identifier)
+    }
+
+    fn peek_byte(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.offset).copied()
+    }
+
+    fn next_byte(&mut self) -> Option<u8> {
+        let byte = self.peek_byte()?;
+        self.offset += 1;
+        Some(byte)
+    }
+
+    fn advance(&mut self, length: usize) -> Option<()> {
+        let end = self.offset.checked_add(length)?;
+        self.input.get(self.offset..end)?;
+        self.offset = end;
+        Some(())
+    }
+
+    fn remaining(&self) -> &'a str {
+        &self.input[self.offset..]
+    }
 }
 
 fn demangle_cpp_symbol_with_options(
@@ -126,15 +201,15 @@ pub fn format_symbol<'a>(name: &'a str, demangle: bool) -> Cow<'a, str> {
 fn demangle_rust_or_cpp(name: &str) -> Option<String> {
     for candidate in symbol_candidates(name) {
         if is_rust_v0_symbol(candidate)
-            && let Ok(demangled) = rustc_demangle::try_demangle(candidate)
+            && let Some(demangled) = demangle_rust_symbol(candidate)
         {
-            return Some(demangled.to_string());
+            return Some(demangled);
         }
 
         if is_likely_legacy_rust_symbol(candidate)
-            && let Ok(demangled) = rustc_demangle::try_demangle(candidate)
+            && let Some(demangled) = demangle_rust_symbol(candidate)
         {
-            return Some(demangled.to_string());
+            return Some(demangled);
         }
 
         if looks_like_cpp_symbol(candidate)
@@ -145,13 +220,25 @@ fn demangle_rust_or_cpp(name: &str) -> Option<String> {
         }
 
         if candidate.starts_with("_ZN")
-            && let Ok(demangled) = rustc_demangle::try_demangle(candidate)
+            && let Some(demangled) = demangle_rust_symbol(candidate)
         {
-            return Some(demangled.to_string());
+            return Some(demangled);
         }
     }
 
     None
+}
+
+fn demangle_rust_symbol(name: &str) -> Option<String> {
+    const MACHO_TLV_INIT_SUFFIX: &str = "$tlv$init";
+
+    let (mangled, suffix) = match name.strip_suffix(MACHO_TLV_INIT_SUFFIX) {
+        Some(mangled) => (mangled, MACHO_TLV_INIT_SUFFIX),
+        None => (name, ""),
+    };
+    let demangled = rustc_demangle::try_demangle(mangled).ok()?;
+
+    Some(format!("{demangled}{suffix}"))
 }
 
 fn symbol_candidates(name: &str) -> impl Iterator<Item = &str> {
@@ -210,7 +297,10 @@ fn swift_candidate(name: &str) -> Option<&str> {
 }
 
 fn looks_like_swift_symbol(name: &str) -> bool {
-    name.starts_with("$s") || name.starts_with("$S") || name.starts_with("$e")
+    name.starts_with("$s")
+        || name.starts_with("$S")
+        || name.starts_with("$e")
+        || name.starts_with("_Tt")
 }
 
 fn simplify_cpp_demangled(text: &str) -> String {
@@ -540,7 +630,10 @@ fn simplify_virtual_override_thunk(inner: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{SymbolDemangler, demangle_symbol, format_symbol, simplify_cpp_demangled};
+    use super::{
+        SymbolDemangler, demangle_swift_symbol, demangle_symbol, format_symbol,
+        simplify_cpp_demangled,
+    };
 
     #[test]
     fn demangles_macho_cpp_symbol() {
@@ -553,6 +646,39 @@ mod tests {
         let demangled =
             demangle_symbol("__ZN3foo17h05af221e174051e9E").expect("expected Rust demangling");
         assert_eq!(demangled, "foo::h05af221e174051e9");
+    }
+
+    #[test]
+    fn demangles_macho_rust_thread_local_initializer() {
+        let demangled = demangle_symbol(
+            "__RNvNCNKNvNtCsfTOUOv1Xnuk_12tracing_core10dispatcher13CURRENT_STATE0023___RUST_STD_INTERNAL_VAL$tlv$init",
+        )
+        .expect("expected Rust thread-local initializer demangling");
+
+        assert_eq!(
+            demangled,
+            "tracing_core[b9337ccb037ca08e]::dispatcher::CURRENT_STATE::{K#0}::{closure#0}::__RUST_STD_INTERNAL_VAL$tlv$init"
+        );
+    }
+
+    #[test]
+    fn demangles_legacy_swift_objc_runtime_names_in_process() {
+        assert_eq!(
+            demangle_swift_symbol("_TtC7iMazing10BackupData").as_deref(),
+            Some("iMazing.BackupData")
+        );
+        assert_eq!(
+            demangle_swift_symbol("_TtP7iMazing10Switchable_").as_deref(),
+            Some("iMazing.Switchable")
+        );
+        assert_eq!(
+            demangle_swift_symbol("_TtCC7iMazing12LottieHelper10LottieInfo").as_deref(),
+            Some("iMazing.LottieHelper.LottieInfo")
+        );
+        assert_eq!(
+            demangle_swift_symbol("_$s4Demo6WidgetCMn").as_deref(),
+            Some("nominal type descriptor for Demo.Widget")
+        );
     }
 
     #[test]

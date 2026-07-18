@@ -5,6 +5,12 @@ use serde::Serialize;
 pub struct SwiftTypeIndex {
     /// The types field.
     pub types: Vec<SwiftType>,
+    /// Parent context relationships decoded from nominal descriptors.
+    pub parents: Vec<SwiftParentInfo>,
+    /// Protocol conformance descriptors decoded from reflection metadata.
+    pub conformances: Vec<SwiftConformanceInfo>,
+    /// Associated-type descriptors decoded from reflection metadata.
+    pub associated_types: Vec<SwiftAssociatedTypeInfo>,
 }
 
 impl SwiftTypeIndex {
@@ -70,6 +76,73 @@ pub struct SwiftType {
     pub source: SwiftTypeSource,
     /// The confidence field.
     pub confidence: SwiftTypeConfidence,
+    /// Stored properties or enum cases decoded from the nominal field descriptor.
+    pub fields: Option<Vec<SwiftFieldInfo>>,
+}
+
+/// One record from a Swift nominal field descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwiftFieldInfo {
+    /// Field/case name when the reflection string is available.
+    pub name: Option<String>,
+    /// Raw mangled type-reference bytes, excluding the terminating NUL.
+    pub mangled_type: Option<Vec<u8>>,
+    /// Resolved nominal type name when an in-image symbolic reference permits it.
+    pub type_name: Option<String>,
+    /// ABI field-record flags.
+    pub flags: u32,
+}
+
+/// A nominal descriptor's enclosing nominal or protocol context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwiftParentInfo {
+    /// Nominal descriptor virtual address.
+    pub descriptor_address: u64,
+    /// Fully-qualified enclosing context name.
+    pub parent_name: String,
+}
+
+/// One protocol-conformance descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwiftConformanceInfo {
+    /// Conformance descriptor virtual address.
+    pub address: u64,
+    /// Descriptor byte length.
+    pub byte_len: u32,
+    /// Protocol descriptor virtual address when directly resolvable.
+    pub protocol_address: Option<u64>,
+    /// Fully-qualified protocol name when its descriptor resolves.
+    pub protocol_name: Option<String>,
+    /// Conforming nominal descriptor virtual address when directly resolvable.
+    pub conforming_type_address: Option<u64>,
+    /// Fully-qualified conforming type name when its reference resolves.
+    pub conforming_type_name: Option<String>,
+}
+
+/// One record from an associated-type descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwiftAssociatedTypeRecordInfo {
+    /// Associated-type requirement name.
+    pub name: Option<String>,
+    /// Raw substituted-type mangling bytes.
+    pub substituted_type_name: Option<Vec<u8>>,
+}
+
+/// One associated-type descriptor and its bounded records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SwiftAssociatedTypeInfo {
+    /// Descriptor virtual address.
+    pub address: u64,
+    /// Descriptor byte length including its records.
+    pub byte_len: u32,
+    /// Raw conforming-type mangling bytes.
+    pub conforming_type_name: Option<Vec<u8>>,
+    /// Resolved conforming nominal type name when available.
+    pub resolved_conforming_type_name: Option<String>,
+    /// Raw protocol-type mangling bytes.
+    pub protocol_type_name: Option<Vec<u8>>,
+    /// Associated-type records.
+    pub records: Vec<SwiftAssociatedTypeRecordInfo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -123,6 +196,9 @@ impl std::fmt::Display for SwiftTypeKind {
 /// The SwiftTypeSource type.
 #[non_exhaustive]
 pub enum SwiftTypeSource {
+    #[serde(rename = "swift_metadata")]
+    /// Parsed from a native Swift context descriptor section.
+    SwiftMetadata,
     #[serde(rename = "demangled_symbol")]
     /// The DemangledSymbol variant.
     DemangledSymbol,

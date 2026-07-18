@@ -1,18 +1,23 @@
-use anyhow::{Context, Result};
+//! Offline header-hypothesis artifact exchange.
+
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::adapters::XcrunClangValidator;
-use crate::analysis::reconstruct::{
-    BundleValidationReport, EvidenceBundle, HeaderInferenceSession, ModelOutput, PromptSet,
-    ValidationReport, validate_bundle,
+use anyhow::{Context, Result, bail};
+use macho::analysis::report::{Architecture, RecoveryGapId, RecoveryReport, RecoverySchemaVersion};
+use macho::header_infer::{
+    HypothesisBundle, HypothesisDisposition, HypothesisLimits, HypothesisReport, ModelResponse,
+    build_prompt, export_bundle, validate_response,
 };
-use crate::commands::OutputFormat;
+
+use crate::commands::output::{ColorChoice, Format, Options as OutputOptions, columns};
 use crate::commands::subcommands::common::read_input_string;
-use crate::commands::{input_message, input_result};
+use crate::commands::{input_message, input_result, usage_message};
 
 #[derive(clap::Args)]
-/// The HeaderInferArgs type.
+/// Export, inspect, prompt, validate, and apply offline hypothesis artifacts.
 pub struct HeaderInferArgs {
     #[command(subcommand)]
     action: HeaderInferAction,
@@ -20,67 +25,138 @@ pub struct HeaderInferArgs {
 
 #[derive(clap::Subcommand)]
 enum HeaderInferAction {
-    /// Inspect an evidence bundle
-    Inspect { bundle: PathBuf },
-    /// Validate an evidence bundle before prompting a model
-    CheckBundle { bundle: PathBuf },
-    /// Emit the prompt set for a bundle
-    Prompt { bundle: PathBuf },
-    /// Validate a model response against a bundle
-    Validate { bundle: PathBuf, response: PathBuf },
-    /// Apply a model response and emit header plus sidecar
-    Apply {
+    /// Export explicit recovery gaps into one bounded offline bundle.
+    Export {
+        /// Common JSON envelope produced by `macho c` or `macho cpp`.
+        recovery_json: PathBuf,
+        /// Exact architecture name from the recovery report.
+        #[arg(long)]
+        arch: String,
+        /// Explicit gap ID; repeat for each requested gap.
+        #[arg(long, required = true)]
+        gap: Vec<String>,
+        /// Destination bundle path.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Inspect bounded targets, facts, evidence, constraints, and limits.
+    Inspect {
+        /// Hypothesis bundle path.
         bundle: PathBuf,
+    },
+    /// Validate bundle schema, digest, bounds, and references.
+    CheckBundle {
+        /// Hypothesis bundle path.
+        bundle: PathBuf,
+    },
+    /// Emit a deterministic provider-neutral prompt.
+    Prompt {
+        /// Hypothesis bundle path.
+        bundle: PathBuf,
+        /// Optional prompt destination; stdout when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+    /// Validate one strict response against one exact bundle.
+    Validate {
+        /// Hypothesis bundle path.
+        bundle: PathBuf,
+        /// ModelResponse JSON path.
         response: PathBuf,
+    },
+    /// Revalidate and emit hypothesis-assisted header source and optional sidecar.
+    Apply {
+        /// Hypothesis bundle path.
+        bundle: PathBuf,
+        /// ModelResponse JSON path.
+        response: PathBuf,
+        /// Optional header destination; stdout when omitted.
         #[arg(long)]
         header_out: Option<PathBuf>,
+        /// Optional immutable HypothesisReport sidecar destination.
         #[arg(long)]
         sidecar_out: Option<PathBuf>,
     },
 }
 
-/// Performs run.
-pub fn run(args: HeaderInferArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
-    let json = format == OutputFormat::Json;
+/// Runs the offline artifact workflow.
+pub fn run(args: HeaderInferArgs, output: OutputOptions, out: &mut dyn Write) -> Result<()> {
+    if output.format() == Format::Sarif {
+        return Err(usage_message(
+            "header-infer supports text and JSON only for inspect, check-bundle, and validate",
+        ));
+    }
     match args.action {
+        HeaderInferAction::Export {
+            recovery_json,
+            arch,
+            gap,
+            output: destination,
+        } => {
+            require_artifact_output(output, "export")?;
+            let report = read_recovery(&recovery_json)?;
+            let architecture = architecture_by_name(&report, &arch)?;
+            let gaps = gap
+                .into_iter()
+                .map(|value| {
+                    RecoveryGapId::new(value)
+                        .map_err(|error| input_message(format!("invalid --gap ID: {error}")))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let bundle = export_bundle(&report, architecture, &gaps, HypothesisLimits::default())?;
+            atomic_write(&destination, &bundle.canonical_bytes()?)?;
+        }
         HeaderInferAction::Inspect { bundle } => {
             let bundle = read_bundle(&bundle)?;
-            if json {
-                let _ = writeln!(out, "{}", serde_json::to_string_pretty(&bundle)?);
-            } else {
-                print_bundle_summary(&bundle, out);
+            match output.format() {
+                Format::Json => crate::commands::output::json::write_pretty(out, &bundle)?,
+                Format::Text => print_bundle(&bundle, output, out)?,
+                Format::Sarif => unreachable!(),
             }
         }
         HeaderInferAction::CheckBundle { bundle } => {
             let bundle = read_bundle(&bundle)?;
-            let report = validate_bundle(&bundle);
-            if json {
-                let _ = writeln!(out, "{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_bundle_validation_report(&report, out);
+            bundle.validate()?;
+            match output.format() {
+                Format::Json => crate::commands::output::json::write_pretty(
+                    out,
+                    &serde_json::json!({
+                        "valid": true,
+                        "bundle_digest": bundle.bundle_digest(),
+                    }),
+                )?,
+                Format::Text => writeln!(
+                    out,
+                    "{}  {}",
+                    output.style().enum_value("valid"),
+                    output
+                        .style()
+                        .property("bundle", bundle.bundle_digest().as_str()),
+                )?,
+                Format::Sarif => unreachable!(),
             }
-            fail_if_invalid_bundle(&report)?;
         }
-        HeaderInferAction::Prompt { bundle } => {
-            let session = HeaderInferenceSession::new(read_bundle(&bundle)?);
-            let prompt = session.prompt()?;
-            if json {
-                let _ = writeln!(out, "{}", serde_json::to_string_pretty(&prompt)?);
+        HeaderInferAction::Prompt {
+            bundle,
+            output: destination,
+        } => {
+            require_artifact_output(output, "prompt")?;
+            let prompt = build_prompt(&read_bundle(&bundle)?)?;
+            if let Some(path) = destination {
+                atomic_write(&path, prompt.as_bytes())?;
             } else {
-                print_prompt(&prompt, out);
+                out.write_all(prompt.as_bytes())?;
             }
         }
         HeaderInferAction::Validate { bundle, response } => {
-            let session = HeaderInferenceSession::new(read_bundle(&bundle)?);
-            let output = read_model_output(&session, &response)?;
-            let validators = validators();
-            let report = session.validate(&output, &validators)?;
-            if json {
-                let _ = writeln!(out, "{}", serde_json::to_string_pretty(&report)?);
-            } else {
-                print_validation_report(&report, out);
+            let bundle = read_bundle(&bundle)?;
+            let response = read_response(&response, bundle.limits())?;
+            let report = validate_response(&bundle, &response)?;
+            match output.format() {
+                Format::Json => crate::commands::output::json::write_pretty(out, &report)?,
+                Format::Text => print_report(&report, output, out)?,
+                Format::Sarif => unreachable!(),
             }
-            fail_if_invalid_validation(&report)?;
         }
         HeaderInferAction::Apply {
             bundle,
@@ -88,147 +164,224 @@ pub fn run(args: HeaderInferArgs, format: OutputFormat, out: &mut dyn Write) -> 
             header_out,
             sidecar_out,
         } => {
-            let session = HeaderInferenceSession::new(read_bundle(&bundle)?);
-            let output = read_model_output(&session, &response)?;
-            let validators = validators();
-            let sidecar = session.apply(output, &validators)?;
-
-            if let Some(path) = header_out.as_ref() {
-                std::fs::write(path, &sidecar.generated_header)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
-            }
-
-            if let Some(path) = sidecar_out.as_ref() {
-                let encoded = serde_json::to_vec_pretty(&sidecar)?;
-                std::fs::write(path, encoded)
-                    .with_context(|| format!("failed to write {}", path.display()))?;
-            }
-
-            if json {
-                let _ = writeln!(out, "{}", serde_json::to_string_pretty(&sidecar)?);
+            require_artifact_output(output, "apply")?;
+            let bundle = read_bundle(&bundle)?;
+            let response = read_response(&response, bundle.limits())?;
+            let report = validate_response(&bundle, &response)?;
+            let header = report
+                .projected_header
+                .as_ref()
+                .map(|projection| projection.source.as_str())
+                .unwrap_or("/* hypothesis-assisted; no declarations accepted */\n");
+            if let Some(path) = header_out {
+                atomic_write(&path, header.as_bytes())?;
             } else {
-                print_validation_report(&sidecar.validation, out);
-                let _ = writeln!(out, "Header: {}", sidecar.header_name);
-                let _ = writeln!(out, "Valid: {}", sidecar.valid);
-                if header_out.is_none() {
-                    let _ = writeln!(out,);
-                    let _ = writeln!(out, "{}", sidecar.generated_header);
-                }
+                out.write_all(header.as_bytes())?;
             }
-            fail_if_invalid_validation(&sidecar.validation)?;
+            if let Some(path) = sidecar_out {
+                let bytes = macho::analysis::report::canonical_json(&report)?;
+                atomic_write(&path, &bytes)?;
+            }
         }
     }
-
     Ok(())
 }
 
-fn read_bundle(path: &Path) -> Result<EvidenceBundle> {
-    let data = read_input_string(path)?;
-    let bundle: EvidenceBundle = input_result(
-        serde_json::from_str(&data),
+fn require_artifact_output(output: OutputOptions, command: &str) -> Result<()> {
+    if output.format() != Format::Text {
+        return Err(usage_message(format!(
+            "header-infer {command} emits a fixed artifact format and does not accept --format"
+        )));
+    }
+    if output.color() == ColorChoice::Always {
+        return Err(usage_message(format!(
+            "header-infer {command} does not accept --color always"
+        )));
+    }
+    Ok(())
+}
+
+fn read_recovery(path: &Path) -> Result<RecoveryReport> {
+    let text = read_input_string(path)?;
+    let value: serde_json::Value = input_result(
+        serde_json::from_str(&text),
         format!("failed to parse {}", path.display()),
     )?;
-    Ok(bundle)
-}
-
-fn read_model_output(session: &HeaderInferenceSession, path: &Path) -> Result<ModelOutput> {
-    let data = read_input_string(path)?;
-    let output = input_result(
-        session.parse_model_output(&data),
-        format!("failed to parse {}", path.display()),
+    let data = value
+        .get("data")
+        .cloned()
+        .ok_or_else(|| input_message("recovery input is not a common JSON envelope"))?;
+    let report: RecoveryReport = input_result(
+        serde_json::from_value(data),
+        format!("invalid recovery report in {}", path.display()),
     )?;
-    Ok(output)
-}
-
-fn validators() -> [&'static dyn crate::analysis::reconstruct::ModelOutputValidator; 1] {
-    static CLANG: XcrunClangValidator = XcrunClangValidator;
-    [&CLANG]
-}
-
-fn print_bundle_summary(bundle: &EvidenceBundle, out: &mut dyn Write) {
-    let report = validate_bundle(bundle);
-    let _ = writeln!(
-        out,
-        "Bundle {} ({})",
-        bundle.header_unit.name,
-        bundle.header_unit.language.prompt_name()
-    );
-    let _ = writeln!(out, "  target ABI: {}", bundle.header_unit.target_abi);
-    if let Some(module) = &bundle.header_unit.module {
-        let _ = writeln!(out, "  module: {module}");
+    if report.schema_version != RecoverySchemaVersion::CURRENT {
+        bail!("unsupported recovery report schema");
     }
-    let _ = writeln!(out, "  entities: {}", bundle.entities.len());
-    let _ = writeln!(out, "  unresolved gaps: {}", bundle.unresolved.len());
-    let _ = writeln!(
-        out,
-        "  validation targets: {}",
-        bundle.validation_targets.len()
-    );
-    let _ = writeln!(out, "  bundle valid: {}", report.valid);
+    report
+        .validate()
+        .map_err(|error| input_message(format!("invalid recovery report: {error}")))?;
+    Ok(report)
 }
 
-fn print_bundle_validation_report(
-    report: &crate::analysis::reconstruct::BundleValidationReport,
+fn read_bundle(path: &Path) -> Result<HypothesisBundle> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    HypothesisBundle::from_json(&bytes)
+        .map_err(|error| input_message(format!("invalid bundle {}: {error}", path.display())))
+}
+
+fn read_response(path: &Path, limits: HypothesisLimits) -> Result<ModelResponse> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    ModelResponse::from_json(&bytes, limits)
+        .map_err(|error| input_message(format!("invalid response {}: {error}", path.display())))
+}
+
+fn architecture_by_name(report: &RecoveryReport, name: &str) -> Result<Architecture> {
+    report
+        .slices
+        .as_slice()
+        .iter()
+        .map(|slice| slice.architecture)
+        .find(|architecture| architecture_name(*architecture) == name)
+        .ok_or_else(|| input_message(format!("architecture `{name}` is absent from recovery")))
+}
+
+fn architecture_name(architecture: Architecture) -> String {
+    let cpu = macho::core::model::header::CpuType(architecture.cpu_type);
+    cpu.name().to_owned()
+}
+
+fn print_bundle(
+    bundle: &HypothesisBundle,
+    output: OutputOptions,
     out: &mut dyn Write,
-) {
-    let _ = writeln!(out, "valid: {}", report.valid);
-    if report.issues.is_empty() {
-        let _ = writeln!(out, "issues: none");
-        return;
+) -> Result<()> {
+    writeln!(out, "{}", output.style().title("Header hypothesis bundle"))?;
+    writeln!(
+        out,
+        "  {}  {}  {}  {}  {}",
+        output
+            .style()
+            .enum_property("arch", &architecture_name(bundle.architecture())),
+        output
+            .style()
+            .property("targets", &bundle.targets().len().to_string()),
+        output
+            .style()
+            .property("facts", &bundle.facts().len().to_string()),
+        output
+            .style()
+            .property("evidence", &bundle.evidence().len().to_string()),
+        output
+            .style()
+            .property("digest", bundle.bundle_digest().as_str()),
+    )?;
+    let rows = bundle
+        .targets()
+        .iter()
+        .flat_map(|target| {
+            target.gap_ids.as_slice().iter().map(|gap| {
+                vec![
+                    output.style().enum_value("target"),
+                    output.style().accent(&target.entity_id.as_str()[..12]),
+                    output.style().property("gap", &gap.as_str()[..12]),
+                    output.style().property(
+                        "operations",
+                        &target
+                            .allowed_operations
+                            .as_slice()
+                            .iter()
+                            .map(|operation| format!("{operation:?}").to_ascii_lowercase())
+                            .collect::<Vec<_>>()
+                            .join(","),
+                    ),
+                ]
+            })
+        })
+        .collect::<Vec<_>>();
+    for row in columns::align(&rows) {
+        writeln!(out, "  {row}")?;
     }
-    let _ = writeln!(out, "issues:");
-    for issue in &report.issues {
-        let _ = writeln!(out, "  - {} {}", issue.code, issue.message);
-    }
+    Ok(())
 }
 
-fn fail_if_invalid_bundle(report: &BundleValidationReport) -> Result<()> {
-    if report.valid {
-        return Ok(());
-    }
-    Err(input_message("evidence bundle validation failed"))
-}
-
-fn fail_if_invalid_validation(report: &ValidationReport) -> Result<()> {
-    if report.valid {
-        return Ok(());
-    }
-    Err(input_message("header inference validation failed"))
-}
-
-fn print_prompt(prompt: &PromptSet, out: &mut dyn Write) {
-    let _ = writeln!(out, "== system ==");
-    let _ = writeln!(out, "{}", prompt.system);
-    let _ = writeln!(out,);
-    let _ = writeln!(out, "== user ==");
-    let _ = writeln!(out, "{}", prompt.user);
-}
-
-fn print_validation_report(
-    report: &crate::analysis::reconstruct::ValidationReport,
+fn print_report(
+    report: &HypothesisReport,
+    output: OutputOptions,
     out: &mut dyn Write,
-) {
-    let _ = writeln!(out, "valid: {}", report.valid);
-    let _ = writeln!(out, "syntax checked: {}", report.syntax_checked);
-    let _ = writeln!(out, "syntax ok: {}", report.syntax_ok);
-    if report.issues.is_empty() {
-        let _ = writeln!(out, "issues: none");
-        return;
+) -> Result<()> {
+    let rows = report
+        .results
+        .iter()
+        .map(|result| {
+            vec![
+                output.style().enum_value(match result.disposition {
+                    HypothesisDisposition::Accepted => "accepted",
+                    HypothesisDisposition::Rejected => "rejected",
+                    HypothesisDisposition::Unresolved => "unresolved",
+                }),
+                output.style().accent(&result.hypothesis_id.as_str()[..12]),
+                output
+                    .style()
+                    .property("entity", &result.entity_id.as_str()[..12]),
+                output
+                    .style()
+                    .property("gap", &result.gap_id.as_str()[..12]),
+                output
+                    .style()
+                    .property("diagnostics", &result.diagnostics.len().to_string()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for row in columns::align(&rows) {
+        writeln!(out, "  {row}")?;
     }
-    let _ = writeln!(out, "issues:");
-    for issue in &report.issues {
-        if let Some(entity_id) = &issue.entity_id {
-            let _ = writeln!(
-                out,
-                "  - [{:?}] {} {} ({entity_id})",
-                issue.severity, issue.code, issue.message
-            );
-        } else {
-            let _ = writeln!(
-                out,
-                "  - [{:?}] {} {}",
-                issue.severity, issue.code, issue.message
-            );
-        }
+    writeln!(
+        out,
+        "  {}  {}",
+        output
+            .style()
+            .property("unresolved", &report.unresolved_gap_ids.len().to_string()),
+        output.style().property(
+            "header",
+            if report.projected_header.is_some() {
+                "projected"
+            } else {
+                "none"
+            },
+        ),
+    )?;
+    Ok(())
+}
+
+fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("artifact");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(".{stem}.macho-{}-{nonce}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .with_context(|| format!("failed to create {}", temporary.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", temporary.display()))?;
+        std::fs::rename(&temporary, path)
+            .with_context(|| format!("failed to replace {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
+    result
 }

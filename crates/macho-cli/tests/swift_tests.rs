@@ -97,7 +97,11 @@ fn swift_type_index_serializes() {
             address: Some(0x1000),
             source: SwiftTypeSource::DemangledSymbol,
             confidence: SwiftTypeConfidence::High,
+            fields: None,
         }],
+        parents: Vec::new(),
+        conformances: Vec::new(),
+        associated_types: Vec::new(),
     };
     let json = serde_json::to_string(&index).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
@@ -122,6 +126,7 @@ fn swift_type_confidence_serializes() {
         address: Some(0x1000),
         source: SwiftTypeSource::DemangledSymbol,
         confidence: SwiftTypeConfidence::High,
+        fields: None,
     };
     let json = serde_json::to_value(&ty).expect("serialize");
     assert_eq!(json["confidence"], "high");
@@ -136,6 +141,7 @@ fn swift_type_json_uses_machine_readable_kind_and_source_names() {
         address: Some(0x1000),
         source: SwiftTypeSource::DemangledSymbol,
         confidence: SwiftTypeConfidence::High,
+        fields: None,
     };
     let json = serde_json::to_value(&ty).expect("serialize");
     assert_eq!(json["kind"], "class");

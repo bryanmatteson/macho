@@ -32,7 +32,7 @@ pub fn run(args: DyldCacheArgs, format: OutputFormat, out: &mut dyn Write) -> Re
     )?;
 
     if format == OutputFormat::Json {
-        let _ = writeln!(out, "{}", serde_json::to_string_pretty(&cache)?);
+        crate::commands::output::json::write_pretty(out, &cache)?;
         return Ok(());
     }
 

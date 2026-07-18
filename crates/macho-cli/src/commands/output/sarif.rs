@@ -137,7 +137,7 @@ pub fn render(path: &Path, reports: &[AuditReport]) -> Result<String> {
         }],
     };
 
-    Ok(serde_json::to_string_pretty(&report)?)
+    Ok(super::json::to_string_pretty(&report)?)
 }
 
 fn file_uri(path: &Path) -> String {

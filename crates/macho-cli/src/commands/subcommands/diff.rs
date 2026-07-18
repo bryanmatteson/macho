@@ -55,8 +55,7 @@ pub fn run(args: DiffArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
     let report = diff_documents(&old_snap, &new_snap, diff_plan.selected_domains());
 
     if format == OutputFormat::Json {
-        let json = serde_json::to_string_pretty(&report)?;
-        let _ = writeln!(out, "{json}");
+        crate::commands::output::json::write_pretty(out, &report)?;
     } else {
         write!(out, "{}", report.render_text())?;
     }

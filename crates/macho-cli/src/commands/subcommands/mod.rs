@@ -38,6 +38,7 @@ pub mod inspect;
 pub mod objc;
 /// The patch module.
 pub mod patch;
+pub(crate) mod recovery;
 /// The relocations module.
 pub mod relocations;
 /// The snapshot module.

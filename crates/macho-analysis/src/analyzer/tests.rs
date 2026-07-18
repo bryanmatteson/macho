@@ -234,7 +234,7 @@ fn issue_limit_bounds_advisory_failure_propagation() {
 fn rejects_unversioned_and_mismatched_snapshots() {
     assert!(SnapshotDocument::from_json("{}").is_err());
     let mut document = SnapshotDocument {
-        schema_version: 2,
+        schema_version: SNAPSHOT_SCHEMA_VERSION,
         container: ContainerIdentity {
             format: "thin".into(),
             slice_count: 1,

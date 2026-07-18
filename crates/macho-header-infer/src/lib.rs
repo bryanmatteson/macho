@@ -1,111 +1,107 @@
 #![deny(missing_docs)]
-//! Evidence aggregation, prompt generation, and injectable header validation.
+//! Offline, bounded, evidence-accountable header hypothesis exchange.
+//!
+//! This crate has no provider, network, SDK, compiler, retry, or host-process
+//! integration. It consumes validated recovery reports and shared typed header
+//! declarations, and produces immutable bundle/response/report artifacts.
 
-use std::path::PathBuf;
+mod artifact;
+mod bundle;
+mod prompt;
+mod syntax;
+mod validate;
 
-use serde::{Deserialize, Serialize};
+pub use artifact::{
+    ArtifactError, BundleConstraints, EvidenceExcerpt, FactExcerpt, HeaderSubsetVersion,
+    HypothesisBundle, HypothesisDiagnostic, HypothesisDiagnosticCode, HypothesisDisposition,
+    HypothesisLimits, HypothesisOperation, HypothesisOperationKind, HypothesisReport,
+    HypothesisResult, HypothesisTarget, ModelResponse, ProposedHypothesis, SupportRef,
+};
+pub use bundle::export_bundle;
+pub use prompt::build_prompt;
+pub use validate::validate_response;
 
-/// Header language accepted by a validator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[non_exhaustive]
+use macho_header_syntax::{
+    HeaderParser as _, Language, TreeSitterHeaderParser, ValidationLimits, validate,
+};
+
+/// Header language accepted by the in-process convenience validator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderLanguage {
-    /// ISO C-family declaration syntax.
+    /// C header syntax.
     C,
-    /// C++ declaration syntax.
+    /// C++ header syntax.
     Cpp,
-    /// Objective-C declaration syntax.
+    /// Objective-C header syntax.
     ObjectiveC,
 }
 
-/// A pure validation request supplied to a [`HeaderValidator`].
+/// Pure header-validation request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationRequest<'a> {
-    /// Language of `source`.
+    /// Header language.
     pub language: HeaderLanguage,
-    /// Complete header source to validate.
+    /// Complete source text.
     pub source: &'a str,
-    /// Optional SDK include roots obtained through [`SdkLocator`].
-    pub include_roots: &'a [PathBuf],
 }
 
-/// Result returned by a header validator.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Pure header-validation result.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationOutcome {
-    /// Whether the validator accepted the source.
+    /// Whether syntax and semantic validation both passed.
     pub accepted: bool,
-    /// Structured validator diagnostics without process-specific formatting.
+    /// Stable validator diagnostics.
     pub diagnostics: Vec<String>,
 }
 
-/// Typed capability failure used when a host integration is unavailable.
+/// Process-free validation failure.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum CapabilityError {
-    /// The capability is not installed or cannot be discovered.
-    #[error("capability unavailable: {capability}")]
-    Unavailable {
-        #[doc = "The capability field."]
-        capability: &'static str,
-    },
-    /// The adapter returned data that could not be interpreted.
-    #[error("malformed {capability} response: {detail}")]
-    Malformed {
-        /// The str field.
-        capability: &'static str,
-        /// The String field.
-        detail: String,
-    },
+pub enum ValidationError {
+    /// The shared parser rejected the source.
+    #[error("parse header: {0}")]
+    Parse(String),
+    /// The shared validator rejected configured bounds.
+    #[error("validate header: {0}")]
+    Validate(String),
 }
 
-/// Injectable header syntax or compiler validator.
+/// Pure header validator used by tests and adapters that already own source text.
 pub trait HeaderValidator: Send + Sync {
-    /// Validate one complete source document.
+    /// Validates one complete source document.
     fn validate(
         &self,
         request: &ValidationRequest<'_>,
-    ) -> Result<ValidationOutcome, CapabilityError>;
+    ) -> Result<ValidationOutcome, ValidationError>;
 }
 
-/// Injectable source of SDK-dependent include roots.
-pub trait SdkLocator: Send + Sync {
-    /// Locate deterministic include roots for a language.
-    fn include_roots(&self, language: HeaderLanguage) -> Result<Vec<PathBuf>, CapabilityError>;
-}
+/// Shared in-process parser and semantic validator.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct InProcessHeaderValidator;
 
-/// One weighted fact used to construct an inference prompt.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InferenceEvidence {
-    /// Stable evidence category such as `dwarf.type` or `symbol.signature`.
-    pub kind: String,
-    /// Human-readable fact content.
-    pub value: String,
-    /// Confidence in basis points, from zero through ten thousand.
-    pub confidence_bps: u16,
-}
-
-/// Deterministically render evidence as an inference prompt.
-pub fn build_prompt(language: HeaderLanguage, evidence: &[InferenceEvidence]) -> String {
-    let mut sorted = evidence.to_vec();
-    sorted.sort_by(|left, right| {
-        right
-            .confidence_bps
-            .cmp(&left.confidence_bps)
-            .then_with(|| left.kind.cmp(&right.kind))
-            .then_with(|| left.value.cmp(&right.value))
-    });
-    let language = match language {
-        HeaderLanguage::C => "C",
-        HeaderLanguage::Cpp => "C++",
-        HeaderLanguage::ObjectiveC => "Objective-C",
-    };
-    let mut prompt = format!("Infer a complete {language} header from these facts:\n");
-    for fact in sorted {
-        prompt.push_str(&format!(
-            "- [{}; confidence={}] {}\n",
-            fact.kind, fact.confidence_bps, fact.value
-        ));
+impl HeaderValidator for InProcessHeaderValidator {
+    fn validate(
+        &self,
+        request: &ValidationRequest<'_>,
+    ) -> Result<ValidationOutcome, ValidationError> {
+        let language = match request.language {
+            HeaderLanguage::C => Language::C,
+            HeaderLanguage::Cpp => Language::Cpp,
+            HeaderLanguage::ObjectiveC => Language::ObjectiveC,
+        };
+        let unit = TreeSitterHeaderParser
+            .parse(language, request.source)
+            .map_err(|error| ValidationError::Parse(error.to_string()))?;
+        let report = validate(&unit, ValidationLimits::default())
+            .map_err(|error| ValidationError::Validate(error.to_string()))?;
+        Ok(ValidationOutcome {
+            accepted: report.syntax_valid && report.semantic_valid,
+            diagnostics: report
+                .diagnostics
+                .into_iter()
+                .map(|diagnostic| format!("{:?}: {}", diagnostic.code, diagnostic.message))
+                .collect(),
+        })
     }
-    prompt
 }
 
 #[cfg(test)]
@@ -113,20 +109,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prompt_order_is_deterministic_and_confidence_first() {
-        let evidence = vec![
-            InferenceEvidence {
-                kind: "symbol".into(),
-                value: "f".into(),
-                confidence_bps: 5000,
-            },
-            InferenceEvidence {
-                kind: "dwarf".into(),
-                value: "int f(void)".into(),
-                confidence_bps: 9000,
-            },
-        ];
-        let prompt = build_prompt(HeaderLanguage::C, &evidence);
-        assert!(prompt.find("dwarf").unwrap() < prompt.find("symbol").unwrap());
+    fn in_process_validation_rejects_unresolved_types() {
+        let result = InProcessHeaderValidator
+            .validate(&ValidationRequest {
+                language: HeaderLanguage::C,
+                source: "Missing value;\n",
+            })
+            .expect("validator executes");
+        assert!(!result.accepted);
     }
 }

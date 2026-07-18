@@ -1,684 +1,804 @@
-use anyhow::{Context, Result};
-use macho::analysis::reconstruct::objc::graph::{MethodKind, ObjCGraph};
-use macho::analysis::reconstruct::objc::{ObjcReconstructionPlan, reconstruct};
-use serde::Serialize;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::path::Path;
 
-use crate::analysis::{AnalysisDomain, AnalysisLimits};
+mod model;
+
+use model::*;
+
+use anyhow::{Context, Result};
+use macho::analysis::report::{
+    ObjCEntity, ObjCEntityId, ObjCGraphEdge, ObjCMethod, ObjCMethodKind, ObjCPresence, ObjCReport,
+    ObjCSliceReport, project_objc_headers, recover_objc_container,
+};
+use macho::core::model::symbol::{SymbolTable, SymbolType};
+use serde::Serialize;
+
 use crate::commands::args::{ArchitectureArgs, InputArgs, OptionalInputArgs};
-use crate::commands::subcommands::common::{analyze_selected_domain, write_selected_json};
-use crate::commands::subcommands::common::{for_each_selected_mach, map_input};
+use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
 #[derive(clap::Args)]
-/// The ObjCArgs type.
+/// Evidence-accountable Objective-C runtime recovery.
 pub struct ObjCArgs {
     #[command(subcommand)]
     action: Option<ObjCAction>,
-
     #[command(flatten)]
     input: OptionalInputArgs,
     #[command(flatten)]
     selection: ArchitectureArgs,
-
-    /// Show full class-dump-style headers
+    /// Render the validated typed header projection.
     #[arg(long)]
     headers: bool,
-
-    /// Filter to a specific class name
+    /// Select a class by exact runtime name.
     #[arg(long)]
     class: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
 enum ObjCAction {
-    /// Show ObjC class/category/protocol graph with category folding
+    /// Show the canonical entity graph and category-folding state.
     Graph {
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
         selection: ArchitectureArgs,
-        /// Show only a specific class
+        /// Select a class by exact runtime name.
         #[arg(long)]
         class: Option<String>,
     },
-    /// Look up selector ownership across all classes
+    /// Show selector ownership, origins, implementations, and ambiguity.
     Selectors {
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
         selection: ArchitectureArgs,
-        /// Filter to a specific selector name
+        /// Select an exact selector spelling.
         #[arg(long)]
         name: Option<String>,
     },
-    /// Show cross-references between ObjC methods and symbols
+    /// Join method implementations to symbols only by exact virtual address.
     Xrefs {
         #[command(flatten)]
         input: InputArgs,
         #[command(flatten)]
         selection: ArchitectureArgs,
-        /// Filter to a specific class
+        /// Select a class by exact runtime name.
         #[arg(long)]
         class: Option<String>,
     },
 }
 
-/// Performs run.
-pub fn run(args: ObjCArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
-    let json = format == OutputFormat::Json;
+/// Runs Objective-C recovery.
+pub fn run(args: ObjCArgs, output: OutputOptions, out: &mut dyn Write) -> Result<()> {
+    if output.format() == OutputFormat::Sarif {
+        return Err(usage_message(
+            "Objective-C recovery supports only text and JSON",
+        ));
+    }
     match args.action {
         Some(ObjCAction::Graph {
             input,
             selection,
             class,
-        }) => run_graph(
-            &input.path,
-            selection.arch.as_deref(),
-            json,
-            class.as_deref(),
-            out,
-        ),
+        }) => run_graph(&input, &selection, class.as_deref(), output, out),
         Some(ObjCAction::Selectors {
             input,
             selection,
             name,
-        }) => run_selectors(
-            &input.path,
-            selection.arch.as_deref(),
-            name.as_deref(),
-            json,
-            out,
-        ),
+        }) => run_selectors(&input, &selection, name.as_deref(), output, out),
         Some(ObjCAction::Xrefs {
             input,
             selection,
             class,
-        }) => run_xrefs(
-            &input.path,
-            selection.arch.as_deref(),
-            class.as_deref(),
-            json,
-            out,
-        ),
+        }) => run_xrefs(&input, &selection, class.as_deref(), output, out),
         None => {
             let path = args
                 .input
                 .path
                 .ok_or_else(|| usage_message("path is required"))?;
-            run_list(
-                &path,
-                &args.selection.arch,
+            let input = InputArgs { path };
+            run_surface(
+                &input,
+                &args.selection,
                 args.headers,
                 args.class.as_deref(),
-                format,
+                output,
                 out,
             )
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct ObjCXref {
-    class_name: String,
-    selector: String,
-    kind: MethodKind,
-    origin: macho::analysis::reconstruct::objc::graph::MethodOrigin,
-    imp: u64,
-    imp_symbol: String,
+fn recover(input: &InputArgs, selection: &ArchitectureArgs) -> Result<(memmap2::Mmap, ObjCReport)> {
+    let mmap = map_input(&input.path)?;
+    let container =
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.path.display()))?;
+    let report = recover_objc_container(&container, selection.arch.as_deref())?;
+    drop(container);
+    Ok((mmap, report))
 }
 
-fn has_objc_graph_data(graph: &ObjCGraph) -> bool {
-    !(graph.classes.is_empty() && graph.protocols.is_empty() && graph.selectors.is_empty())
-}
-
-fn run_list(
-    path: &Path,
-    arch_filter: &Option<String>,
+fn run_surface(
+    input: &InputArgs,
+    selection: &ArchitectureArgs,
     headers: bool,
-    class_filter: Option<&str>,
-    format: OutputFormat,
+    class: Option<&str>,
+    output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mmap = map_input(path)?;
-    let container =
-        macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
-
-    if format == OutputFormat::Json {
-        let domain = if headers {
-            AnalysisDomain::ObjcHeaders
-        } else {
-            AnalysisDomain::Objc
-        };
-        let mut values = analyze_selected_domain(
-            &container,
-            arch_filter.as_deref(),
-            domain,
-            AnalysisLimits::default(),
-            true,
-        )?;
-        if let Some(class_name) = class_filter
-            && !headers
-        {
-            for (_, value) in &mut values {
-                if let Some(object) = value.as_object_mut()
-                    && let Some(classes) = object
-                        .get_mut("classes")
-                        .and_then(serde_json::Value::as_array_mut)
-                {
-                    classes.retain(|class| {
-                        class.get("name").and_then(serde_json::Value::as_str) == Some(class_name)
-                    });
+    let (_mmap, mut report) = recover(input, selection)?;
+    apply_class_filter(&mut report, class);
+    if headers {
+        if report.slices.as_slice().len() > 1 && selection.arch.is_none() {
+            return Err(usage_message(
+                "fat Objective-C header output requires --arch",
+            ));
+        }
+        project_objc_headers(&mut report)?;
+    }
+    match output.format() {
+        OutputFormat::Json => crate::commands::output::json::write_pretty(out, &report)?,
+        OutputFormat::Text if headers => {
+            for slice in report.slices.as_slice() {
+                let header = slice
+                    .header
+                    .as_ref()
+                    .expect("header projection requested for every selected slice");
+                out.write_all(header.source.as_bytes())?;
+                if !header.unresolved.is_empty() {
+                    writeln!(
+                        out,
+                        "/* {} declaration(s) omitted; inspect --format json for the unresolved ledger. */",
+                        header.unresolved.len()
+                    )?;
                 }
             }
         }
-        return write_selected_json(values, out);
+        OutputFormat::Text => print_surface(&report, output.style(), out),
+        OutputFormat::Sarif => unreachable!("rejected above"),
     }
-
-    for_each_selected_mach(
-        &container,
-        arch_filter.as_deref(),
-        |macho, arch_name, show_header| {
-            if show_header {
-                let _ = writeln!(out, "=== {arch_name} ===");
-            }
-            if headers {
-                print_objc_headers(macho, class_filter, out);
-            } else {
-                print_objc_summary(macho, class_filter, out);
-            }
-            if show_header {
-                let _ = writeln!(out,);
-            }
-            Ok(())
-        },
-    )?;
     Ok(())
+}
+
+fn apply_class_filter(report: &mut ObjCReport, class: Option<&str>) {
+    let Some(class) = class else { return };
+    for slice in report.slices.as_mut_slice() {
+        slice.selection.selected_entity_ids = slice
+            .entities
+            .iter()
+            .filter(|entity| entity_matches_class(entity, class))
+            .map(|entity| entity.common().id.clone())
+            .collect();
+    }
+}
+
+fn entity_matches_class(entity: &ObjCEntity, class: &str) -> bool {
+    match entity {
+        ObjCEntity::Class(value) => known(&value.common.name).is_some_and(|name| name == class),
+        ObjCEntity::Category(value) => {
+            known(&value.extended_class).is_some_and(|reference| reference.name == class)
+        }
+        ObjCEntity::Protocol(_) => false,
+    }
+}
+
+fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
+    let _ = writeln!(out, "{}", style.title("Objective-C runtime recovery"));
+    for slice in report.slices.as_slice() {
+        let selected = slice
+            .selection
+            .selected_entity_ids
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<BTreeSet<_>>();
+        let totals = &slice.selection.totals;
+        let _ = writeln!(
+            out,
+            "  {}  {}  {}  {}  {}  {}  {}",
+            style.enum_property("arch", &architecture_name(slice)),
+            style.property("defined", &totals.defined_entities.to_string()),
+            style.property("referenced", &totals.referenced_entities.to_string()),
+            style.property("partial", &totals.partial_entities.to_string()),
+            style.property("malformed", &totals.malformed_observations.to_string()),
+            style.property("excluded", &totals.excluded_observations.to_string()),
+            style.property("selected", &selected.len().to_string()),
+        );
+        for presence in [
+            ObjCPresence::Defined,
+            ObjCPresence::Referenced,
+            ObjCPresence::Partial,
+        ] {
+            let entities = slice
+                .entities
+                .iter()
+                .filter(|entity| entity.common().presence == presence)
+                .filter(|entity| selected.contains(entity.common().id.as_str()))
+                .collect::<Vec<_>>();
+            if entities.is_empty() {
+                continue;
+            }
+            let _ = writeln!(out, "  {}", style.heading(presence_heading(presence)));
+            let rows = entities
+                .iter()
+                .map(|entity| entity_row(entity, style))
+                .collect::<Vec<_>>();
+            for row in columns::align(&rows) {
+                let _ = writeln!(out, "    {row}");
+            }
+            for entity in entities {
+                print_members(entity, style, out);
+            }
+        }
+        if selected.is_empty() {
+            let _ = writeln!(
+                out,
+                "  {}",
+                style.muted("No entities matched the selection.")
+            );
+        }
+        for diagnostic in &slice.diagnostics {
+            let _ = writeln!(
+                out,
+                "  {}  {}",
+                style.warning(&format!("{:?}", diagnostic.code).to_lowercase()),
+                diagnostic.message
+            );
+        }
+    }
+}
+
+fn entity_row(entity: &ObjCEntity, style: Style) -> Vec<String> {
+    let common = entity.common();
+    let name = known(&common.name)
+        .map(|name| macho::symbols::demangle::demangle_swift_symbol(name).unwrap_or(name.clone()))
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    let (kind, members, detail) = match entity {
+        ObjCEntity::Class(value) => (
+            "class",
+            value.ivars.len()
+                + value.properties.len()
+                + value.instance_methods.len()
+                + value.class_methods.len(),
+            known(&value.superclass)
+                .and_then(Option::as_ref)
+                .map(|value| format!("super={}", value.name))
+                .unwrap_or_else(|| "super=-".to_owned()),
+        ),
+        ObjCEntity::Category(value) => (
+            "category",
+            value.properties.len() + value.instance_methods.len() + value.class_methods.len(),
+            known(&value.extended_class)
+                .map(|value| format!("extends={}", value.name))
+                .unwrap_or_else(|| "extends=?".to_owned()),
+        ),
+        ObjCEntity::Protocol(value) => (
+            "protocol",
+            value.properties.len()
+                + value.required_instance_methods.len()
+                + value.required_class_methods.len()
+                + value.optional_instance_methods.len()
+                + value.optional_class_methods.len(),
+            format!("adopts={}", value.adopted_protocols.len()),
+        ),
+    };
+    vec![
+        style.enum_value(kind),
+        style.accent(&name),
+        style.enum_property("presence", presence_name(common.presence)),
+        style.property("members", &members.to_string()),
+        detail
+            .split_once('=')
+            .map(|(key, value)| style.property(key, value))
+            .unwrap_or_else(|| style.muted(&detail)),
+        style.muted(&format!("id={}", &common.id.as_str()[..12])),
+    ]
+}
+
+fn print_members(entity: &ObjCEntity, style: Style, out: &mut dyn Write) {
+    let mut rows = Vec::new();
+    match entity {
+        ObjCEntity::Class(value) => {
+            rows.extend(value.ivars.iter().map(|ivar| {
+                vec![
+                    style.enum_value("ivar"),
+                    style.accent(known(&ivar.name).map_or("<unknown>", String::as_str)),
+                    style.property("offset", &value_u64(&ivar.offset)),
+                    style.enum_property("type", value_state(&ivar.parsed_type)),
+                ]
+            }));
+            rows.extend(
+                value
+                    .properties
+                    .iter()
+                    .map(|value| property_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .instance_methods
+                    .iter()
+                    .map(|value| method_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .class_methods
+                    .iter()
+                    .map(|value| method_row(value, style)),
+            );
+        }
+        ObjCEntity::Category(value) => {
+            rows.extend(
+                value
+                    .properties
+                    .iter()
+                    .map(|value| property_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .instance_methods
+                    .iter()
+                    .map(|value| method_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .class_methods
+                    .iter()
+                    .map(|value| method_row(value, style)),
+            );
+        }
+        ObjCEntity::Protocol(value) => {
+            rows.extend(
+                value
+                    .properties
+                    .iter()
+                    .map(|value| property_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .required_instance_methods
+                    .iter()
+                    .chain(&value.required_class_methods)
+                    .map(|value| method_row(value, style)),
+            );
+            rows.extend(
+                value
+                    .optional_instance_methods
+                    .iter()
+                    .chain(&value.optional_class_methods)
+                    .map(|value| method_row(value, style)),
+            );
+        }
+    }
+    for row in columns::align(&rows) {
+        let _ = writeln!(out, "      {row}");
+    }
+}
+
+fn method_row(value: &ObjCMethod, style: Style) -> Vec<String> {
+    let selector = known(&value.selector)
+        .map(|value| value.spelling.as_str())
+        .unwrap_or("<unknown>");
+    let implementation = known(&value.implementation)
+        .and_then(Option::as_ref)
+        .map(|value| format!("0x{:016x}", value.virtual_address))
+        .unwrap_or_else(|| "-".to_owned());
+    vec![
+        style.enum_value(match value.kind {
+            ObjCMethodKind::Instance => "method -",
+            ObjCMethodKind::Class => "method +",
+        }),
+        style.accent(selector),
+        style.enum_property("signature", value_state(&value.signature)),
+        style.property("imp", &implementation),
+    ]
+}
+
+fn property_row(value: &macho::analysis::report::ObjCProperty, style: Style) -> Vec<String> {
+    vec![
+        style.enum_value("property"),
+        style.accent(known(&value.name).map_or("<unknown>", String::as_str)),
+        style.enum_property("attributes", value_state(&value.parsed_attributes)),
+    ]
 }
 
 fn run_graph(
-    path: &Path,
-    arch: Option<&str>,
-    json: bool,
+    input: &InputArgs,
+    selection: &ArchitectureArgs,
     class: Option<&str>,
+    output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mmap = map_input(path)?;
-    let container =
-        macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
-
-    if json {
-        let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
-            let graph = match macho.ext::<ObjCGraph>() {
-                Ok(graph) => graph,
-                Err(_) => {
-                    result.insert(arch_name.to_string(), serde_json::Value::Null);
-                    return Ok(());
-                }
-            };
-            if !has_objc_graph_data(&graph) {
-                result.insert(arch_name.to_string(), serde_json::Value::Null);
-                return Ok(());
-            }
-            let val = if let Some(cls) = class {
-                graph
-                    .class(cls)
-                    .map(serde_json::to_value)
-                    .transpose()?
-                    .unwrap_or(serde_json::Value::Null)
-            } else {
-                serde_json::to_value(graph)?
-            };
-            result.insert(arch_name.to_string(), val);
-            Ok(())
-        })?;
-        if result.len() == 1 {
-            let (_, val) = result.into_iter().next().unwrap();
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&val)?);
-        } else {
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&result)?);
+    let (_mmap, mut report) = recover(input, selection)?;
+    apply_class_filter(&mut report, class);
+    let views = report
+        .slices
+        .as_slice()
+        .iter()
+        .map(graph_view)
+        .collect::<Vec<_>>();
+    if output.format() == OutputFormat::Json {
+        return crate::commands::output::json::write_pretty(out, &views).map_err(Into::into);
+    }
+    for view in views {
+        writeln!(
+            out,
+            "{}",
+            output.style().title(&format!("ObjC graph — {}", view.arch))
+        )?;
+        writeln!(
+            out,
+            "  {}  {}  {}  {}",
+            output
+                .style()
+                .property("nodes", &view.nodes.len().to_string()),
+            output
+                .style()
+                .property("inheritance", &view.inheritance.len().to_string()),
+            output
+                .style()
+                .property("conformances", &view.conformances.len().to_string()),
+            output
+                .style()
+                .property("categories", &view.categories.len().to_string()),
+        )?;
+        for node in &view.nodes {
+            writeln!(
+                out,
+                "  {}  {}  {}",
+                output.style().enum_value(node.kind),
+                output.style().accent(&node.name),
+                output
+                    .style()
+                    .enum_property("presence", presence_name(node.presence)),
+            )?;
         }
-    } else {
-        for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
-            if show_header {
-                let _ = writeln!(out, "=== {arch_name} ===");
-            }
-            let graph = match macho.ext::<ObjCGraph>() {
-                Ok(graph) => graph,
-                Err(e) => {
-                    let _ = writeln!(out, "[{arch_name}] No ObjC metadata: {e}");
-                    if show_header {
-                        let _ = writeln!(out,);
-                    }
-                    return Ok(());
-                }
-            };
-            if !has_objc_graph_data(&graph) {
-                let _ = writeln!(out, "[{arch_name}] No ObjC metadata found.");
-                if show_header {
-                    let _ = writeln!(out,);
-                }
-                return Ok(());
-            }
-
-            if let Some(cls) = class {
-                if let Some(node) = graph.class(cls) {
-                    print_class_node(node, &graph, out);
-                } else {
-                    let _ = writeln!(out, "Class {cls} not found");
-                }
-            } else {
-                let _ = writeln!(
-                    out,
-                    "[{arch_name}] ObjC graph: {} classes, {} protocols, {} selectors",
-                    graph.classes.len(),
-                    graph.protocols.len(),
-                    graph.selectors.len()
-                );
-                for node in graph.classes.values() {
-                    let cats = if node.categories.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" +{} categories", node.categories.len())
-                    };
-                    let _ = writeln!(
-                        out,
-                        "  {} : {} ({} methods{cats})",
-                        node.name,
-                        node.superclass.as_deref().unwrap_or("?"),
-                        node.effective_instance_methods.len() + node.effective_class_methods.len(),
-                    );
-                }
-            }
-            if show_header {
-                let _ = writeln!(out,);
-            }
-            Ok(())
-        })?;
+        for edge in view
+            .inheritance
+            .iter()
+            .chain(&view.conformances)
+            .chain(&view.categories)
+        {
+            writeln!(
+                out,
+                "    {}  {} -> {}",
+                output
+                    .style()
+                    .enum_value(&format!("{:?}", edge.kind).to_lowercase()),
+                &edge.from.as_str()[..12],
+                &edge.to.as_str()[..12],
+            )?;
+        }
     }
     Ok(())
 }
 
-fn print_class_node(
-    node: &macho::analysis::reconstruct::objc::graph::ClassNode,
-    graph: &ObjCGraph,
-    out: &mut dyn Write,
-) {
-    let super_str = node.superclass.as_deref().unwrap_or("(root)");
-    let swift_tag = if node.is_swift { " [swift]" } else { "" };
-    let _ = writeln!(out, "{}{swift_tag} : {super_str}", node.name);
+#[derive(Serialize)]
+struct GraphView<'a> {
+    arch: String,
+    nodes: Vec<GraphNodeView>,
+    inheritance: Vec<&'a ObjCGraphEdge>,
+    conformances: Vec<&'a ObjCGraphEdge>,
+    categories: Vec<&'a ObjCGraphEdge>,
+    selector_owners: Vec<&'a macho::analysis::report::ObjCSelectorOwner>,
+}
 
-    let chain = graph.superclass_chain(&node.name);
-    if !chain.is_empty() {
-        let _ = writeln!(out, "  hierarchy: {} -> {}", node.name, chain.join(" -> "));
-    }
+#[derive(Serialize)]
+struct GraphNodeView {
+    entity_id: ObjCEntityId,
+    kind: &'static str,
+    name: String,
+    presence: ObjCPresence,
+}
 
-    if !node.categories.is_empty() {
-        let _ = writeln!(out, "  categories: {}", node.categories.join(", "));
-    }
-    if !node.protocols.is_empty() {
-        let _ = writeln!(out, "  protocols: {}", node.protocols.join(", "));
-    }
-
-    let _ = writeln!(
-        out,
-        "  instance methods ({}):",
-        node.effective_instance_methods.len()
-    );
-    for m in &node.effective_instance_methods {
-        let origin = match &m.origin {
-            macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => String::new(),
-            macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => {
-                format!(" [from {cat}]")
-            }
-            _ => " [from unknown source]".to_owned(),
-        };
-        let _ = writeln!(out, "    -{} {:#x}{origin}", m.selector, m.imp);
-    }
-
-    if !node.effective_class_methods.is_empty() {
-        let _ = writeln!(
-            out,
-            "  class methods ({}):",
-            node.effective_class_methods.len()
-        );
-        for m in &node.effective_class_methods {
-            let origin = match &m.origin {
-                macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => String::new(),
-                macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => {
-                    format!(" [from {cat}]")
-                }
-                _ => " [from unknown source]".to_owned(),
-            };
-            let _ = writeln!(out, "    +{} {:#x}{origin}", m.selector, m.imp);
-        }
+fn graph_view(slice: &ObjCSliceReport) -> GraphView<'_> {
+    let selected = slice
+        .selection
+        .selected_entity_ids
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<BTreeSet<_>>();
+    let incident = slice
+        .graph
+        .inheritance
+        .iter()
+        .chain(&slice.graph.conformances)
+        .chain(&slice.graph.categories)
+        .filter(|edge| selected.contains(edge.from.as_str()) || selected.contains(edge.to.as_str()))
+        .flat_map(|edge| [edge.from.as_str(), edge.to.as_str()])
+        .collect::<BTreeSet<_>>();
+    let nodes = slice
+        .entities
+        .iter()
+        .filter(|entity| incident.contains(entity.common().id.as_str()))
+        .map(|entity| GraphNodeView {
+            entity_id: entity.common().id.clone(),
+            kind: entity_kind(entity),
+            name: known(&entity.common().name)
+                .cloned()
+                .unwrap_or_else(|| "<unknown>".to_owned()),
+            presence: entity.common().presence,
+        })
+        .collect();
+    let edge_selected = |edge: &&ObjCGraphEdge| {
+        selected.contains(edge.from.as_str()) || selected.contains(edge.to.as_str())
+    };
+    GraphView {
+        arch: architecture_name(slice),
+        nodes,
+        inheritance: slice
+            .graph
+            .inheritance
+            .iter()
+            .filter(edge_selected)
+            .collect(),
+        conformances: slice
+            .graph
+            .conformances
+            .iter()
+            .filter(edge_selected)
+            .collect(),
+        categories: slice
+            .graph
+            .categories
+            .iter()
+            .filter(edge_selected)
+            .collect(),
+        selector_owners: slice
+            .graph
+            .selector_owners
+            .iter()
+            .filter(|owner| {
+                owner
+                    .effective_owner
+                    .as_ref()
+                    .is_some_and(|id| selected.contains(id.as_str()))
+                    || owner.candidates.iter().any(|candidate| {
+                        find_method(slice, candidate)
+                            .is_some_and(|method| selected.contains(method.origin.as_str()))
+                    })
+            })
+            .collect(),
     }
 }
 
 fn run_selectors(
-    path: &Path,
-    arch: Option<&str>,
+    input: &InputArgs,
+    selection: &ArchitectureArgs,
     name: Option<&str>,
-    json: bool,
+    output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mmap = map_input(path)?;
-    let container =
-        macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
-
-    if json {
-        let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
-            let graph = match macho.ext::<ObjCGraph>() {
-                Ok(graph) => graph,
-                Err(_) => {
-                    result.insert(arch_name.to_string(), serde_json::Value::Null);
-                    return Ok(());
-                }
-            };
-            if !has_objc_graph_data(&graph) {
-                result.insert(arch_name.to_string(), serde_json::Value::Null);
-                return Ok(());
-            }
-
-            let value = if let Some(sel_name) = name {
-                serde_json::json!({
-                    "selector": sel_name,
-                    "owners": graph.implementations_of(sel_name, MethodKind::Instance)
-                        .into_iter()
-                        .chain(graph.implementations_of(sel_name, MethodKind::Class))
-                        .collect::<Vec<_>>(),
-                })
-            } else {
-                serde_json::to_value(&graph.selectors)?
-            };
-            result.insert(arch_name.to_string(), value);
-            Ok(())
-        })?;
-        if result.len() == 1 {
-            let (_, val) = result.into_iter().next().unwrap();
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&val)?);
-        } else {
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&result)?);
-        }
-        return Ok(());
+    let (_mmap, report) = recover(input, selection)?;
+    let views = selector_views(&report, name);
+    if output.format() == OutputFormat::Json {
+        return crate::commands::output::json::write_pretty(out, &views).map_err(Into::into);
     }
-
-    for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
-        if show_header {
-            let _ = writeln!(out, "=== {arch_name} ===");
+    let rows = views
+        .iter()
+        .map(|view| {
+            vec![
+                output.style().enum_value(&view.method_kind),
+                output.style().accent(&view.selector),
+                output.style().property(
+                    "owner",
+                    view.effective_owner.as_deref().unwrap_or("ambiguous"),
+                ),
+                output
+                    .style()
+                    .property("candidates", &view.candidates.len().to_string()),
+                output.style().enum_property("arch", &view.arch),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for row in columns::align(&rows) {
+        writeln!(out, "  {row}")?;
+    }
+    for view in &views {
+        if view.candidates.len() < 2 {
+            continue;
         }
-        let graph = match macho.ext::<ObjCGraph>() {
-            Ok(graph) => graph,
-            Err(e) => {
-                let _ = writeln!(out, "[{arch_name}] No ObjC metadata: {e}");
-                if show_header {
-                    let _ = writeln!(out,);
-                }
-                return Ok(());
-            }
-        };
-        if !has_objc_graph_data(&graph) {
-            let _ = writeln!(out, "[{arch_name}] No ObjC metadata found.");
-            if show_header {
-                let _ = writeln!(out,);
-            }
-            return Ok(());
-        }
-
-        if let Some(sel_name) = name {
-            let owners = graph.selector_owners(sel_name);
-            if owners.is_empty() {
-                let _ = writeln!(out, "[{arch_name}] selector '{sel_name}' not found");
-            } else {
-                let _ = writeln!(
-                    out,
-                    "[{arch_name}] selector '{sel_name}' ({} implementations):",
-                    owners.len()
-                );
-                for owner in owners {
-                    let origin = match &owner.origin {
-                        macho::analysis::reconstruct::objc::graph::MethodOrigin::Class => {
-                            String::new()
-                        }
-                        macho::analysis::reconstruct::objc::graph::MethodOrigin::Category(cat) => {
-                            format!(" [from {cat}]")
-                        }
-                        _ => " [from unknown source]".to_owned(),
-                    };
-                    let _ = writeln!(
-                        out,
-                        "  {}[{} {sel_name}] {:#x}{origin}",
-                        owner.kind.prefix(),
-                        owner.class_name,
-                        owner.imp
-                    );
-                }
-            }
-        } else {
-            let _ = writeln!(
+        for candidate in &view.candidates {
+            writeln!(
                 out,
-                "[{arch_name}] {} unique selectors",
-                graph.selectors.len()
-            );
-            for (sel, owners) in &graph.selectors {
-                let classes: Vec<&str> = owners
-                    .iter()
-                    .map(
-                        |owner: &macho::analysis::reconstruct::objc::SelectorOwner| {
-                            owner.class_name.as_str()
-                        },
-                    )
-                    .collect();
-                let _ = writeln!(out, "  {sel} -> {}", classes.join(", "));
-            }
+                "    {}  {}  {}",
+                output.style().enum_value("candidate"),
+                output.style().accent(&candidate.origin),
+                candidate
+                    .implementation
+                    .map(|address| output.style().address(&format!("0x{address:016x}")))
+                    .unwrap_or_else(|| output.style().muted("-")),
+            )?;
         }
-        if show_header {
-            let _ = writeln!(out,);
-        }
-        Ok(())
-    })?;
+    }
     Ok(())
 }
 
-fn print_objc_headers(
-    macho: &macho::core::model::macho_file::MachoFile<'_>,
-    class_filter: Option<&str>,
-    out: &mut dyn Write,
-) {
-    let report = match reconstruct(
-        macho,
-        &ObjcReconstructionPlan {
-            class_filter: class_filter.map(str::to_owned),
-        },
-    ) {
-        Ok(report) => report,
-        Err(e) => {
-            let _ = writeln!(out, "No ObjC metadata: {e}");
-            return;
-        }
-    };
-    if report.classes == 0 && report.categories == 0 && report.protocols == 0 {
-        let _ = writeln!(out, "No ObjC classes, categories, or protocols found.");
-        return;
-    }
-    let _ = write!(out, "{}", report.header);
+#[derive(Serialize)]
+struct SelectorView {
+    arch: String,
+    selector: String,
+    method_kind: String,
+    effective_owner_id: Option<ObjCEntityId>,
+    effective_owner: Option<String>,
+    candidates: Vec<SelectorCandidate>,
 }
 
-fn print_objc_summary(
-    macho: &macho::core::model::macho_file::MachoFile<'_>,
-    class_filter: Option<&str>,
-    out: &mut dyn Write,
-) {
-    let graph = match macho.ext::<ObjCGraph>() {
-        Ok(graph) => graph,
-        Err(e) => {
-            let _ = writeln!(out, "No ObjC metadata: {e}");
-            return;
-        }
-    };
-    if !has_objc_graph_data(&graph) {
-        let _ = writeln!(out, "No ObjC classes, categories, or protocols found.");
-        return;
-    }
+#[derive(Serialize)]
+struct SelectorCandidate {
+    member_id: String,
+    origin_id: ObjCEntityId,
+    origin: String,
+    implementation: Option<u64>,
+}
 
-    let classes: Vec<_> = graph
-        .classes
-        .values()
-        .filter(|c| class_filter.is_none_or(|f| c.name == f))
-        .collect();
-
-    let _ = writeln!(out, "Classes ({}):", classes.len());
-    for class in &classes {
-        let super_str = class.superclass.as_deref().unwrap_or("?");
-        let swift_str = if class.is_swift { " [swift]" } else { "" };
-        let categories = if class.categories.is_empty() {
-            String::new()
-        } else {
-            format!(" +{} categories", class.categories.len())
-        };
-        let _ = writeln!(
-            out,
-            "  {} : {} ({} effective methods, {} ivars, {} props){categories}{swift_str}",
-            class.name,
-            super_str,
-            class.effective_instance_methods.len() + class.effective_class_methods.len(),
-            class.ivars.len(),
-            class.properties.len(),
-        );
-    }
-
-    if class_filter.is_none() && !graph.protocols.is_empty() {
-        let _ = writeln!(out, "\nProtocols ({}):", graph.protocols.len());
-        for proto in graph.protocols.values() {
-            let _ = writeln!(
-                out,
-                "  {} — {} methods, {} conforming classes",
-                proto.name,
-                proto.instance_methods.len()
-                    + proto.class_methods.len()
-                    + proto.optional_instance_methods.len()
-                    + proto.optional_class_methods.len(),
-                proto.conforming_classes.len(),
-            );
+fn selector_views(report: &ObjCReport, name: Option<&str>) -> Vec<SelectorView> {
+    let mut result = Vec::new();
+    for slice in report.slices.as_slice() {
+        for owner in &slice.graph.selector_owners {
+            if name.is_some_and(|name| name != owner.selector.spelling) {
+                continue;
+            }
+            result.push(SelectorView {
+                arch: architecture_name(slice),
+                selector: owner.selector.spelling.clone(),
+                method_kind: method_kind_name(owner.method_kind).to_owned(),
+                effective_owner_id: owner.effective_owner.clone(),
+                effective_owner: owner
+                    .effective_owner
+                    .as_ref()
+                    .and_then(|id| entity_name_by_id(slice, id)),
+                candidates: owner
+                    .candidates
+                    .iter()
+                    .filter_map(|id| find_method(slice, id))
+                    .map(|method| SelectorCandidate {
+                        member_id: method.id.to_string(),
+                        origin_id: method.origin.clone(),
+                        origin: entity_name_by_id(slice, &method.origin)
+                            .unwrap_or_else(|| "<unknown>".to_owned()),
+                        implementation: known(&method.implementation)
+                            .and_then(Option::as_ref)
+                            .map(|value| value.virtual_address),
+                    })
+                    .collect(),
+            });
         }
     }
+    result
 }
 
 fn run_xrefs(
-    path: &Path,
-    arch: Option<&str>,
+    input: &InputArgs,
+    selection: &ArchitectureArgs,
     class: Option<&str>,
-    json: bool,
+    output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mmap = map_input(path)?;
+    let mmap = map_input(&input.path)?;
     let container =
-        macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
-
-    if json {
-        let mut result = serde_json::Map::new();
-        for_each_selected_mach(&container, arch, |macho, arch_name, _| {
-            let graph = match macho.ext::<ObjCGraph>() {
-                Ok(graph) => graph,
-                Err(_) => {
-                    result.insert(arch_name.to_string(), serde_json::Value::Null);
-                    return Ok(());
-                }
-            };
-            if !has_objc_graph_data(&graph) {
-                result.insert(arch_name.to_string(), serde_json::Value::Null);
-                return Ok(());
-            }
-            result.insert(
-                arch_name.to_string(),
-                serde_json::to_value(collect_xrefs(&graph, class))?,
-            );
-            Ok(())
-        })?;
-        if result.len() == 1 {
-            let (_, val) = result.into_iter().next().unwrap();
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&val)?);
-        } else {
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&result)?);
-        }
-        return Ok(());
+        macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.path.display()))?;
+    let mut report = recover_objc_container(&container, selection.arch.as_deref())?;
+    apply_class_filter(&mut report, class);
+    let machos = container
+        .macho_files()
+        .filter(|macho| {
+            selection
+                .arch
+                .as_deref()
+                .is_none_or(|arch| arch == macho.header().cpu_type().name())
+        })
+        .collect::<Vec<_>>();
+    let mut views = Vec::new();
+    for (slice, macho) in report.slices.as_slice().iter().zip(machos) {
+        views.extend(xref_views(slice, macho));
     }
-
-    for_each_selected_mach(&container, arch, |macho, arch_name, show_header| {
-        if show_header {
-            let _ = writeln!(out, "=== {arch_name} ===");
-        }
-        let graph = match macho.ext::<ObjCGraph>() {
-            Ok(graph) => graph,
-            Err(e) => {
-                let _ = writeln!(out, "[{arch_name}] No ObjC metadata: {e}");
-                return Ok(());
-            }
-        };
-        if !has_objc_graph_data(&graph) {
-            let _ = writeln!(out, "[{arch_name}] No ObjC metadata found.");
-            if show_header {
-                let _ = writeln!(out,);
-            }
-            return Ok(());
-        }
-        let xrefs = collect_xrefs(&graph, class);
-        for xref in &xrefs {
-            let _ = writeln!(
-                out,
-                "  {}[{} {}] {:#x} -> {}",
-                xref.kind.prefix(),
-                xref.class_name,
-                xref.selector,
-                xref.imp,
-                xref.imp_symbol
-            );
-        }
-        let _ = writeln!(out, "({} cross-references)", xrefs.len());
-        if show_header {
-            let _ = writeln!(out,);
-        }
-        Ok(())
-    })?;
+    if output.format() == OutputFormat::Json {
+        return crate::commands::output::json::write_pretty(out, &views).map_err(Into::into);
+    }
+    let rows = views
+        .iter()
+        .map(|view| {
+            vec![
+                output.style().enum_value(&view.status),
+                output.style().enum_value(&view.method_kind),
+                output
+                    .style()
+                    .accent(&format!("[{} {}]", view.origin, view.selector)),
+                output
+                    .style()
+                    .address(&format!("0x{:016x}", view.implementation)),
+                output.style().property("symbols", &view.symbols.join(",")),
+                output
+                    .style()
+                    .property("callers", &view.references.len().to_string()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    for row in columns::align(&rows) {
+        writeln!(out, "  {row}")?;
+    }
     Ok(())
 }
 
-fn collect_xrefs(graph: &ObjCGraph, class: Option<&str>) -> Vec<ObjCXref> {
-    let classes: Vec<_> = if let Some(cls) = class {
-        graph.class(cls).into_iter().collect()
-    } else {
-        graph.classes.values().collect()
-    };
+#[derive(Serialize)]
+struct XrefView {
+    arch: String,
+    member_id: String,
+    origin_id: ObjCEntityId,
+    origin: String,
+    selector: String,
+    method_kind: String,
+    implementation: u64,
+    status: String,
+    symbols: Vec<String>,
+    references: Vec<macho::analysis::xref::Xref>,
+}
 
-    let mut xrefs = Vec::new();
-    for node in &classes {
-        for method in &node.effective_instance_methods {
-            if let Some(sym) = &method.imp_symbol {
-                xrefs.push(ObjCXref {
-                    class_name: node.name.clone(),
-                    selector: method.selector.clone(),
-                    kind: MethodKind::Instance,
-                    origin: method.origin.clone(),
-                    imp: method.imp,
-                    imp_symbol: sym.clone(),
-                });
-            }
-        }
-        for method in &node.effective_class_methods {
-            if let Some(sym) = &method.imp_symbol {
-                xrefs.push(ObjCXref {
-                    class_name: node.name.clone(),
-                    selector: method.selector.clone(),
-                    kind: MethodKind::Class,
-                    origin: method.origin.clone(),
-                    imp: method.imp,
-                    imp_symbol: sym.clone(),
-                });
+fn xref_views(
+    slice: &ObjCSliceReport,
+    macho: &macho::core::model::macho_file::MachoFile<'_>,
+) -> Vec<XrefView> {
+    let selected = slice
+        .selection
+        .selected_entity_ids
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut symbols = BTreeMap::<u64, Vec<String>>::new();
+    if let Ok(table) = macho.ext::<SymbolTable<'_>>() {
+        for symbol in table.symbols() {
+            if symbol.sym_type == SymbolType::Section && symbol.value != 0 {
+                symbols
+                    .entry(symbol.value)
+                    .or_default()
+                    .push(symbol.name.to_owned());
             }
         }
     }
-    xrefs
+    let xrefs = macho::analysis::xref::XrefIndex::build(macho).ok();
+    let mut result = Vec::new();
+    for entity in &slice.entities {
+        if !selected.contains(entity.common().id.as_str()) {
+            continue;
+        }
+        for method in entity_methods(entity) {
+            let Some(implementation) = known(&method.implementation).and_then(Option::as_ref)
+            else {
+                continue;
+            };
+            let names = symbols
+                .get(&implementation.virtual_address)
+                .cloned()
+                .unwrap_or_default();
+            let status = match names.len() {
+                0 => "unresolved",
+                1 => "resolved",
+                _ => "ambiguous",
+            };
+            result.push(XrefView {
+                arch: architecture_name(slice),
+                member_id: method.id.to_string(),
+                origin_id: method.origin.clone(),
+                origin: entity_name_by_id(slice, &method.origin)
+                    .unwrap_or_else(|| "<unknown>".to_owned()),
+                selector: known(&method.selector)
+                    .map(|value| value.spelling.clone())
+                    .unwrap_or_else(|| "<unknown>".to_owned()),
+                method_kind: method_kind_name(method.kind).to_owned(),
+                implementation: implementation.virtual_address,
+                status: status.to_owned(),
+                symbols: names,
+                references: xrefs
+                    .as_ref()
+                    .map(|index| {
+                        index
+                            .refs_to(macho::core::model::addr::Va(implementation.virtual_address))
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+            });
+        }
+    }
+    result
 }

@@ -8,14 +8,13 @@ use crate::dyld::exports::parse_exports;
 use crate::dyld::types::ExportKind;
 use crate::error::{
     CODESIGN_FAILED_CODE, EXPORTS_FAILED_CODE, FIXUPS_FAILED_CODE, IMPORTS_FAILED_CODE,
-    OBJC_FAILED_CODE, SYMBOLS_FAILED_CODE,
+    SYMBOLS_FAILED_CODE,
 };
 use crate::format::constants::VmProtection;
 use crate::model::load_command::LoadCommand;
 use crate::model::load_command::format_uuid;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use crate::objc::ObjCMetadata;
 use crate::symbols::imports::{ImportRecord, collect_imports};
 
 pub use self::model::*;
@@ -221,81 +220,6 @@ pub(crate) fn extract_fixups(
     snapshots
 }
 
-pub(crate) fn extract_objc(
-    macho: &MachoFile<'_>,
-    analysis_issues: &mut Vec<AnalysisIssue>,
-) -> ObjCSnapshot {
-    if !has_objc_metadata(macho) {
-        return ObjCSnapshot {
-            classes: Vec::new(),
-            categories: Vec::new(),
-            protocols: Vec::new(),
-        };
-    }
-
-    let meta = match macho.ext::<ObjCMetadata>() {
-        Ok(m) => m,
-        Err(err) => {
-            push_analysis_issue(
-                analysis_issues,
-                OBJC_FAILED_CODE,
-                format!("failed to parse Objective-C metadata: {err}"),
-            );
-            return ObjCSnapshot {
-                classes: Vec::new(),
-                categories: Vec::new(),
-                protocols: Vec::new(),
-            };
-        }
-    };
-
-    ObjCSnapshot {
-        classes: meta
-            .classes
-            .iter()
-            .map(|c| ObjCClassSnapshot {
-                name: c.name.clone(),
-                superclass: c.superclass_name.clone(),
-                instance_methods: c.instance_methods.iter().map(snap_method).collect(),
-                class_methods: c.class_methods.iter().map(snap_method).collect(),
-                properties: c.properties.iter().map(snap_property).collect(),
-                protocols: c.protocols.clone(),
-                ivars: c.ivars.iter().map(|iv| iv.name.clone()).collect(),
-                is_swift: c.is_swift,
-            })
-            .collect(),
-        categories: meta
-            .categories
-            .iter()
-            .map(|c| ObjCCategorySnapshot {
-                name: c.name.clone(),
-                class_name: c.class_name.clone(),
-                instance_methods: c.instance_methods.iter().map(snap_method).collect(),
-                class_methods: c.class_methods.iter().map(snap_method).collect(),
-                properties: c.properties.iter().map(snap_property).collect(),
-                protocols: c.protocols.clone(),
-            })
-            .collect(),
-        protocols: meta
-            .protocols
-            .iter()
-            .map(|p| ObjCProtocolSnapshot {
-                name: p.name.clone(),
-                instance_methods: p.instance_methods.iter().map(snap_method).collect(),
-                class_methods: p.class_methods.iter().map(snap_method).collect(),
-                optional_instance_methods: p
-                    .optional_instance_methods
-                    .iter()
-                    .map(snap_method)
-                    .collect(),
-                optional_class_methods: p.optional_class_methods.iter().map(snap_method).collect(),
-                properties: p.properties.iter().map(snap_property).collect(),
-                adopted_protocols: p.adopted_protocols.clone(),
-            })
-            .collect(),
-    }
-}
-
 pub(crate) fn extract_codesign(
     macho: &MachoFile<'_>,
     analysis_issues: &mut Vec<AnalysisIssue>,
@@ -337,14 +261,6 @@ pub(crate) fn extract_codesign(
         n_code_slots: cd.n_code_slots,
         code_limit: cd.code_limit as u64,
     })
-}
-
-fn snap_property(property: &crate::objc::types::ObjCProperty) -> ObjCPropertySnapshot {
-    ObjCPropertySnapshot {
-        name: property.name.clone(),
-        attributes: property.attributes.clone(),
-        is_class: property.is_class,
-    }
 }
 
 fn collect_entitlement_keys(xml: Option<&str>, der: Option<&[u8]>) -> Vec<String> {
@@ -413,13 +329,6 @@ fn stable_fingerprint(bytes: &[u8]) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("fnv1a64:{hash:016x}")
-}
-
-fn snap_method(m: &crate::objc::ObjCMethod) -> ObjCMethodSnapshot {
-    ObjCMethodSnapshot {
-        name: m.name.clone(),
-        type_encoding: m.type_encoding.clone(),
-    }
 }
 
 fn snap_fixup(fixup: crate::dyld::types::Fixup) -> FixupSnapshot {
@@ -499,15 +408,6 @@ fn has_chained_fixups(macho: &MachoFile<'_>) -> bool {
     macho
         .find_load_command(|lc| matches!(lc, LoadCommand::DyldChainedFixups(_)))
         .is_some()
-}
-
-fn has_objc_metadata(macho: &MachoFile<'_>) -> bool {
-    macho.all_sections().any(|section| {
-        matches!(
-            section.section_name().as_str_lossy().as_ref(),
-            "__objc_classlist" | "__objc_catlist" | "__objc_protolist"
-        )
-    })
 }
 
 fn has_code_signature(macho: &MachoFile<'_>) -> bool {

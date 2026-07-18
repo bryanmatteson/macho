@@ -1,7 +1,10 @@
 use std::ffi::OsString;
 use std::io::Write;
 
-use clap::{CommandFactory, Parser, ValueEnum};
+use self::output::{ColorChoice, Options as OutputOptions};
+use clap::{CommandFactory, Parser};
+
+pub use self::output::Format as OutputFormat;
 
 /// Shared argument definitions.
 pub mod args;
@@ -67,18 +70,6 @@ pub struct Cli {
 
     #[command(subcommand)]
     command: Commands,
-}
-
-/// Output representation shared by every command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[non_exhaustive]
-pub enum OutputFormat {
-    /// Human-readable text.
-    Text,
-    /// Versioned JSON envelope.
-    Json,
-    /// SARIF 2.1 report (audit only).
-    Sarif,
 }
 
 /// Return the live Clap command used by production dispatch.
@@ -385,11 +376,7 @@ impl std::error::Error for CliError {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct CliWarning {
-    code: String,
-    message: String,
-}
+pub(crate) use self::output::Diagnostic as CliWarning;
 
 /// The CliIo type.
 pub struct CliIo<'a> {
@@ -397,6 +384,10 @@ pub struct CliIo<'a> {
     pub stdout: &'a mut dyn Write,
     /// The stderr field.
     pub stderr: &'a mut dyn Write,
+    /// Whether stdout is attached to an interactive terminal.
+    pub stdout_is_terminal: bool,
+    /// Whether stderr is attached to an interactive terminal.
+    pub stderr_is_terminal: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,6 +430,8 @@ where
     let mut io = CliIo {
         stdout: &mut stdout,
         stderr: &mut stderr,
+        stdout_is_terminal: false,
+        stderr_is_terminal: false,
     };
     let status = run_from(
         std::iter::once(OsString::from("macho")).chain(args.into_iter().map(Into::into)),
@@ -459,16 +452,23 @@ where
 {
     let args: Vec<OsString> = args.into_iter().map(Into::into).collect();
     let requested_format = pre_scan_format(&args);
+    let requested_color = pre_scan_color(&args);
+    let requested_diagnostics =
+        OutputOptions::resolve(requested_format, requested_color, io.stderr_is_terminal);
     let requested_command = pre_scan_command(&args).unwrap_or_else(|| "macho".to_owned());
 
     match Cli::try_parse_from(args) {
         Ok(cli) => {
             let command_name = cli.command.name();
             let format = cli.output.format;
+            let output_options =
+                OutputOptions::resolve(format, cli.output.color, io.stdout_is_terminal);
+            let diagnostic_options =
+                OutputOptions::resolve(format, cli.output.color, io.stderr_is_terminal);
             if format == OutputFormat::Sarif && !cli.command.supports_sarif() {
-                write_failure(
+                let _ = output::write_failure(
                     io.stderr,
-                    requested_format,
+                    diagnostic_options,
                     command_name,
                     UNSUPPORTED_FORMAT_CODE,
                     "SARIF output is supported only by the audit command",
@@ -478,36 +478,50 @@ where
 
             let mut rendered = Vec::new();
             let mut warnings = Vec::new();
-            match dispatch(cli.command, format, &mut rendered, &mut warnings) {
+            match dispatch(cli.command, output_options, &mut rendered, &mut warnings) {
                 Ok(()) => {
-                    if let Err(error) = write_success(io.stdout, format, command_name, &rendered) {
-                        write_failure(
+                    if let Err(error) =
+                        output::write_success(io.stdout, output_options, command_name, &rendered)
+                    {
+                        let _ = output::write_failure(
                             io.stderr,
-                            format,
+                            diagnostic_options,
                             command_name,
                             EXECUTION_FAILED_CODE,
                             &error.to_string(),
                         );
                         return ExitStatus::EXECUTION_FAILURE;
                     }
-                    write_warnings(io.stderr, format, command_name, &warnings);
+                    let _ = output::write_diagnostics(
+                        io.stderr,
+                        diagnostic_options,
+                        command_name,
+                        &warnings,
+                    );
                     ExitStatus::SUCCESS
                 }
                 Err(err) if err.kind == CliErrorKind::Policy => {
-                    if let Err(error) = write_success(io.stdout, format, command_name, &rendered) {
-                        write_failure(
+                    if let Err(error) =
+                        output::write_success(io.stdout, output_options, command_name, &rendered)
+                    {
+                        let _ = output::write_failure(
                             io.stderr,
-                            format,
+                            diagnostic_options,
                             command_name,
                             EXECUTION_FAILED_CODE,
                             &error.to_string(),
                         );
                         return ExitStatus::EXECUTION_FAILURE;
                     }
-                    write_warnings(io.stderr, format, command_name, &warnings);
-                    write_failure(
+                    let _ = output::write_diagnostics(
                         io.stderr,
-                        format,
+                        diagnostic_options,
+                        command_name,
+                        &warnings,
+                    );
+                    let _ = output::write_failure(
+                        io.stderr,
+                        diagnostic_options,
                         command_name,
                         err.code(),
                         &err.to_string(),
@@ -515,9 +529,9 @@ where
                     ExitStatus::POLICY_FAILURE
                 }
                 Err(err) if err.kind == CliErrorKind::Usage => {
-                    write_failure(
+                    let _ = output::write_failure(
                         io.stderr,
-                        format,
+                        diagnostic_options,
                         command_name,
                         err.code(),
                         &err.to_string(),
@@ -525,9 +539,9 @@ where
                     ExitStatus::USAGE_ERROR
                 }
                 Err(err) => {
-                    write_failure(
+                    let _ = output::write_failure(
                         io.stderr,
-                        format,
+                        diagnostic_options,
                         command_name,
                         err.code(),
                         &err.to_string(),
@@ -542,9 +556,9 @@ where
                 let _ = write!(io.stdout, "{err}");
                 ExitStatus::SUCCESS
             } else {
-                write_failure(
+                let _ = output::write_failure(
                     io.stderr,
-                    requested_format,
+                    requested_diagnostics,
                     &requested_command,
                     INVALID_ARGUMENTS_CODE,
                     &err.to_string(),
@@ -557,14 +571,15 @@ where
 
 fn dispatch(
     command: Commands,
-    format: OutputFormat,
+    output: OutputOptions,
     out: &mut dyn Write,
     warnings: &mut Vec<CliWarning>,
 ) -> Result<(), CliError> {
+    let format = output.format();
     let result = match command {
         // Structure
-        Commands::Info(args) => subcommands::info::run(args, format, out, warnings),
-        Commands::Deps(args) => subcommands::deps::run(args, format, out),
+        Commands::Info(args) => subcommands::info::run(args, output, out, warnings),
+        Commands::Deps(args) => subcommands::deps::run(args, output, out),
         Commands::Codesign(args) => subcommands::codesign::run(args, format, out),
         Commands::Dwarf(args) => subcommands::dwarf::run(args, format, out),
         // Symbols
@@ -573,16 +588,16 @@ fn dispatch(
         Commands::Exports(args) => subcommands::exports::run(args, format, out),
         Commands::Fixups(args) => subcommands::fixups::run(args, format, out),
         Commands::Relocations(args) => subcommands::relocations::run(args, format, out),
-        Commands::Ranges(args) => subcommands::data_surface::run_ranges(args, format, out),
+        Commands::Ranges(args) => subcommands::data_surface::run_ranges(args, output, out),
         // Data
         Commands::Strings(args) => subcommands::data_surface::run_strings(args, format, out),
         Commands::Xrefs(args) => subcommands::data_surface::run_xrefs(args, format, out),
         Commands::Vtables(args) => subcommands::data_surface::run_vtables(args, format, out),
         // Language
-        Commands::Objc(args) => subcommands::objc::run(args, format, out),
-        Commands::Swift(args) => subcommands::swift::run(args, format, out),
-        Commands::Cpp(args) => subcommands::cpp::run(args, format, out),
-        Commands::C(args) => subcommands::c::run(args, format, out),
+        Commands::Objc(args) => subcommands::objc::run(args, output, out),
+        Commands::Swift(args) => subcommands::swift::run(args, output, out),
+        Commands::Cpp(args) => subcommands::cpp::run(args, output, out),
+        Commands::C(args) => subcommands::c::run(args, output, out),
         // Analysis
         Commands::Diff(args) => subcommands::diff::run(args, format, out),
         Commands::Audit(args) => subcommands::audit::run(args, format, out),
@@ -590,7 +605,7 @@ fn dispatch(
         Commands::Snapshot(args) => subcommands::snapshot::run(args, out),
         // Mutation
         Commands::Patch(args) => subcommands::patch::run(args, format, out),
-        Commands::HeaderInfer(args) => subcommands::header_infer::run(args, format, out),
+        Commands::HeaderInfer(args) => subcommands::header_infer::run(args, output, out),
         // Special
         Commands::Fileset(args) => subcommands::fileset::run(args, format, out),
         Commands::Cache(args) => subcommands::dyld_cache::run(args, format, out),
@@ -622,93 +637,36 @@ fn pre_scan_format(args: &[OsString]) -> OutputFormat {
     OutputFormat::Text
 }
 
+fn pre_scan_color(args: &[OsString]) -> ColorChoice {
+    for (index, arg) in args.iter().enumerate() {
+        let arg = arg.to_string_lossy();
+        let value = arg.strip_prefix("--color=").map(str::to_owned).or_else(|| {
+            if arg == "--color" {
+                args.get(index + 1)
+                    .map(|value| value.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        });
+        match value.as_deref() {
+            Some("always") => return ColorChoice::Always,
+            Some("never") => return ColorChoice::Never,
+            Some("auto") => return ColorChoice::Auto,
+            _ => {}
+        }
+    }
+    ColorChoice::Auto
+}
+
 fn pre_scan_command(args: &[OsString]) -> Option<String> {
     args.iter().skip(1).map(|arg| arg.to_str()).find_map(|arg| {
-        arg.filter(|arg| !arg.starts_with('-') && !matches!(*arg, "text" | "json" | "sarif"))
-            .map(str::to_owned)
+        arg.filter(|arg| {
+            !arg.starts_with('-')
+                && !matches!(
+                    *arg,
+                    "text" | "json" | "sarif" | "auto" | "always" | "never"
+                )
+        })
+        .map(str::to_owned)
     })
-}
-
-fn write_success(
-    out: &mut dyn Write,
-    format: OutputFormat,
-    command: &str,
-    bytes: &[u8],
-) -> anyhow::Result<()> {
-    match format {
-        OutputFormat::Text | OutputFormat::Sarif => {
-            out.write_all(bytes)?;
-        }
-        OutputFormat::Json => {
-            let data = serde_json::from_slice::<serde_json::Value>(bytes)
-                .map_err(|error| anyhow::anyhow!("command returned a non-JSON report: {error}"))?;
-            let envelope = serde_json::json!({
-                "schema_version": 1,
-                "command": command,
-                "ok": true,
-                "data": data,
-                "diagnostics": [],
-            });
-            writeln!(
-                out,
-                "{}",
-                serde_json::to_string_pretty(&envelope).expect("JSON envelope serializes")
-            )?;
-        }
-    }
-    Ok(())
-}
-
-fn write_failure(
-    out: &mut dyn Write,
-    format: OutputFormat,
-    command: &str,
-    code: &str,
-    message: &str,
-) {
-    if format == OutputFormat::Json {
-        let envelope = serde_json::json!({
-            "schema_version": 1,
-            "command": command,
-            "ok": false,
-            "data": null,
-            "diagnostics": [{ "code": code, "message": message }],
-        });
-        let _ = writeln!(
-            out,
-            "{}",
-            serde_json::to_string_pretty(&envelope).expect("JSON envelope serializes")
-        );
-    } else {
-        let _ = writeln!(out, "Error: {message}");
-    }
-}
-
-fn write_warnings(
-    out: &mut dyn Write,
-    format: OutputFormat,
-    command: &str,
-    warnings: &[CliWarning],
-) {
-    if warnings.is_empty() {
-        return;
-    }
-    if format == OutputFormat::Json {
-        let diagnostics = warnings
-            .iter()
-            .map(|warning| serde_json::json!({ "code": warning.code, "message": warning.message }))
-            .collect::<Vec<_>>();
-        let envelope = serde_json::json!({
-            "schema_version": 1,
-            "command": command,
-            "ok": true,
-            "data": null,
-            "diagnostics": diagnostics,
-        });
-        let _ = writeln!(out, "{envelope}");
-    } else {
-        for warning in warnings {
-            let _ = writeln!(out, "Warning [{}]: {}", warning.code, warning.message);
-        }
-    }
 }

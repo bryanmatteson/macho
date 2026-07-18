@@ -31,7 +31,6 @@ pub fn run(args: SnapshotArgs, out: &mut dyn Write) -> Result<()> {
     .with_limits((&args.limits).into());
     let snapshot = Analyzer.run(&container, &plan)?;
 
-    let json = serde_json::to_string_pretty(&snapshot)?;
-    let _ = writeln!(out, "{json}");
+    crate::commands::output::json::write_pretty(out, &snapshot)?;
     Ok(())
 }

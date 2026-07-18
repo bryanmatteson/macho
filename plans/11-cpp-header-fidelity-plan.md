@@ -2,9 +2,15 @@
 
 ## Status
 
-This is the concrete plan for reconstructing the highest-fidelity C++ header
-surface practical from Mach-O binaries, symbols, RTTI, vtables, ABI analysis,
-and correlated external evidence.
+Superseded by `16-evidence-first-c-cpp-recovery-plan.md`. This file is retained
+as historical design context and is not an implementation authority.
+
+Plan 16 replaces this document's declaration-first milestones, implicit linked
+binary scanning, Clang-based validation, and aggregate-confidence model with a
+canonical evidence report, selective collectors, typed header projection, and
+in-process validation.
+
+The original plan follows.
 
 The target is ABI-faithful, compileable declarations. It is not exact source
 reproduction.

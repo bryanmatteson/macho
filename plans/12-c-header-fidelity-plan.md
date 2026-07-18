@@ -2,9 +2,14 @@
 
 ## Status
 
-This is the concrete plan for reconstructing the highest-fidelity C header
-surface practical from Mach-O binaries, symbols, DWARF debug information, and
-correlated external headers.
+Superseded by `16-evidence-first-c-cpp-recovery-plan.md`. This file is retained
+as historical design context and is not an implementation authority.
+
+Plan 16 replaces this document's declaration-first fallback, Clang-based
+validation, and aggregate-confidence model with a canonical evidence report,
+selective collectors, typed header projection, and in-process validation.
+
+The original plan follows.
 
 For C, DWARF is the primary source of source-level fidelity. Symbol-only
 recovery is a weaker fallback.

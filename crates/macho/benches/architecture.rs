@@ -55,8 +55,8 @@ fn reconstruction_and_diff(c: &mut Criterion) {
     let (thin, _) = fixtures();
     let container = macho::parse(&thin).expect("fixture parses");
     let plan = AnalysisPlan::new([
-        AnalysisDomain::CHeaders,
-        AnalysisDomain::CppHeaders,
+        AnalysisDomain::CSurface,
+        AnalysisDomain::CppSurface,
         AnalysisDomain::Header,
     ]);
     let document = Analyzer.run(&container, &plan).expect("fixture analyzes");

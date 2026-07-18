@@ -2,8 +2,6 @@ mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use macho::analysis::reconstruct::objc::graph::ObjCGraph;
-use macho::metadata::objc::parse_objc_metadata;
 use macho::metadata::swift::SwiftTypeIndex;
 use macho::model::container::MachoContainer;
 use support::{copy_macho_fixture, run_cli, temp_file_path};
@@ -24,31 +22,6 @@ fn has_rpath(macho: &macho::model::macho_file::MachoFile<'_>, needle: &str) -> b
         .load_commands()
         .iter()
         .any(|lc| lc.kind().as_rpath() == Some(needle))
-}
-
-fn objc_graph_fixture(path: &str) -> Option<(String, ObjCGraph)> {
-    let data = std::fs::read(path).ok()?;
-    let container = macho::parse(&data).ok()?;
-    match &container {
-        MachoContainer::Fat(fat) => fat.arches().iter().find_map(|arch| {
-            let metadata = parse_objc_metadata(arch.macho()).ok()?;
-            let graph = ObjCGraph::build_from_mach(&metadata, arch.macho());
-            if graph.classes.is_empty() {
-                None
-            } else {
-                Some((arch.spec().name(), graph))
-            }
-        }),
-        MachoContainer::Thin(macho) => {
-            let metadata = parse_objc_metadata(macho).ok()?;
-            let graph = ObjCGraph::build_from_mach(&metadata, macho);
-            if graph.classes.is_empty() {
-                None
-            } else {
-                Some((macho.header().cpu_type().name().to_string(), graph))
-            }
-        }
-    }
 }
 
 #[test]
@@ -372,22 +345,32 @@ fn swift_json_kind_filter_applies_to_output() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
-    let types = json["data"]["types"]
+    let slice = &json["data"]["slices"][0];
+    let entities = slice["entities"]
         .as_array()
-        .expect("filtered index types array");
+        .expect("canonical Swift entities array");
+    let selected = slice["selection"]["selected_entity_ids"]
+        .as_array()
+        .expect("selected Swift entity IDs");
 
     assert!(
-        !types.is_empty(),
+        !selected.is_empty(),
         "filtered Swift JSON output should contain at least one type"
     );
     assert!(
-        types.iter().all(|ty| ty["kind"] == expected_kind),
+        selected.iter().all(|id| {
+            entities.iter().any(|entity| {
+                entity["id"] == *id
+                    && entity["kind"]["kind"] == "known"
+                    && entity["kind"]["value"] == expected_kind
+            })
+        }),
         "JSON output should honor the requested kind filter"
     );
 }
 
 #[test]
-fn objc_graph_json_returns_null_for_slice_without_metadata() {
+fn objc_graph_json_reports_explicit_zero_surface_without_metadata() {
     let fixture = copy_macho_fixture("/usr/bin/true", "objc-graph-true");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
@@ -418,21 +401,39 @@ fn objc_graph_json_returns_null_for_slice_without_metadata() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
-    assert_eq!(json["data"], serde_json::Value::Null);
+    let views = json["data"].as_array().expect("graph slice views");
+    assert_eq!(views.len(), 1);
+    assert_eq!(views[0]["arch"].as_str().map(str::is_empty), Some(false));
+    for field in [
+        "nodes",
+        "inheritance",
+        "conformances",
+        "categories",
+        "selector_owners",
+    ] {
+        assert_eq!(views[0][field], serde_json::json!([]), "field {field}");
+    }
 }
 
 #[test]
-fn objc_selectors_json_reports_owners() {
+fn objc_selectors_json_reports_candidates() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-selectors-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
-    let Some((arch, graph)) = objc_graph_fixture(fixture_path) else {
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
+    let Some((arch, selector)) = container.macho_files().find_map(|macho| {
+        let metadata = macho::metadata::objc::parse_objc_metadata(macho).ok()?;
+        let graph =
+            macho::analysis::reconstruct::objc::graph::ObjCGraph::build_from_mach(&metadata, macho);
+        graph.selectors.keys().next().map(|selector| {
+            (
+                macho.header().cpu_type().name().to_owned(),
+                selector.clone(),
+            )
+        })
+    }) else {
         return;
     };
-    let (selector, owners) = graph
-        .selectors
-        .iter()
-        .find(|(_, owners)| !owners.is_empty())
-        .expect("expected at least one selector");
 
     let output = run_cli([
         "objc",
@@ -441,7 +442,7 @@ fn objc_selectors_json_reports_owners() {
         "--arch",
         &arch,
         "--name",
-        selector,
+        &selector,
         "--format",
         "json",
     ]);
@@ -454,47 +455,38 @@ fn objc_selectors_json_reports_owners() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
-    let data = &json["data"];
-    let returned_owners = data["owners"].as_array().expect("owners array");
-
-    assert_eq!(data["selector"], selector.as_str());
-    assert_eq!(returned_owners.len(), owners.len());
-    assert!(
-        returned_owners
+    let entries = json["data"].as_array().expect("selector view array");
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| {
+        entry["selector"] == selector
+            && entry["method_kind"].is_string()
+            && entry["candidates"].is_array()
+    }));
+    for candidate in entries.iter().flat_map(|entry| {
+        entry["candidates"]
+            .as_array()
+            .expect("candidate array")
             .iter()
-            .all(|owner| owner["class_name"].is_string() && owner["kind"].is_string()),
-        "selector JSON should include serialized owners"
-    );
+    }) {
+        assert!(candidate["member_id"].is_string());
+        assert!(candidate["origin_id"].is_string());
+        assert!(candidate["origin"].is_string());
+    }
 }
 
 #[test]
-fn objc_xrefs_json_reports_symbol_links() {
+fn objc_xrefs_json_reports_exact_address_resolution_status() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-xrefs-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
-    let Some((arch, graph)) = objc_graph_fixture(fixture_path) else {
-        return;
-    };
-    let Some((class_name, selector, symbol)) = graph.classes.values().find_map(|class| {
-        class
-            .effective_instance_methods
-            .iter()
-            .find_map(|method| {
-                method
-                    .imp_symbol
-                    .as_ref()
-                    .map(|symbol| (class.name.clone(), method.selector.clone(), symbol.clone()))
-            })
-            .or_else(|| {
-                class.effective_class_methods.iter().find_map(|method| {
-                    method
-                        .imp_symbol
-                        .as_ref()
-                        .map(|symbol| (class.name.clone(), method.selector.clone(), symbol.clone()))
-                })
-            })
-    }) else {
-        return;
-    };
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
+    let arch = container
+        .first_macho()
+        .expect("fixture contains a Mach-O image")
+        .header()
+        .cpu_type()
+        .name()
+        .to_owned();
 
     let output = run_cli([
         "objc",
@@ -502,8 +494,6 @@ fn objc_xrefs_json_reports_symbol_links() {
         fixture_path,
         "--arch",
         &arch,
-        "--class",
-        &class_name,
         "--format",
         "json",
     ]);
@@ -517,14 +507,23 @@ fn objc_xrefs_json_reports_symbol_links() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON output");
     let entries = json["data"].as_array().expect("xref JSON array");
-    assert!(
-        entries.iter().any(|entry| {
-            entry["class_name"] == class_name
-                && entry["selector"] == selector
-                && entry["imp_symbol"] == symbol
-        }),
-        "xref JSON should include the resolved method symbol link"
-    );
+    for entry in entries {
+        assert!(entry["member_id"].is_string());
+        assert!(entry["origin_id"].is_string());
+        assert!(entry["selector"].is_string());
+        assert!(entry["implementation"].is_u64());
+        assert!(matches!(
+            entry["status"].as_str(),
+            Some("resolved" | "ambiguous" | "unresolved")
+        ));
+        let symbols = entry["symbols"].as_array().expect("symbols array");
+        match entry["status"].as_str().unwrap() {
+            "resolved" => assert_eq!(symbols.len(), 1),
+            "ambiguous" => assert!(symbols.len() > 1),
+            "unresolved" => assert!(symbols.is_empty()),
+            _ => unreachable!(),
+        }
+    }
 }
 
 #[test]
@@ -562,9 +561,9 @@ fn objc_headers_render_class_dump_style_property_accessors() {
     assert!(stdout.contains(
         "- (id)initWithArguments:(id)arg1 outputFileHandle:(id)arg2 errorFileHandle:(id)arg3;"
     ));
-    assert!(stdout.contains("@property (strong) NSString *format;"));
-    assert!(stdout.contains("- (NSString *)format;"));
-    assert!(stdout.contains("- (void)setFormat:(NSString *)arg1;"));
+    assert!(stdout.contains("@property (readwrite, strong, atomic) NSString * format;"));
+    assert!(stdout.contains("- (id)format;"));
+    assert!(stdout.contains("- (void)setFormat:(id)arg1;"));
 }
 
 #[test]

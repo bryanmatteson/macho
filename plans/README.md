@@ -1,125 +1,109 @@
 # Plans
 
-This directory now contains the canonical roadmap for `macho`.
+This directory separates active implementation authorities from historical
+records. The workspace is prerelease, and the active documents are one coherent
+agent-executable specification rather than a calendar roadmap.
 
-The previous draft set had two problems:
+## Active Authorities
 
-- duplicate numbering (`06` through `10` existed twice)
-- overlapping scopes (`ObjC resolver`, `fat parity`, `load-path metadata`,
-  `compat`, and `symbol ranges` were split across competing documents)
+Every implementation pass must read these interacting contracts together:
 
-Those drafts have been consolidated into the plan set below. Plans `01` through
-`13` remain the feature authorities. Plan `15` is the architecture-completion
-authority for the workspace now present under `crates/`. Plan `14` is retained
-only as historical context for the first split and is superseded by plan `15`.
+| Plan | Authority |
+| --- | --- |
+| [`10-objc-header-fidelity-plan.md`](10-objc-header-fidelity-plan.md) | Objective-C runtime graph, surface, encoding, and header behavior |
+| [`13-llm-header-inference-plan.md`](13-llm-header-inference-plan.md) | Optional offline model hypothesis artifacts and validation only |
+| [`15-architecture-coherence-implementation-plan.md`](15-architecture-coherence-implementation-plan.md) | Workspace ownership, dependencies, selective analysis, snapshot schema 3, ObjC/Swift integration, CLI delivery, and whole-tree gates |
+| [`16-evidence-first-c-cpp-recovery-plan.md`](16-evidence-first-c-cpp-recovery-plan.md) | Deterministic C/C++ recovery schema, identity, evidence, targeted execution, safe header projection, snapshots/diffs, and recovery verification |
+| [`18-in-process-signing-plan.md`](18-in-process-signing-plan.md) | Process-free ad-hoc and PKCS#12 signing, final-layout verification, patch integration, and signing-specific gates |
 
-## Canonical Plan Set
+The serialized contract used by all four plans is
+[`schemas/language-recovery-wire-v1.md`](schemas/language-recovery-wire-v1.md).
+It is normative for common report identities, JSON rules, header-syntax DTOs,
+closed enum/code registries, language reports, hypothesis artifacts, and the
+snapshot language payload registry. Inline Rust blocks in the plans are API
+projections; the schema document wins if wording differs.
 
-### Foundation and Completion Track
+Plan 15 owns placement and shared execution/delivery mechanics. Plan 18 amends
+plan 15's former host-signing exception and owns the in-process raw Mach-O
+signing contract. Plan 10 owns
+Objective-C behavior. Plan 16 owns deterministic C/C++ behavior. Plan 13 consumes
+validated plan-16 artifacts and cannot change deterministic facts. If wording
+appears to overlap, that ownership order resolves it; a contradiction must be
+fixed in the plans before implementation rather than guessed around.
 
-1. `01-diff-plan.md`
-2. `02-transactional-patching-plan.md`
-3. `03-audit-plan.md`
-4. `04-objc-swift-graph-plan.md`
-5. `05-multi-image-analysis-plan.md`
+`macho-analysis::report` owns the shared serialized vocabulary, including
+`IdentityStability`, stable report IDs, canonical JSON, and deterministic
+language/recovery report registries. `macho-header-infer` owns only the
+hypothesis artifact root DTOs and validation while importing that vocabulary.
+Leaf language crates own parsed semantic values; analysis owns conversion into
+report DTOs. The leaves do not define competing serialized report roots.
 
-### Public API and Deep Analysis Track
+Shared wire ownership does not create an upward dependency. Header AST and
+language semantic values remain ID-free leaf types; `macho-analysis` depends on
+those leaves and converts them into ID-bearing report DTOs.
 
-6. `06-image-api-plan.md`
-7. `07-symbol-and-xref-resolution-plan.md`
-8. `08-dependency-and-compatibility-plan.md`
-9. `09-binary-data-analysis-plan.md`
-10. `10-objc-header-fidelity-plan.md`
-11. `11-cpp-header-fidelity-plan.md`
-12. `12-c-header-fidelity-plan.md`
-13. `13-llm-header-inference-plan.md`
+The work-package and dependency-checkpoint ordering inside these documents is an
+implementation dependency order. It is not a sequence of separately shippable
+phases. No active plan is complete until its callers, valid and invalid fixtures,
+STOP conditions, portable verification, and environment-specific acceptance
+ledger are coherent in one repository state.
 
-### Architecture Integration Track
+## Superseded Context
 
-15. `15-architecture-coherence-implementation-plan.md`
+These root documents are retained to explain earlier design choices but are not
+implementation authorities:
 
-## Recommended Sequence
+- [`11-cpp-header-fidelity-plan.md`](11-cpp-header-fidelity-plan.md) and
+  [`12-c-header-fidelity-plan.md`](12-c-header-fidelity-plan.md) are superseded
+  by plan 16.
+- [`14-workspace-crate-refactor-plan.md`](14-workspace-crate-refactor-plan.md) is
+  superseded by plan 15.
 
-The plans are not strictly linear, but this is the dependency-respecting order
-that keeps shared infrastructure from being reinvented:
+The files under [`complete/`](complete/) are historical completion records for
+the pre-workspace feature set. They preserve prior intent and evidence but do
+not own current crate paths, dependency direction, façade types, snapshot
+schemas, command delivery, or verification. In particular, their references to
+`ImageInspector` do not authorize restoring it; plan 15's `Analyzer` contract is
+current.
 
-1. `01-diff-plan.md`
-2. `03-audit-plan.md`
-3. `02-transactional-patching-plan.md`
-4. `04-objc-swift-graph-plan.md`
-5. `05-multi-image-analysis-plan.md`
-6. `06-image-api-plan.md`
-7. `07-symbol-and-xref-resolution-plan.md`
-8. `08-dependency-and-compatibility-plan.md`
-9. `09-binary-data-analysis-plan.md`
-10. `10-objc-header-fidelity-plan.md`
-11. `11-cpp-header-fidelity-plan.md`
-12. `12-c-header-fidelity-plan.md`
-13. `13-llm-header-inference-plan.md`
+Historical records cover:
 
-Apply `15-architecture-coherence-implementation-plan.md` as one integration
-pass against the current tree. Its work packages are dependency checkpoints,
-not additional release phases after the feature plans.
+1. diff behavior;
+2. transactional patching;
+3. audit behavior;
+4. the original ObjC/Swift graph;
+5. multi-image analysis;
+6. the original image API;
+7. symbol/xref resolution;
+8. dependency/compatibility analysis; and
+9. binary-data analysis.
 
-## Dependency Notes
-
-- `04-objc-swift-graph-plan.md` is the canonical home for ObjC method
-  resolution and Swift type surfacing. There is no separate resolver plan now.
-- `05-multi-image-analysis-plan.md` is the canonical home for fat-binary parity
-  and cross-slice helpers. There is no separate parity-helper plan now.
-- `06-image-api-plan.md` is the canonical home for normalized load-path,
-  install-name, and linked-dylib metadata. There is no separate load-path plan
-  now.
-- `07-symbol-and-xref-resolution-plan.md` combines code-range ownership with
-  callsite/xref resolution so branch decoding, stub resolution, and symbol
-  sizing share one address model.
-- `08-dependency-and-compatibility-plan.md` combines the import/export graph
-  with provider/target compatibility checking so ordinals, reexports, and load
-  paths have one source of truth.
-- `09-binary-data-analysis-plan.md` groups string-region discovery and C++
-  vtable indexing because both are data-surface discovery features used by
-  patching and reverse-engineering workflows.
-- `10-objc-header-fidelity-plan.md` is the canonical home for raising
-  `macho objc --headers` toward class-dump-style fidelity using structured
-  ObjC encoding parsing and richer header rendering.
-- `11-cpp-header-fidelity-plan.md`, `12-c-header-fidelity-plan.md`, and
-  `13-llm-header-inference-plan.md` extend the roadmap from metadata recovery
-  into higher-fidelity declaration reconstruction and evidence-driven inference.
-- `15-architecture-coherence-implementation-plan.md` is the canonical,
-  single-pass execution authority for completing the live workspace design from
-  the core library outward through the CLI. It supersedes plan 14's pre-workspace
-  target graph and phased migration.
-
-Plans `01` through `13` remain feature authorities where their behavior is not
-in conflict with plan 15. Plan 15 owns crate placement, dependency direction,
-shared execution contracts, public delivery boundaries, and final gates.
+Surviving behavior from those records must be preserved when it does not
+conflict with an active authority. Current ownership and type names always come
+from plans 10, 13, 15, and 16.
 
 ## Repository Anchors
 
-These plans are intentionally tied to the current repository layout:
-
-- Workspace authority: `Cargo.toml`
-- Core parsing/model: `crates/macho-core/src/`
+- Workspace and dependency authority: `Cargo.toml`
+- Structural parser/model: `crates/macho-core/src/`
 - Instruction handling: `crates/macho-insn/src/`
-- Snapshot/diff/audit/reconstruction: `crates/macho-analysis/src/`
+- Analysis, snapshots, diffs, and recovery: `crates/macho-analysis/src/`
+- Objective-C metadata/graph: `crates/macho-objc/src/`
+- Swift metadata/demangling: `crates/macho-swift/src/`
+- C++ ABI metadata: `crates/macho-cpp/src/`
+- Shared C/C++/Objective-C header AST/parser/renderer/validator target:
+  `crates/macho-header-syntax/src/`
+- Optional hypothesis artifacts: `crates/macho-header-infer/src/`
 - Mutation: `crates/macho-mutate/src/`
-- Façade and current command ownership: `crates/macho/src/`
-- CLI entrypoint: `crates/macho-cli/src/main.rs`
-- Architecture completion contract:
-  `15-architecture-coherence-implementation-plan.md`
+- Feature-gated façade: `crates/macho/src/`
+- CLI grammar and output: `crates/macho-cli/src/`
+- Architecture/docs/release verifier: `crates/xtask/`
+- Plan acceptance evidence: `plans/evidence/`
+- Current amended completion record:
+  [`evidence/15-amended-final.md`](evidence/15-amended-final.md)
 
-## Superseded Drafts
-
-The following drafts were merged into or superseded by the canonical set:
-
-- old ObjC resolver draft merged into `04-objc-swift-graph-plan.md`
-- old fat-parity draft merged into `05-multi-image-analysis-plan.md`
-- old load-path/install-name draft merged into `06-image-api-plan.md`
-- old callsite/xref and symbol-range drafts merged into
-  `07-symbol-and-xref-resolution-plan.md`
-- old import/export graph and compat drafts merged into
-  `08-dependency-and-compatibility-plan.md`
-- old string-region and vtable drafts merged into
-  `09-binary-data-analysis-plan.md`
-- `14-workspace-crate-refactor-plan.md` is retained for history but superseded by
-  `15-architecture-coherence-implementation-plan.md`
+The verified baseline had 18 packages; the completed workspace has the required
+nineteenth package at `crates/macho-header-syntax`. It is a production authority,
+not an optional scaffold. Any future implementation that discovers a cycle or
+path conflict must apply the active plans' STOP rules and update the
+specification without reducing its behavioral contract.

@@ -231,16 +231,15 @@ fn run_patch(
 
     if opts.dry_run {
         if format == OutputFormat::Json {
-            writeln!(
+            crate::commands::output::json::write_pretty(
                 out,
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                &serde_json::json!({
                     "dry_run": true,
                     "written": false,
                     "output": null,
                     "bytes": output_bytes.len(),
                     "previews": preview_report(&previews),
-                }))?
+                }),
             )?;
         }
         return Ok(());
@@ -271,17 +270,16 @@ fn run_patch(
     atomic_write(&output_path, &output_bytes, template_permissions)?;
 
     if format == OutputFormat::Json {
-        writeln!(
+        crate::commands::output::json::write_pretty(
             out,
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            &serde_json::json!({
                 "dry_run": false,
                 "written": true,
                 "output": output_path,
                 "backup": backup_path,
                 "bytes": output_bytes.len(),
                 "previews": preview_report(&previews),
-            }))?
+            }),
         )?;
     } else {
         let _ = writeln!(

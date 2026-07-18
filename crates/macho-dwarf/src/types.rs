@@ -1,10 +1,14 @@
-//! Types for the DWARF function index.
+//! Types for the DWARF function and global-variable indexes.
 
 use std::fmt;
 
 /// Information about a function extracted from DWARF debug info.
 #[derive(Debug, Clone)]
 pub struct DwarfFunctionInfo {
+    /// Offset of the containing compilation unit in `.debug_info`.
+    pub unit_offset: u64,
+    /// Offset of the subprogram DIE relative to its compilation unit.
+    pub die_offset: u64,
     /// The `DW_AT_name` of the subprogram (source-level name).
     pub name: Option<String>,
     /// The `DW_AT_linkage_name` (mangled symbol name).
@@ -21,6 +25,21 @@ pub struct DwarfFunctionInfo {
     pub is_variadic: bool,
     /// Calling convention.
     pub calling_convention: CallingConvention,
+}
+
+/// Information about a global variable extracted from DWARF debug info.
+#[derive(Debug, Clone)]
+pub struct DwarfVariableInfo {
+    /// Offset of the containing compilation unit in `.debug_info`.
+    pub unit_offset: u64,
+    /// Offset of the variable DIE relative to its compilation unit.
+    pub die_offset: u64,
+    /// The `DW_AT_name` source spelling.
+    pub name: Option<String>,
+    /// The `DW_AT_linkage_name` symbol spelling.
+    pub linkage_name: Option<String>,
+    /// The source type when its DIE reference can be resolved.
+    pub ty: DwarfType,
 }
 
 /// A formal parameter from DWARF.

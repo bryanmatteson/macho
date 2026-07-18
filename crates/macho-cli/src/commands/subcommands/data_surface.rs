@@ -11,6 +11,7 @@ use crate::analysis::xref::refs::{Xref, XrefKind, XrefTarget};
 use crate::analysis::{AnalysisDomain, AnalysisLimits};
 use crate::commands::OutputFormat;
 use crate::commands::args::{AnalysisLimitArgs, ArchitectureArgs, InputArgs};
+use crate::commands::output::{Options as OutputOptions, Style, columns};
 use crate::commands::subcommands::common::read_input as read_input_bytes;
 use crate::commands::subcommands::common::{analyze_selected_domain, write_selected_json};
 use crate::model::addr::Va;
@@ -178,7 +179,9 @@ pub fn run_vtables(args: VtablesArgs, format: OutputFormat, out: &mut dyn Write)
 }
 
 /// Analyze and render symbol ranges through an explicit analysis plan.
-pub fn run_ranges(args: RangesArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
+pub fn run_ranges(args: RangesArgs, output: OutputOptions, out: &mut dyn Write) -> Result<()> {
+    let format = output.format();
+    let style = output.style();
     let bytes = read_input(&args.input.path)?;
     let container = macho::parse(&bytes)
         .with_context(|| format!("failed to parse {}", args.input.path.display()))?;
@@ -201,7 +204,9 @@ pub fn run_ranges(args: RangesArgs, format: OutputFormat, out: &mut dyn Write) -
     }
     let multi = values.len() > 1;
     for (arch, ranges) in values {
-        write_arch_header(out, &arch, multi);
+        if multi {
+            writeln!(out, "{}", style.title(&format!("=== {arch} ===")))?;
+        }
         if ranges.is_empty() {
             if let Some(va) = lookup {
                 writeln!(out, "No owner found for {:#x}", va.0)?;
@@ -211,21 +216,38 @@ pub fn run_ranges(args: RangesArgs, format: OutputFormat, out: &mut dyn Write) -
             continue;
         }
         if lookup.is_none() {
-            writeln!(out, "Symbol ranges: {} entries", ranges.len())?;
+            let title = format!("Symbol ranges: {} entries", ranges.len());
+            writeln!(out, "{}", style.heading(&title))?;
         }
-        for range in ranges {
-            writeln!(
-                out,
-                "  {:#018x}..{:#018x}  {:#x}  [{}]  {}",
-                range.start.0,
-                range.end.0,
-                range.end.0 - range.start.0,
-                format_source(range.source),
-                format_entity(&range.entity, args.demangle)
-            )?;
+        let rows = ranges
+            .into_iter()
+            .map(|range| format_range_row(&range, args.demangle, style))
+            .collect::<Vec<_>>();
+        for line in columns::align(&rows) {
+            writeln!(out, "{line}")?;
         }
     }
     Ok(())
+}
+
+fn format_range_row(range: &RangeEntry, demangle: bool, style: Style) -> Vec<String> {
+    let start = style.address(&format!("{:#018x}", range.start.0));
+    let end = style.address(&format!("{:#018x}", range.end.0));
+    let size = style.muted(&format!("{:#x}", range.end.0 - range.start.0));
+    let source = format!("[{}]", format_source(range.source));
+    let source = match range.source {
+        RangeSource::Nlist => style.info(&source),
+        RangeSource::ExportTrie => style.success(&source),
+        RangeSource::ObjCMetadata => style.accent(&source),
+        RangeSource::Inferred => style.warning(&source),
+        _ => style.muted(&source),
+    };
+    vec![
+        format!("  {start}..{end}"),
+        size,
+        source,
+        format_entity(&range.entity, demangle),
+    ]
 }
 
 /// Analyze and render cross-references through an explicit analysis plan.

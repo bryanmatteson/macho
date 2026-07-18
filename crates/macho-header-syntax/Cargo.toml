@@ -1,0 +1,16 @@
+[package]
+name = "macho-header-syntax"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Process-free typed C, C++, and Objective-C header syntax"
+
+[dependencies]
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-objc.workspace = true

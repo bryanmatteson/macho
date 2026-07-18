@@ -77,9 +77,9 @@ fn run_view(path: &Path, arch: Option<&str>, json: bool, out: &mut dyn Write) ->
         })?;
         if result.len() == 1 {
             let (_, val) = result.into_iter().next().unwrap();
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&val)?);
+            crate::commands::output::json::write_pretty(out, &val)?;
         } else {
-            let _ = writeln!(out, "{}", serde_json::to_string_pretty(&result)?);
+            crate::commands::output::json::write_pretty(out, &result)?;
         }
         return Ok(());
     }

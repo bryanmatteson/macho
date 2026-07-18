@@ -92,13 +92,12 @@ fn run_list(
         }
 
         if format == OutputFormat::Json {
-            writeln!(
+            crate::commands::output::json::write_pretty(
                 out,
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
+                &serde_json::json!({
                     "action": "list",
                     "entries": selected_entries,
-                }))?
+                }),
             )?;
             return Ok(());
         }
@@ -117,13 +116,12 @@ fn run_list(
     }
 
     if format == OutputFormat::Json {
-        writeln!(
+        crate::commands::output::json::write_pretty(
             out,
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            &serde_json::json!({
                 "action": "list",
                 "entries": selected_entries,
-            }))?
+            }),
         )?;
         return Ok(());
     }
@@ -175,14 +173,13 @@ fn run_inspect(
     }
 
     if format == OutputFormat::Json {
-        writeln!(
+        crate::commands::output::json::write_pretty(
             out,
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
+            &serde_json::json!({
                 "action": "inspect",
                 "entry_id": entry_id,
                 "matches": matches,
-            }))?
+            }),
         )?;
         return Ok(());
     }

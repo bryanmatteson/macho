@@ -122,7 +122,7 @@ pub fn analyze_selected_domain(
             let state = slice
                 .domains
                 .get(&domain)
-                .expect("all schema-v2 domains have a state");
+                .expect("all schema-v3 domains have a state");
             let value = match state {
                 DomainState::Complete { value, .. } => value.value().clone(),
                 DomainState::Failed { error, .. } => {
@@ -149,11 +149,6 @@ pub fn write_selected_json(
     values: Vec<(String, Value)>,
     out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    let value = if values.len() == 1 {
-        values.into_iter().next().expect("one value").1
-    } else {
-        Value::Object(values.into_iter().collect())
-    };
-    writeln!(out, "{}", serde_json::to_string_pretty(&value)?)?;
+    crate::commands::output::json::write_selected(values, out)?;
     Ok(())
 }

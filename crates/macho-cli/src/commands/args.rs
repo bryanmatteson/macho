@@ -6,6 +6,7 @@ use clap::Args;
 use macho::analysis::AnalysisLimits;
 
 use super::OutputFormat;
+use super::output::ColorChoice;
 
 /// One input file path shared by commands that inspect or mutate an image.
 #[derive(Debug, Clone, Args)]
@@ -35,6 +36,10 @@ pub struct FormatArgs {
     /// Select the output representation.
     #[arg(long, value_enum, global = true, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
+
+    /// Control ANSI color in human-readable output.
+    #[arg(long, value_enum, global = true, default_value_t = ColorChoice::Auto)]
+    pub color: ColorChoice,
 }
 
 /// Bounded collection/decode limits shared by selective-analysis commands.

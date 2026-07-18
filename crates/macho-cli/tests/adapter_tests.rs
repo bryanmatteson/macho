@@ -1,5 +1,6 @@
-use macho_cli::adapters::{XcrunSdkLocator, XcrunSwiftDemangler};
-use macho_cli::header_infer::{CapabilityError, HeaderLanguage, SdkLocator};
+use macho_cli::header_infer::{
+    HeaderLanguage, HeaderValidator, InProcessHeaderValidator, ValidationError, ValidationRequest,
+};
 use macho_cli::swift::{SwiftDemangler, SwiftError};
 
 #[derive(Debug)]
@@ -25,32 +26,18 @@ fn fake_demangler_returns_deterministic_tool_response() {
 }
 
 #[test]
-fn unavailable_and_malformed_capabilities_remain_typed() {
-    let unavailable = CapabilityError::Unavailable {
-        capability: "fake compiler",
-    };
-    let malformed = CapabilityError::Malformed {
-        capability: "fake compiler",
-        detail: "invalid response".into(),
-    };
-    assert!(matches!(unavailable, CapabilityError::Unavailable { .. }));
-    assert!(matches!(malformed, CapabilityError::Malformed { .. }));
+fn in_process_validation_failures_remain_typed() {
+    let error = ValidationError::Parse("invalid declaration".into());
+    assert!(matches!(error, ValidationError::Parse(_)));
 }
 
 #[test]
-#[ignore = "requires the macOS developer toolchain"]
-fn real_xcrun_sdk_locator_smoke() {
-    let roots = XcrunSdkLocator
-        .include_roots(HeaderLanguage::C)
-        .expect("xcrun SDK is available");
-    assert!(!roots.is_empty());
-}
-
-#[test]
-#[ignore = "requires the macOS Swift toolchain"]
-fn real_xcrun_swift_demangler_smoke() {
-    let result = XcrunSwiftDemangler
-        .demangle("$s4Demo6WidgetC")
-        .expect("swift-demangle is available");
-    assert!(result.is_some());
+fn in_process_header_validator_needs_no_sdk_or_host_process() {
+    let outcome = InProcessHeaderValidator
+        .validate(&ValidationRequest {
+            language: HeaderLanguage::C,
+            source: "int answer(void);",
+        })
+        .expect("validator is always locally available");
+    assert!(outcome.accepted, "{:?}", outcome.diagnostics);
 }

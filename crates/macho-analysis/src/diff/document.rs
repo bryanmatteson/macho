@@ -9,7 +9,7 @@ use crate::{AnalysisDomain, AnalysisIssue, DomainPayload, DomainState, SnapshotD
 
 use super::*;
 
-/// Compare only the selected schema-v2 domains.
+/// Compare only the selected schema-v3 domains.
 pub fn diff_documents(
     old: &SnapshotDocument,
     new: &SnapshotDocument,
@@ -187,8 +187,8 @@ fn payload_value(payload: &DomainPayload) -> &Value {
         | DomainPayload::Xrefs(value)
         | DomainPayload::Dependencies(value)
         | DomainPayload::Audit(value)
-        | DomainPayload::CHeaders(value)
-        | DomainPayload::CppHeaders(value)
+        | DomainPayload::CSurface(value)
+        | DomainPayload::CppSurface(value)
         | DomainPayload::ObjcHeaders(value) => value,
     }
 }

@@ -35,6 +35,25 @@ pub struct SymbolFixture<'a> {
 
 /// Build a deterministic x86-64 image with one executable section and nlist symbols.
 pub fn thin64_x86_64_with_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
+    thin64_x86_64_with_symbol_section(symbols, "__TEXT", "__text", 0x8000_0400)
+}
+
+/// Build a deterministic x86-64 image with one regular data section and nlist symbols.
+pub fn thin64_x86_64_with_data_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
+    thin64_x86_64_with_symbol_section(symbols, "__DATA", "__data", 0)
+}
+
+/// Build a deterministic x86-64 image with one TLS data section and nlist symbols.
+pub fn thin64_x86_64_with_tls_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
+    thin64_x86_64_with_symbol_section(symbols, "__DATA", "__thread_data", 0x11)
+}
+
+fn thin64_x86_64_with_symbol_section(
+    symbols: &[SymbolFixture<'_>],
+    segment_name: &str,
+    section_name: &str,
+    section_flags: u32,
+) -> Vec<u8> {
     const HEADER_SIZE: usize = 32;
     const SEGMENT_COMMAND_SIZE: usize = 72 + 80;
     const SYMTAB_COMMAND_SIZE: usize = 24;
@@ -68,7 +87,7 @@ pub fn thin64_x86_64_with_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
 
     bytes.extend_from_slice(&0x19u32.to_le_bytes());
     bytes.extend_from_slice(&(SEGMENT_COMMAND_SIZE as u32).to_le_bytes());
-    push_fixed_name(&mut bytes, "__TEXT");
+    push_fixed_name(&mut bytes, segment_name);
     bytes.extend_from_slice(&0x1_0000_0000u64.to_le_bytes());
     bytes.extend_from_slice(&0x1000u64.to_le_bytes());
     bytes.extend_from_slice(&0u64.to_le_bytes());
@@ -77,15 +96,15 @@ pub fn thin64_x86_64_with_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
     bytes.extend_from_slice(&5u32.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    push_fixed_name(&mut bytes, "__text");
-    push_fixed_name(&mut bytes, "__TEXT");
+    push_fixed_name(&mut bytes, section_name);
+    push_fixed_name(&mut bytes, segment_name);
     bytes.extend_from_slice(&0x1_0000_0100u64.to_le_bytes());
     bytes.extend_from_slice(&(TEXT_SIZE as u64).to_le_bytes());
     bytes.extend_from_slice(&(TEXT_OFFSET as u32).to_le_bytes());
     bytes.extend_from_slice(&2u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
-    bytes.extend_from_slice(&0x8000_0400u32.to_le_bytes());
+    bytes.extend_from_slice(&section_flags.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
