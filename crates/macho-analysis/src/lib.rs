@@ -32,6 +32,8 @@ pub mod container;
 pub mod deps;
 /// The diff module.
 pub mod diff;
+/// Bounded, architecture-aware Mach-O disassembly.
+pub mod disassembly;
 /// The image module.
 pub mod image;
 /// The paths module.

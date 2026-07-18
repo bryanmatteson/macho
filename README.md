@@ -26,12 +26,21 @@ macho info <binary> --arch arm64 --validate
 macho symbols <binary> --defined-only --demangle
 macho imports <binary> --format json
 macho objc <binary> --headers
+macho disassemble <binary> --arch arm64e --symbol _main
+macho disassemble <binary> --address 0x100003f50 --count 8 --format json
 macho diff <old-binary> <new-binary> --ignore-codesign --fail-on breaking
 macho audit <binary> --min-severity warning --format sarif
 macho snapshot <binary> --format json
 macho patch <binary> --add-rpath @executable_path/../Frameworks --dry-run
+macho patch <binary> --sign-adhoc --output <signed-binary>
+macho patch <binary> --sign-p12 <identity.p12> --p12-password-file <password-file> --in-place
 macho cache <dyld-cache> --info
 ```
+
+Mach-O signing is performed and verified in process. It does not require Xcode,
+`xcrun`, or the macOS Keychain, and the same ad-hoc and PKCS#12 inputs work on
+macOS, Linux, and Windows. Passwords are accepted only through a file path so
+they do not appear in the command line.
 
 ## Command reference
 
@@ -58,6 +67,7 @@ This table is generated from the production Clap router and checked by
 | `swift` | Swift type metadata |
 | `cpp` | C++ RTTI type hierarchies |
 | `c` | C type declarations from debug info |
+| `disassemble` | Decode selected executable instructions |
 | `diff` | Compare two binaries semantically |
 | `audit` | Security and configuration audit |
 | `container` | Multi-architecture container analysis |
@@ -83,7 +93,7 @@ println!("{}", image.header().file_type.name());
 ```
 
 For selective analysis, build an `AnalysisPlan` before execution. Snapshot
-documents use schema version 2 and preserve `not_requested`, `complete`,
+documents use schema version 3 and preserve `not_requested`, `complete`,
 `unsupported`, and `failed` as distinct states.
 
 ## Repository authorities

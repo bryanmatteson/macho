@@ -18,6 +18,8 @@ pub mod class;
 pub mod compat;
 /// The encoding module.
 pub mod encoding;
+/// Bounded Objective-C method-implementation traversal.
+pub mod imp;
 /// The ivar module.
 pub mod ivar;
 /// The method module.
@@ -31,6 +33,7 @@ pub mod resolve;
 /// The types module.
 pub mod types;
 
+pub use imp::{ObjCMethodImp, ObjCMethodKind, fold_method_imps};
 pub use types::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol};
 
 use crate::model::ext::MachoExt;
@@ -120,7 +123,13 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
         (ObjCRecordKind::Category, "__objc_catlist"),
         (ObjCRecordKind::Protocol, "__objc_protolist"),
     ] {
-        let offsets = parse_pointer_list(macho, section_name).unwrap_or_default();
+        if !macho
+            .all_sections()
+            .any(|section| section.section_name() == section_name)
+        {
+            continue;
+        }
+        let offsets = parse_pointer_list(macho, section_name)?;
         for (ordinal, pointer_file_offset) in offsets.into_iter().enumerate() {
             let pointer_raw = macho
                 .bytes()
@@ -230,6 +239,17 @@ fn parse_pointer_list(macho: &MachoFile<'_>, sect_name: &str) -> Result<Vec<u64>
 
     let offset = section.offset().0;
     let size = section.size();
+    if size % 8 != 0 {
+        return Err(Error::format(format!(
+            "section {sect_name} size {size:#x} is not pointer-aligned"
+        )));
+    }
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| Error::address(format!("section {sect_name} file range overflows")))?;
+    if end > macho.file_size() as u64 {
+        return Err(Error::bounds(offset, size, macho.file_size() as u64));
+    }
     let count = (size / 8) as usize; // each entry is a pointer (8 bytes for 64-bit)
 
     let mut offsets = Vec::with_capacity(count.min(100_000));

@@ -40,6 +40,7 @@ Language:
   c              C type declarations from debug info
 
 Analysis:
+  disassemble    Decode selected executable instructions
   diff           Compare two binaries semantically
   audit          Security and configuration audit
   container      Multi-architecture container analysis
@@ -156,6 +157,9 @@ enum Commands {
     C(subcommands::c::CArgs),
 
     // ── Analysis ───────────────────────────────────────────────────────
+    /// Decode selected executable instructions
+    #[command(hide = true)]
+    Disassemble(subcommands::disassemble::DisassembleArgs),
     /// Compare two binaries semantically
     #[command(hide = true)]
     Diff(subcommands::diff::DiffArgs),
@@ -206,6 +210,7 @@ impl Commands {
             Self::Swift(_) => "swift",
             Self::Cpp(_) => "cpp",
             Self::C(_) => "c",
+            Self::Disassemble(_) => "disassemble",
             Self::Diff(_) => "diff",
             Self::Audit(_) => "audit",
             Self::Container(_) => "container",
@@ -337,6 +342,15 @@ impl CliError {
         } else if source.downcast_ref::<InputFailure>().is_some()
             || source.downcast_ref::<macho::ParseError>().is_some()
             || source
+                .downcast_ref::<macho::analysis::disassembly::DisassemblyError>()
+                .is_some_and(|error| {
+                    !matches!(
+                        error.code(),
+                        "insn.decode.invalid"
+                            | "analysis.disassembly.selection.partial_instruction"
+                    )
+                })
+            || source
                 .downcast_ref::<macho::analysis::AnalysisError>()
                 .is_some_and(|error| error.kind == macho::analysis::AnalysisErrorKind::InvalidInput)
         {
@@ -348,7 +362,13 @@ impl CliError {
     }
 
     /// Stable diagnostic code corresponding to [`Self::kind`].
-    pub const fn code(&self) -> &'static str {
+    pub fn code(&self) -> &'static str {
+        if let Some(error) = self
+            .source
+            .downcast_ref::<macho::analysis::disassembly::DisassemblyError>()
+        {
+            return error.code();
+        }
         match self.kind {
             CliErrorKind::Usage => INVALID_ARGUMENTS_CODE,
             CliErrorKind::Input => INPUT_FAILED_CODE,
@@ -359,7 +379,6 @@ impl CliError {
 }
 
 const INVALID_ARGUMENTS_CODE: &str = "cli.usage.invalid_arguments";
-const UNSUPPORTED_FORMAT_CODE: &str = "cli.usage.unsupported_format";
 const INPUT_FAILED_CODE: &str = "cli.input.failed";
 const EXECUTION_FAILED_CODE: &str = "cli.execution.failed";
 const POLICY_THRESHOLD_CODE: &str = "cli.policy.threshold";
@@ -465,13 +484,15 @@ where
                 OutputOptions::resolve(format, cli.output.color, io.stdout_is_terminal);
             let diagnostic_options =
                 OutputOptions::resolve(format, cli.output.color, io.stderr_is_terminal);
-            if format == OutputFormat::Sarif && !cli.command.supports_sarif() {
+            if let Err(error) =
+                output::validate_policy(format, cli.output.color, cli.command.supports_sarif())
+            {
                 let _ = output::write_failure(
                     io.stderr,
                     diagnostic_options,
                     command_name,
-                    UNSUPPORTED_FORMAT_CODE,
-                    "SARIF output is supported only by the audit command",
+                    error.code(),
+                    &error.to_string(),
                 );
                 return ExitStatus::USAGE_ERROR;
             }
@@ -599,6 +620,7 @@ fn dispatch(
         Commands::Cpp(args) => subcommands::cpp::run(args, output, out),
         Commands::C(args) => subcommands::c::run(args, output, out),
         // Analysis
+        Commands::Disassemble(args) => subcommands::disassemble::run(args, output, out),
         Commands::Diff(args) => subcommands::diff::run(args, format, out),
         Commands::Audit(args) => subcommands::audit::run(args, format, out),
         Commands::Container(args) => subcommands::container::run(args, format, out),

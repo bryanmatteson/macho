@@ -76,8 +76,11 @@ impl ResignPlan {
         };
 
         let has_entitlements = entitlements_xml.is_some() || entitlements_der_present;
-        let suggested_command =
-            build_resign_command(identifier.as_deref(), entitlements_xml.is_some());
+        let suggested_command = build_resign_command(
+            identifier.as_deref(),
+            entitlements_xml.is_some(),
+            has_cms_signature,
+        );
         let manual_steps = build_manual_steps(
             entitlements_xml.is_some(),
             entitlements_der_present,
@@ -100,15 +103,24 @@ impl ResignPlan {
     }
 }
 
-fn build_resign_command(identifier: Option<&str>, has_xml_entitlements: bool) -> String {
-    let mut cmd = "codesign -f -s <identity>".to_string();
+fn build_resign_command(
+    identifier: Option<&str>,
+    has_xml_entitlements: bool,
+    has_cms_signature: bool,
+) -> String {
+    let mut cmd = if has_cms_signature {
+        "macho patch <binary> --sign-p12 <identity.p12> --p12-password-file <password-file>"
+            .to_string()
+    } else {
+        "macho patch <binary> --sign-adhoc".to_string()
+    };
     if let Some(id) = identifier {
         cmd.push_str(&format!(" --identifier {id}"));
     }
     if has_xml_entitlements {
         cmd.push_str(" --entitlements <entitlements.plist>");
     }
-    cmd.push_str(" <binary>");
+    cmd.push_str(" --in-place");
     cmd
 }
 
@@ -170,7 +182,7 @@ impl std::fmt::Display for ResignPlan {
         if self.has_cms_signature {
             writeln!(f, "  CMS signature present")?;
         }
-        writeln!(f, "  Command:    {}", self.suggested_command)?;
+        writeln!(f, "  Native command: {}", self.suggested_command)?;
         for step in &self.manual_steps {
             writeln!(f, "  Note:       {step}")?;
         }

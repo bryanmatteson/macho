@@ -11,6 +11,7 @@
     version      = "0.2.0"
 
 [workspace.dependencies]
+    apple-codesign      = { version = "0.29.0", default-features = false }
     macho              = { path = "crates/macho", version = "0.2.0", default-features = false }
     macho-analysis     = { path = "crates/macho-analysis", version = "0.2.0" }
     macho-cli          = { path = "crates/macho-cli", version = "0.2.0" }
@@ -32,6 +33,7 @@
 
     anyhow         = "1"
     bad64          = "0.12"
+    base64         = "0.22"
     bitflags       = "2"
     cargo_metadata = "0.22"
     clap           = { version = "4", features = ["derive"] }
@@ -56,4 +58,5 @@ swift-demangler = "0.1.1"
     trybuild       = "1"
     trycmd         = "0.15"
     walkdir        = "2"
+    x509-certificate = "0.24.0"
     zerocopy       = { version = "0.8", features = ["derive"] }

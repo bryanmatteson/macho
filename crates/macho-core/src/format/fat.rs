@@ -124,7 +124,7 @@ pub(crate) fn parse_fat_binary_with_limits<'data>(
         }
     }
 
-    FatBinary::try_new(header, arches, data.len())
+    FatBinary::try_new(header, arches, data)
 }
 
 fn validate_arch_bounds(file_len: usize, offset: u64, size: u64, index: usize) -> Result<()> {

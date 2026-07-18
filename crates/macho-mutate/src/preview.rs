@@ -36,6 +36,10 @@ pub enum SignatureOutcome {
     Invalidated,
     /// The Removed variant.
     Removed,
+    /// The candidate carries a verified ad-hoc signature.
+    SignedAdHoc,
+    /// The candidate carries a verified certificate-backed signature.
+    SignedCertificate,
 }
 
 /// Performs build_structural_preview.

@@ -7,6 +7,10 @@ use crate::mutate::owned::OwnedFatBinary;
 use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::{SignatureOutcome, StructuralPatchPreview};
 use crate::mutate::transaction::{PatchPlan, PreparedPatch};
+use crate::mutate::{
+    InProcessSignatureProvider, SignatureKind, SignatureProvider, SignatureRequest,
+};
+use crate::workflow::WorkflowSigning;
 use anyhow::{Context, Result};
 use clap::ArgAction;
 use std::fs::Permissions;
@@ -41,7 +45,43 @@ pub struct PatchArgs {
     #[arg(long = "bytes", action = ArgAction::Append)]
     patch_bytes: Vec<String>,
     #[command(flatten)]
+    signing: SigningOpts,
+    #[command(flatten)]
     output: OutputOpts,
+}
+
+#[derive(clap::Args, Default)]
+struct SigningOpts {
+    /// Sign the candidate in process with an ad-hoc signature
+    #[arg(long, conflicts_with_all = ["sign_p12", "strip_signature"])]
+    sign_adhoc: bool,
+    /// Sign the candidate in process with a PKCS#12/PFX identity
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["sign_adhoc", "strip_signature"]
+    )]
+    sign_p12: Option<PathBuf>,
+    /// Read the PKCS#12 password from PATH (one terminal line ending is removed)
+    #[arg(long, value_name = "PATH", requires = "sign_p12")]
+    p12_password_file: Option<PathBuf>,
+    /// Override the signature identifier
+    #[arg(long, value_name = "VALUE")]
+    identifier: Option<String>,
+    /// Override XML property-list entitlements from PATH
+    #[arg(long, value_name = "PATH")]
+    entitlements: Option<PathBuf>,
+}
+
+struct SigningConfig {
+    provider: InProcessSignatureProvider,
+    request: SignatureRequest,
+}
+
+impl SigningConfig {
+    fn kind(&self) -> SignatureKind {
+        self.provider.kind()
+    }
 }
 
 #[derive(clap::Args)]
@@ -62,6 +102,7 @@ struct OutputOpts {
 
 /// Performs run.
 pub fn run(args: PatchArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
+    let signing = load_signing_config(&args.signing)?;
     let mut ops = Vec::new();
     for rpath in args.add_rpath {
         ops.push(PatchOp::AddRpath(rpath));
@@ -83,7 +124,7 @@ pub fn run(args: PatchArgs, format: OutputFormat, out: &mut dyn Write) -> Result
         let (offset, bytes) = parse_patch_bytes_spec(&spec)?;
         ops.push(PatchOp::PatchBytes { offset, bytes });
     }
-    if ops.is_empty() {
+    if ops.is_empty() && signing.is_none() {
         return Err(usage_message("no patch operations specified"));
     }
 
@@ -92,6 +133,7 @@ pub fn run(args: PatchArgs, format: OutputFormat, out: &mut dyn Write) -> Result
         args.selection.arch.as_deref(),
         &args.output,
         ops,
+        signing.as_ref(),
         format,
         out,
     )
@@ -102,6 +144,7 @@ fn run_patch(
     arch_filter: Option<&str>,
     opts: &OutputOpts,
     ops: Vec<PatchOp>,
+    signing: Option<&SigningConfig>,
     format: OutputFormat,
     out: &mut dyn Write,
 ) -> Result<()> {
@@ -134,7 +177,7 @@ fn run_patch(
                 }
             }
 
-            let prepared = prepare_patch(macho, &ops)?;
+            let prepared = prepare_patch(macho, &ops, signing)?;
             let arch_name = arch_name_for_mach(macho);
             if format == OutputFormat::Text {
                 emit_preview(&[(&arch_name, &prepared)], opts.dry_run, out);
@@ -161,7 +204,7 @@ fn run_patch(
                     Ok((
                         index,
                         arch.spec().name(),
-                        prepare_patch(arch.macho(), &ops)?,
+                        prepare_patch(arch.macho(), &ops, signing)?,
                     ))
                 })
                 .collect::<Result<_>>()?;
@@ -238,6 +281,7 @@ fn run_patch(
                     "written": false,
                     "output": null,
                     "bytes": output_bytes.len(),
+                    "signing": signing_report(signing),
                     "previews": preview_report(&previews),
                 }),
             )?;
@@ -278,6 +322,7 @@ fn run_patch(
                 "output": output_path,
                 "backup": backup_path,
                 "bytes": output_bytes.len(),
+                "signing": signing_report(signing),
                 "previews": preview_report(&previews),
             }),
         )?;
@@ -298,6 +343,82 @@ fn preview_report(previews: &[(String, StructuralPatchPreview)]) -> Vec<serde_js
         .iter()
         .map(|(arch, preview)| serde_json::json!({ "arch": arch, "preview": preview }))
         .collect()
+}
+
+fn signing_report(signing: Option<&SigningConfig>) -> serde_json::Value {
+    match signing {
+        Some(config) => serde_json::json!({
+            "requested": true,
+            "mode": match config.kind() {
+                SignatureKind::AdHoc => "ad_hoc",
+                SignatureKind::Certificate => "certificate",
+            },
+            "verified": true,
+        }),
+        None => serde_json::json!({
+            "requested": false,
+            "mode": null,
+            "verified": false,
+        }),
+    }
+}
+
+fn load_signing_config(opts: &SigningOpts) -> Result<Option<SigningConfig>> {
+    let signing_requested = opts.sign_adhoc || opts.sign_p12.is_some();
+    if !signing_requested {
+        if opts.identifier.is_some() || opts.entitlements.is_some() {
+            return Err(usage_message(
+                "--identifier and --entitlements require --sign-adhoc or --sign-p12",
+            ));
+        }
+        return Ok(None);
+    }
+
+    let entitlements_xml = opts
+        .entitlements
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read entitlements {}", path.display()))
+        })
+        .transpose()?;
+    let request = SignatureRequest {
+        identifier: opts.identifier.clone(),
+        entitlements_xml,
+    };
+
+    let provider = if let Some(path) = &opts.sign_p12 {
+        let pkcs12 = std::fs::read(path)
+            .with_context(|| format!("failed to read PKCS#12 identity {}", path.display()))?;
+        let password = match &opts.p12_password_file {
+            Some(password_path) => {
+                let password = std::fs::read_to_string(password_path).with_context(|| {
+                    format!(
+                        "failed to read PKCS#12 password file {}",
+                        password_path.display()
+                    )
+                })?;
+                strip_one_line_ending(password)
+            }
+            None => String::new(),
+        };
+        InProcessSignatureProvider::from_pkcs12(&pkcs12, &password)?
+    } else {
+        InProcessSignatureProvider::adhoc()
+    };
+    provider.validate_request(&request)?;
+
+    Ok(Some(SigningConfig { provider, request }))
+}
+
+fn strip_one_line_ending(mut value: String) -> String {
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    value
 }
 
 fn parse_offset(s: &str) -> Result<u64> {
@@ -372,18 +493,26 @@ fn temp_path_for(path: &Path) -> PathBuf {
     parent.join(format!(".{stem}.{pid}.{nanos}.tmp"))
 }
 
-fn prepare_patch(macho: &MachoFile<'_>, ops: &[PatchOp]) -> Result<PreparedPatch> {
+fn prepare_patch(
+    macho: &MachoFile<'_>,
+    ops: &[PatchOp],
+    signing: Option<&SigningConfig>,
+) -> Result<PreparedPatch> {
     let analysis = AnalysisPlan::new([
         AnalysisDomain::Header,
         AnalysisDomain::LoadCommands,
         AnalysisDomain::Segments,
         AnalysisDomain::Codesign,
     ]);
+    let workflow_signing = signing.map(|config| WorkflowSigning {
+        provider: &config.provider,
+        request: &config.request,
+    });
     let result = macho::workflow::execute(
         macho.bytes(),
         &PatchPlan::new(ops.to_vec()),
         &analysis,
-        None,
+        workflow_signing,
     )?;
     Ok(PreparedPatch {
         preview: result.preview.structural,
@@ -441,6 +570,12 @@ fn format_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) -> String {
                 if let Some(plan) = &prepared.preview.resign_plan {
                     output.push_str(&plan.to_string());
                 }
+            }
+            SignatureOutcome::SignedAdHoc => {
+                output.push_str("\nCode signature: verified ad-hoc signature applied.\n");
+            }
+            SignatureOutcome::SignedCertificate => {
+                output.push_str("\nCode signature: verified certificate signature applied.\n");
             }
             _ => output.push_str("\nWarning: signature outcome is unknown.\n"),
         }
@@ -561,5 +696,13 @@ mod tests {
         assert_eq!(entries[0].path(), destination);
 
         std::fs::remove_dir_all(root).expect("remove temporary root");
+    }
+
+    #[test]
+    fn password_file_removes_only_one_terminal_line_ending() {
+        assert_eq!(strip_one_line_ending("secret\n".into()), "secret");
+        assert_eq!(strip_one_line_ending("secret\r\n".into()), "secret");
+        assert_eq!(strip_one_line_ending("secret\n\n".into()), "secret\n");
+        assert_eq!(strip_one_line_ending(" secret ".into()), " secret ");
     }
 }

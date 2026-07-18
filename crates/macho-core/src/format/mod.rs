@@ -20,7 +20,7 @@ pub use container::{parse, parse_with_options};
 pub use fat::parse_fat_binary;
 pub use macho::parse_macho_file;
 pub use relocations::relocations_for_section;
-pub use symbols::parse_symbol_table;
+pub use symbols::{fold_symbols, parse_symbol_table};
 
 use crate::model::container::MachoContainer;
 use crate::model::validate::Diagnostic;

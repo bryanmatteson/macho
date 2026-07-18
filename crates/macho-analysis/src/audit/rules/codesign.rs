@@ -65,7 +65,11 @@ impl AuditRule for UnsignedBinary {
                        Gatekeeper and notarization."
                     .into(),
                 evidence: vec![format!("file_type={ft}, no LC_CODE_SIGNATURE")],
-                remediation: Some("Sign with `codesign -s <identity> <binary>`".into()),
+                remediation: Some(
+                    "Sign in process with `macho patch <binary> --sign-p12 <identity.p12> \
+                     --p12-password-file <password-file> --in-place`"
+                        .into(),
+                ),
             });
         }
     }

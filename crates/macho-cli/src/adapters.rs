@@ -1,6 +1,4 @@
-//! Delivery-owned adapters at explicit process and filesystem boundaries.
-
-mod signing;
+//! Delivery-owned adapters at explicit filesystem boundaries.
 
 use std::path::Path;
 
@@ -8,8 +6,6 @@ use anyhow::{Context, Result, bail};
 use macho::header_syntax::{
     HeaderParser as _, Language, TreeSitterHeaderParser, ValidationLimits, validate,
 };
-
-pub use signing::HostSignatureProvider;
 
 /// Validates a complete C header in-process.
 pub fn validate_c_header(source: &str) -> Result<()> {

@@ -452,7 +452,11 @@ pub fn disassemble_one(bytes: &[u8], va: u64, arch: Arch) -> Result<String, Deco
     }
 }
 
-/// Disassemble all instructions in `bytes` to `(va, text)` pairs.
+/// Strictly disassemble all instructions in `bytes` to `(va, text)` pairs.
+///
+/// Returns an error instead of a successfully decoded prefix when any byte in
+/// the input cannot be decoded. Use [`decode_lossy`] when explicit recovery and
+/// gap accounting are required.
 pub fn disassemble(
     bytes: &[u8],
     base_va: u64,

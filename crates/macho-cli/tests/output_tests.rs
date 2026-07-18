@@ -137,7 +137,7 @@ fn explicit_color_styles_human_info_only() {
     assert!(human.contains("\u{1b}[35mS_REGULAR\u{1b}[0m"));
     assert!(human.contains("\u{1b}[2moff=\u{1b}[0m\u{1b}[33m0x00000100\u{1b}[0m"));
 
-    let machine = macho_cli::run_captured(["info", &path, "--format", "json", "--color", "always"]);
+    let machine = macho_cli::run_captured(["info", &path, "--format", "json", "--color", "never"]);
     let _ = std::fs::remove_file(path);
     assert_eq!(machine.code, 0);
     assert!(!machine.stdout.contains(&0x1b));
@@ -149,13 +149,43 @@ fn explicit_color_styles_human_info_only() {
 }
 
 #[test]
+fn info_rejects_explicit_color_for_json_with_typed_usage_diagnostic() {
+    let path = write_fixture("json-color-rejected");
+    let output = macho_cli::run_captured([
+        "info",
+        path.to_str().expect("UTF-8 fixture path"),
+        "--format",
+        "json",
+        "--color",
+        "always",
+    ]);
+    let _ = std::fs::remove_file(path);
+
+    assert_eq!(output.code, 2);
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.contains(&0x1b));
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("valid JSON failure envelope");
+    assert_eq!(envelope["command"], "info");
+    assert_eq!(envelope["ok"], false);
+    assert_eq!(
+        envelope["diagnostics"][0]["code"],
+        "cli.usage.color_machine"
+    );
+    assert_eq!(
+        envelope["diagnostics"][0]["message"],
+        "--color always is incompatible with machine output"
+    );
+}
+
+#[test]
 fn deps_uses_shared_human_style_and_keeps_json_escape_free() {
     let path = write_fixture("deps-color");
     let path = path.to_str().expect("UTF-8 fixture path").to_owned();
 
     let colored = macho_cli::run_captured(["deps", &path, "--color", "always"]);
     let plain = macho_cli::run_captured(["deps", &path, "--color", "never"]);
-    let machine = macho_cli::run_captured(["deps", &path, "--format", "json", "--color", "always"]);
+    let machine = macho_cli::run_captured(["deps", &path, "--format", "json", "--color", "never"]);
     let _ = std::fs::remove_file(path);
 
     assert_eq!(colored.code, 0);
@@ -189,7 +219,7 @@ fn ranges_aligns_columns_with_and_without_color() {
         "--format",
         "json",
         "--color",
-        "always",
+        "never",
     ]);
     let _ = std::fs::remove_file(path);
 

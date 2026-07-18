@@ -115,10 +115,42 @@ impl<'data> CodeSignature<'data> {
         self.code_directories.first().and_then(|cd| cd.team_id)
     }
 
-    /// Performs cms_signature_present.
+    /// Whether the signature contains non-empty CMS payload data.
+    ///
+    /// Ad-hoc signatures conventionally carry an empty eight-byte BlobWrapper
+    /// header. That placeholder is not a cryptographic CMS signature.
     pub fn cms_signature_present(&self) -> bool {
-        self.blobs
-            .iter()
-            .any(|b| b.blob_type == BlobType::Signature)
+        self.blobs.iter().any(|blob| {
+            blob.blob_type == BlobType::Signature
+                && blob
+                    .data
+                    .get(8..)
+                    .is_some_and(|payload| !payload.is_empty())
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CSMAGIC_BLOBWRAPPER;
+
+    #[test]
+    fn empty_adhoc_blob_wrapper_is_not_cms() {
+        let data = [CSMAGIC_BLOBWRAPPER.to_be_bytes(), 8u32.to_be_bytes()].concat();
+        let signature = CodeSignature {
+            blobs: vec![SignatureBlob {
+                blob_type: BlobType::Signature,
+                magic: CSMAGIC_BLOBWRAPPER,
+                offset: 0,
+                size: data.len() as u32,
+                data: &data,
+            }],
+            code_directories: Vec::new(),
+            entitlements_xml: None,
+            entitlements_der: None,
+        };
+
+        assert!(!signature.cms_signature_present());
     }
 }

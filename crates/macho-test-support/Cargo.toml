@@ -10,3 +10,4 @@ description = "Deterministic byte-level fixtures for the macho workspace"
 publish = false
 
 [dependencies]
+base64.workspace = true

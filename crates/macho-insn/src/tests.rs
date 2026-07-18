@@ -858,16 +858,45 @@ fn x86_64_disassemble_one_empty_fails() {
 }
 
 #[test]
-fn x86_64_disassemble_stops_at_invalid() {
+fn x86_64_disassemble_fails_closed_at_invalid() {
     // NOP (0x90) followed by 0x06 (PUSH ES, invalid in 64-bit mode)
-    let result = disassemble(&[0x90, 0x06], 0x1000, Arch::X86_64).unwrap();
-    assert_eq!(result.len(), 1, "should stop at first invalid byte");
-    assert_eq!(result[0].0, 0x1000);
-    assert!(
-        result[0].1.to_lowercase().contains("nop"),
-        "got: {}",
-        result[0].1
-    );
+    let bytes = [0x90, 0x06];
+    assert!(disassemble(&bytes, 0x1000, Arch::X86_64).is_err());
+
+    let recovered = decode_lossy(&bytes, 0x1000, Arch::X86_64);
+    assert_eq!(recovered.instructions.len(), 1);
+    assert_eq!(recovered.instructions[0].kind, InsnKind::Nop);
+    assert_eq!(recovered.gaps.len(), 1);
+    assert_eq!(recovered.gaps[0].offset, 1);
+    assert_eq!(recovered.gaps[0].len, 1);
+}
+
+#[test]
+fn x86_64_disassemble_fails_closed_at_incomplete_instruction() {
+    // NOP followed by an incomplete near CALL.
+    let bytes = [0x90, 0xE8];
+    assert!(disassemble(&bytes, 0x1000, Arch::X86_64).is_err());
+
+    let recovered = decode_lossy(&bytes, 0x1000, Arch::X86_64);
+    assert_eq!(recovered.instructions.len(), 1);
+    assert_eq!(recovered.instructions[0].kind, InsnKind::Nop);
+    assert_eq!(recovered.gaps.len(), 1);
+    assert_eq!(recovered.gaps[0].offset, 1);
+    assert_eq!(recovered.gaps[0].len, 1);
+}
+
+#[test]
+fn arm64_disassemble_fails_closed_at_incomplete_word() {
+    let mut bytes = 0xD503_201Fu32.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&[0x00, 0x00]);
+    assert!(disassemble(&bytes, 0x1000, Arch::Arm64).is_err());
+
+    let recovered = decode_lossy(&bytes, 0x1000, Arch::Arm64);
+    assert_eq!(recovered.instructions.len(), 1);
+    assert_eq!(recovered.instructions[0].kind, InsnKind::Nop);
+    assert_eq!(recovered.gaps.len(), 1);
+    assert_eq!(recovered.gaps[0].offset, 4);
+    assert_eq!(recovered.gaps[0].len, 2);
 }
 
 #[test]
@@ -1324,4 +1353,52 @@ fn arm64_ret_does_not_write_op0() {
     let bytes = 0xD65F_03C0u32.to_le_bytes();
     let insn = decode_one(&bytes, 0x1000, Arch::Arm64).unwrap();
     assert!(!insn.writes_op0_reg);
+}
+
+// ───────────── sign-boundary displacement regression (issue: RF-overflow) ─────────────
+// These decode branch / RIP-relative / ADRP instructions at virtual addresses
+// straddling the i64 sign boundary. Before the wrapping-subtraction fix the
+// displacement math triggered `attempt to (add|subtract) with overflow` under
+// the overflow checks that `cargo test` enables. Each asserts the correct
+// signed displacement, not merely the absence of a panic.
+
+#[test]
+fn x86_64_near_branch_displacement_survives_sign_boundary() {
+    // JMP rel8 +0 at VA just below i64::MAX; target crosses 0x8000_0000_0000_0000.
+    let va = 0x7FFF_FFFF_FFFF_FFFEu64;
+    let insn = decode_one(&[0xEB, 0x00], va, Arch::X86_64).unwrap();
+    assert!(matches!(insn.kind, InsnKind::Branch(_)));
+    assert_eq!(
+        resolve_branch_target(&insn, va),
+        Some(0x8000_0000_0000_0000)
+    );
+}
+
+#[test]
+fn x86_64_rip_relative_displacement_survives_sign_boundary() {
+    // LEA RAX, [RIP+0] (7 bytes) at a VA whose next_ip crosses the sign boundary.
+    let va = 0x7FFF_FFFF_FFFF_FFFCu64;
+    let insn = decode_one(
+        &[0x48, 0x8D, 0x05, 0x00, 0x00, 0x00, 0x00],
+        va,
+        Arch::X86_64,
+    )
+    .unwrap();
+    match insn.kind {
+        InsnKind::PcRelative(info) => assert_eq!(info.displacement, 7),
+        other => panic!("expected PcRelative, got {other:?}"),
+    }
+}
+
+#[test]
+fn arm64_adrp_displacement_survives_sign_boundary() {
+    // ADRP x0 with the maximum positive imm21 at a page-aligned VA near i64::MAX.
+    // Old code computed `(page_va as i64 + offset) - va as i64`, overflowing the
+    // add; the reduced form `offset - (va & 0xFFF)` stays in range.
+    let va = 0x7FFF_FFFF_FFFF_F000u64;
+    let insn = decode_one(&0xF07F_FFE0u32.to_le_bytes(), va, Arch::Arm64).unwrap();
+    match insn.kind {
+        InsnKind::PcRelative(info) => assert_eq!(info.displacement, 1_048_575i64 * 4096),
+        other => panic!("expected PcRelative, got {other:?}"),
+    }
 }

@@ -9,6 +9,11 @@ identity-backed signing. The user accepted execution in the instruction
 began. The dependency-ordered work packages below are one coherent execution
 pass, not separately shippable phases.
 
+Implementation completed on July 18, 2026. The scope ledger, acceptance
+results, command evidence, implementation review, and remaining external risks
+are recorded in
+[`evidence/18-implementation-report.md`](evidence/18-implementation-report.md).
+
 [`15-architecture-coherence-implementation-plan.md`](15-architecture-coherence-implementation-plan.md)
 remains authoritative for workspace ownership, dependency direction, CLI
 delivery, output channels, and whole-tree verification. This plan amends its
@@ -115,8 +120,8 @@ This plan is wrong if any accepted implementation exhibits one of these cases:
   candidate;
 - text and JSON disagree about signing mode or outcome;
 - a test changes expected bytes to bless a digest mismatch;
-- the `apple-codesign` notarization feature or its network/AWS dependency stack
-  is enabled; or
+- the `apple-codesign` notarization/AWS feature is enabled, or production
+  signing invokes a network-capable API; or
 - a required verifier is skipped or weakened to make the result pass.
 
 ## Feature contract
@@ -195,19 +200,23 @@ fallback identifier only for otherwise unidentified ad-hoc input, signs with
 `MachOSigner`, and verifies the resulting bytes. Certificate-backed input with
 neither an existing nor explicit identifier fails closed.
 
-Ad-hoc verification allows only `NoCryptographicSignature`; all structural,
-CodeDirectory, slot-digest, or CMS parse problems fail. Certificate verification
-allows no problem, including `NoCryptographicSignature`.
+Ad-hoc verification allows only absent CMS. `apple-codesign` 0.29 emits a
+canonical empty BlobWrapper for ad-hoc signing and its high-level verifier
+reports that empty payload as a CMS parse problem. The implementation therefore
+independently parses every slice, classifies only that exact empty wrapper as
+absent CMS, and rejects every other structural, CodeDirectory, slot-digest, or
+CMS problem. Certificate verification allows no problem, including absent CMS.
 
 ## Canonical CLI grammar
 
 ```text
-macho patch PATH PATCH-OPERATION... OUTPUT
+macho patch PATH [PATCH-OPERATION...]
             [--arch ARCH]
             [--sign-adhoc | --sign-p12 PATH]
             [--p12-password-file PATH]
             [--identifier VALUE]
             [--entitlements PATH]
+            [--output PATH | --in-place | --dry-run]
 ```
 
 Rules:
@@ -281,8 +290,9 @@ production process invocation.
 
 | ID | Type | Description | Impact | Status |
 | --- | --- | --- | --- | --- |
-| E001 | blocked_dependency | The worktree contains extensive unrelated user changes, including overlapping CLI and plan files. | Implementation must patch narrowly and report only the signing-owned diff; unrelated failures cannot be claimed as signing regressions. | pending until final diff review |
+| E001 | blocked_dependency | The worktree contains extensive unrelated user changes, including overlapping CLI and plan files. | Implementation patched narrowly; the signing-owned diff passed `git diff --check`, while unrelated formatter, diagnostic-registry, and cross-target toolchain failures are separately reported rather than attributed to signing. | handled; no signing-owned collision found |
 | E002 | test_gap | `apple-codesign` documents that its verifier is not a complete model of Apple's proprietary execution policy. | The in-process verifier proves internal digests/CMS; the macOS test-only oracle adds platform evidence without becoming a runtime dependency. | accepted risk |
+| E003 | dependency_footprint | `apple-codesign` 0.29 disables its notarization/AWS feature, but its monolithic library graph still unconditionally links network-capable dependencies through `apple-xar` and CMS support. | The production provider calls only local Mach-O, PKCS#12, digest, and CMS APIs; architecture checks reject signing-process escapes and enabled notarization features, but cannot remove upstream unreachable dependency code. | accepted implementation risk |
 
 ## Design-plan review
 
@@ -298,6 +308,9 @@ The scope ceiling is runtime behavior unrelated to raw Mach-O signing. Bundle
 resource traversal, notarization, stapling, remote signing, and Keychain
 integration do not shape validity of the raw patched Mach-O artifact accepted
 here, so they are not added. `apple-codesign` notarization remains disabled.
+The review also records the backend's unconditional network-capable transitive
+dependencies as a footprint risk; no production signing code imports or invokes
+them.
 
 The verifier is the design center. The contract cannot pass on parse success or
 blob-shape tests; it requires digest mismatch negatives, CMS presence for
@@ -340,4 +353,3 @@ Stop implementation and report the exact evidence if:
   oracle execution;
 - implementation requires enabling notarization/network features; or
 - overlapping dirty user edits cannot be preserved with a narrow patch.
-

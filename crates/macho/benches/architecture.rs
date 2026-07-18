@@ -1,4 +1,9 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::num::NonZeroUsize;
+
+use macho::analysis::disassembly::{
+    DecodeMode, DisassemblyRequest, DisassemblySelection, SliceSelection, disassemble,
+};
 use macho::analysis::{AnalysisDomain, AnalysisPlan, Analyzer};
 use macho::core::{ParseLimits, ParseMode, ParseOptions};
 use macho::mutate::{PatchOp, PatchPlan, PatchTransaction};
@@ -76,6 +81,23 @@ fn reconstruction_and_diff(c: &mut Criterion) {
     group.finish();
 }
 
+fn bounded_disassembly(c: &mut Criterion) {
+    let bytes = macho_test_support::disassembly_x86_64();
+    let container = macho::parse(&bytes).expect("fixture parses");
+    let request = DisassemblyRequest::new(
+        SliceSelection::All,
+        DisassemblySelection::ExecutableSections,
+        DecodeMode::Recovering,
+        false,
+        NonZeroUsize::new(64).expect("non-zero"),
+        NonZeroUsize::new(16).expect("non-zero"),
+    )
+    .expect("valid benchmark request");
+    c.bench_function("bounded_disassembly", |b| {
+        b.iter(|| disassemble(std::hint::black_box(&container), &request))
+    });
+}
+
 fn patch_preview(c: &mut Criterion) {
     let (thin, _) = fixtures();
     let container = macho::parse(&thin).expect("fixture parses");
@@ -104,6 +126,7 @@ criterion_group!(
     parsing,
     selective_analysis,
     reconstruction_and_diff,
+    bounded_disassembly,
     patch_preview
 );
 criterion_main!(benches);

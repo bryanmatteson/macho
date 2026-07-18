@@ -67,7 +67,7 @@ pub struct ChainedImport<'data> {
 }
 
 /// An exported symbol from the exports trie.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Export {
     /// The name field.
     pub name: String,
@@ -77,7 +77,7 @@ pub struct Export {
     pub kind: ExportKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 /// The ExportKind type.
 #[non_exhaustive]
 pub enum ExportKind {

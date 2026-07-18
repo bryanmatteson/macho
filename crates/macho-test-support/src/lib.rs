@@ -1,9 +1,21 @@
 //! Deterministic byte-level fixtures shared by tests, fuzz seeds, and benchmarks.
 
+use base64::Engine as _;
+
+mod disassembly_objc;
+mod disassembly_scale;
+
+pub use disassembly_objc::{disassembly_objc_boundary, disassembly_objc_category_labels};
+pub use disassembly_scale::disassembly_x86_64_sections;
+
 /// CPU type used by [`thin64_arm64`].
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 /// CPU type used by [`thin64_x86_64`].
 pub const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+/// ARM64E CPU subtype used by [`disassembly_arm64e`].
+pub const CPU_SUBTYPE_ARM64E: u32 = 2;
+/// Haswell x86-64 subtype used by [`disassembly_fat_x86_subtypes`].
+pub const CPU_SUBTYPE_X86_64_H: u32 = 8;
 /// Synthetic unrecognized 64-bit CPU type used by unsupported-architecture tests.
 pub const CPU_TYPE_UNKNOWN_64: u32 = 0x0100_7fff;
 
@@ -20,6 +32,35 @@ pub fn thin64_x86_64(file_type: u32) -> Vec<u8> {
 /// Build a structurally valid 64-bit image with an unrecognized CPU type.
 pub fn thin64_unknown_cpu(file_type: u32) -> Vec<u8> {
     thin64(CPU_TYPE_UNKNOWN_64, file_type)
+}
+
+/// Build a thin ARM64 image with `__TEXT` and final `__LINKEDIT` segments and
+/// enough load-command slack for an in-process signer to add
+/// `LC_CODE_SIGNATURE`.
+pub fn signable_thin64_arm64(file_type: u32) -> Vec<u8> {
+    signable_thin64(CPU_TYPE_ARM64, file_type)
+}
+
+/// Build a thin x86-64 image with `__TEXT` and final `__LINKEDIT` segments and
+/// enough load-command slack for an in-process signer to add
+/// `LC_CODE_SIGNATURE`.
+pub fn signable_thin64_x86_64(file_type: u32) -> Vec<u8> {
+    signable_thin64(CPU_TYPE_X86_64, file_type)
+}
+
+/// Password for the repository-owned test-only PKCS#12 identity.
+pub const TEST_SIGNING_IDENTITY_PASSWORD: &str = "macho-test";
+
+/// Decode the repository-owned self-signed test-only PKCS#12 identity.
+///
+/// The identity has no trust value and must never be used outside tests.
+pub fn test_signing_identity_pkcs12() -> Vec<u8> {
+    let encoded = include_str!("../fixtures/test-signing-identity.p12.b64")
+        .split_ascii_whitespace()
+        .collect::<String>();
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .expect("checked-in PKCS#12 fixture must remain valid base64")
 }
 
 /// One nlist symbol used by [`thin64_x86_64_with_symbols`].
@@ -46,6 +87,211 @@ pub fn thin64_x86_64_with_data_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8>
 /// Build a deterministic x86-64 image with one TLS data section and nlist symbols.
 pub fn thin64_x86_64_with_tls_symbols(symbols: &[SymbolFixture<'_>]) -> Vec<u8> {
     thin64_x86_64_with_symbol_section(symbols, "__DATA", "__thread_data", 0x11)
+}
+
+/// Build a deterministic x86-64 disassembly image with two exact code symbols,
+/// direct control flow, ordinary instructions, and one trailing invalid byte.
+pub fn disassembly_x86_64() -> Vec<u8> {
+    let mut bytes = thin64_x86_64_with_symbols(&[
+        SymbolFixture {
+            name: "_main",
+            external: true,
+            defined: true,
+        },
+        SymbolFixture {
+            name: "_helper",
+            external: false,
+            defined: true,
+        },
+    ]);
+    let text = &mut bytes[0x100..0x140];
+    for chunk in text.chunks_exact_mut(4) {
+        chunk.copy_from_slice(&[0x90, 0x90, 0x90, 0xc3]);
+    }
+    text[..8].copy_from_slice(&[0xeb, 0x02, 0x90, 0xc3, 0x90, 0x90, 0x90, 0xc3]);
+    text[0x3f] = 0x0f;
+    bytes
+}
+
+/// Build a deterministic arm64 disassembly image with two exact code symbols.
+pub fn disassembly_arm64() -> Vec<u8> {
+    disassembly_arm64_with_subtype(0)
+}
+
+/// Build a deterministic arm64e disassembly image with two exact code symbols.
+pub fn disassembly_arm64e() -> Vec<u8> {
+    disassembly_arm64_with_subtype(CPU_SUBTYPE_ARM64E)
+}
+
+/// Build the canonical x86-64 plus arm64e universal disassembly fixture.
+pub fn disassembly_fat() -> Vec<u8> {
+    fat32(&[
+        (CPU_TYPE_X86_64, 3, disassembly_x86_64()),
+        (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E, disassembly_arm64e()),
+    ])
+}
+
+/// Build two x86-64 slices whose display names collide but raw subtypes differ.
+pub fn disassembly_fat_x86_subtypes() -> Vec<u8> {
+    let ordinary = disassembly_x86_64();
+    let mut haswell = disassembly_x86_64();
+    haswell[8..12].copy_from_slice(&CPU_SUBTYPE_X86_64_H.to_le_bytes());
+    fat32(&[
+        (CPU_TYPE_X86_64, 3, ordinary),
+        (CPU_TYPE_X86_64, CPU_SUBTYPE_X86_64_H, haswell),
+    ])
+}
+
+/// Build an x86-64 image with `count` unique nlist aliases at the same code VA.
+pub fn disassembly_x86_64_aliases(count: usize) -> Vec<u8> {
+    let names = (0..count)
+        .map(|index| format!("_alias{index:04}"))
+        .collect::<Vec<_>>();
+    let fixtures = names
+        .iter()
+        .map(|name| SymbolFixture {
+            name,
+            external: true,
+            defined: true,
+        })
+        .collect::<Vec<_>>();
+    let mut bytes = thin64_x86_64_with_symbols(&fixtures);
+    for index in 0..count {
+        let value_offset = 0x140 + index * 16 + 8;
+        bytes[value_offset..value_offset + 8].copy_from_slice(&0x1_0000_0100u64.to_le_bytes());
+    }
+    bytes
+}
+
+/// Build an instruction-bearing image whose Objective-C pointer-list section
+/// contains non-pointer instruction bytes, for fail-closed metadata tests.
+pub fn disassembly_malformed_objc() -> Vec<u8> {
+    let mut bytes = disassembly_x86_64();
+    bytes[104..120].copy_from_slice(b"__objc_classlist");
+    bytes
+}
+
+/// Build an x86-64 disassembly image with one regular export-trie symbol at
+/// the start of `__TEXT,__text`.
+pub fn disassembly_export_symbol() -> Vec<u8> {
+    disassembly_with_export("_exported", 0x100)
+}
+
+/// Build an x86-64 disassembly image with a zero-offset regular export.
+pub fn disassembly_zero_export() -> Vec<u8> {
+    disassembly_with_export("_zero", 0)
+}
+
+fn disassembly_with_export(name: &str, image_offset: u64) -> Vec<u8> {
+    let mut bytes = disassembly_x86_64();
+    let trie = single_export_trie(name, image_offset);
+    let command_offset = 32 + (72 + 80) + 24;
+    let trie_offset = bytes.len();
+    bytes[16..20].copy_from_slice(&3u32.to_le_bytes());
+    bytes[20..24].copy_from_slice(&((72 + 80 + 24 + 16) as u32).to_le_bytes());
+    bytes[command_offset..command_offset + 4].copy_from_slice(&0x8000_0033u32.to_le_bytes());
+    bytes[command_offset + 4..command_offset + 8].copy_from_slice(&16u32.to_le_bytes());
+    bytes[command_offset + 8..command_offset + 12]
+        .copy_from_slice(&(trie_offset as u32).to_le_bytes());
+    bytes[command_offset + 12..command_offset + 16]
+        .copy_from_slice(&(trie.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(&trie);
+    let file_size = bytes.len() as u64;
+    bytes[80..88].copy_from_slice(&file_size.to_le_bytes());
+    bytes
+}
+
+fn single_export_trie(name: &str, image_offset: u64) -> Vec<u8> {
+    assert!(!name.is_empty() && !name.as_bytes().contains(&0));
+    let child_offset = 2usize
+        .checked_add(name.len())
+        .and_then(|value| value.checked_add(2))
+        .expect("small fixture export name");
+    assert!(
+        child_offset < 0x80,
+        "fixture child offset must fit one ULEB byte"
+    );
+
+    let mut terminal = vec![0]; // regular-export flags
+    push_uleb(&mut terminal, image_offset);
+    assert!(
+        terminal.len() < 0x80,
+        "fixture terminal must fit one ULEB byte"
+    );
+
+    let mut trie = vec![0, 1];
+    trie.extend_from_slice(name.as_bytes());
+    trie.push(0);
+    trie.push(child_offset as u8);
+    trie.push(terminal.len() as u8);
+    trie.extend_from_slice(&terminal);
+    trie.push(0);
+    trie
+}
+
+fn push_uleb(bytes: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+/// Build a disassembly image with a bounded but malformed export trie.
+pub fn disassembly_malformed_export() -> Vec<u8> {
+    let mut bytes = disassembly_x86_64();
+    let command_offset = 32 + (72 + 80) + 24;
+    let trie_offset = bytes.len();
+    bytes[16..20].copy_from_slice(&3u32.to_le_bytes());
+    bytes[20..24].copy_from_slice(&((72 + 80 + 24 + 16) as u32).to_le_bytes());
+    bytes[command_offset..command_offset + 4].copy_from_slice(&0x8000_0033u32.to_le_bytes());
+    bytes[command_offset + 4..command_offset + 8].copy_from_slice(&16u32.to_le_bytes());
+    bytes[command_offset + 8..command_offset + 12]
+        .copy_from_slice(&(trie_offset as u32).to_le_bytes());
+    bytes[command_offset + 12..command_offset + 16].copy_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&[0, 1]);
+    let file_size = bytes.len() as u64;
+    bytes[80..88].copy_from_slice(&file_size.to_le_bytes());
+    bytes
+}
+
+/// Build a disassembly image whose nlist string table is out of bounds.
+pub fn disassembly_malformed_nlist() -> Vec<u8> {
+    let mut bytes = disassembly_x86_64();
+    let symtab_command_offset = 32 + (72 + 80);
+    bytes[symtab_command_offset + 16..symtab_command_offset + 20]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes
+}
+
+fn disassembly_arm64_with_subtype(subtype: u32) -> Vec<u8> {
+    let mut bytes = thin64_x86_64_with_symbols(&[
+        SymbolFixture {
+            name: "_main",
+            external: true,
+            defined: true,
+        },
+        SymbolFixture {
+            name: "_helper",
+            external: false,
+            defined: true,
+        },
+    ]);
+    bytes[4..8].copy_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
+    bytes[8..12].copy_from_slice(&subtype.to_le_bytes());
+    let text = &mut bytes[0x100..0x140];
+    for chunk in text.chunks_exact_mut(8) {
+        chunk[..4].copy_from_slice(&0xd503_201fu32.to_le_bytes());
+        chunk[4..].copy_from_slice(&0xd65f_03c0u32.to_le_bytes());
+    }
+    text[..4].copy_from_slice(&0x1400_0001u32.to_le_bytes());
+    bytes
 }
 
 fn thin64_x86_64_with_symbol_section(
@@ -241,6 +487,90 @@ fn thin64(cpu_type: u32, file_type: u32) -> Vec<u8> {
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes.extend_from_slice(&0u32.to_le_bytes());
     bytes
+}
+
+fn signable_thin64(cpu_type: u32, file_type: u32) -> Vec<u8> {
+    const HEADER_SIZE: usize = 32;
+    const TEXT_SEGMENT_COMMAND_SIZE: usize = 72 + 80;
+    const LINKEDIT_SEGMENT_COMMAND_SIZE: usize = 72;
+    const TEXT_SIZE: usize = 0x1000;
+    const LINKEDIT_SIZE: usize = 0x10;
+
+    let mut bytes = Vec::with_capacity(TEXT_SIZE + LINKEDIT_SIZE);
+    bytes.extend_from_slice(&0xfeed_facfu32.to_le_bytes());
+    bytes.extend_from_slice(&cpu_type.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&file_type.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(
+        &((TEXT_SEGMENT_COMMAND_SIZE + LINKEDIT_SEGMENT_COMMAND_SIZE) as u32).to_le_bytes(),
+    );
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    debug_assert_eq!(bytes.len(), HEADER_SIZE);
+
+    push_segment64(
+        &mut bytes,
+        "__TEXT",
+        0x1_0000_0000,
+        TEXT_SIZE as u64,
+        0,
+        TEXT_SIZE as u64,
+        5,
+        5,
+        1,
+    );
+    push_fixed_name(&mut bytes, "__text");
+    push_fixed_name(&mut bytes, "__TEXT");
+    bytes.extend_from_slice(&0x1_0000_0400u64.to_le_bytes());
+    bytes.extend_from_slice(&4u64.to_le_bytes());
+    bytes.extend_from_slice(&0x400u32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0x8000_0400u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+    push_segment64(
+        &mut bytes,
+        "__LINKEDIT",
+        0x1_0000_1000,
+        0x1000,
+        TEXT_SIZE as u64,
+        LINKEDIT_SIZE as u64,
+        1,
+        1,
+        0,
+    );
+    bytes.resize(TEXT_SIZE + LINKEDIT_SIZE, 0);
+    bytes[0x400..0x404].copy_from_slice(&[0x1f, 0x20, 0x03, 0xd5]);
+    bytes
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_segment64(
+    bytes: &mut Vec<u8>,
+    name: &str,
+    vmaddr: u64,
+    vmsize: u64,
+    fileoff: u64,
+    filesize: u64,
+    maxprot: u32,
+    initprot: u32,
+    section_count: u32,
+) {
+    bytes.extend_from_slice(&0x19u32.to_le_bytes());
+    bytes.extend_from_slice(&(72 + section_count * 80).to_le_bytes());
+    push_fixed_name(bytes, name);
+    bytes.extend_from_slice(&vmaddr.to_le_bytes());
+    bytes.extend_from_slice(&vmsize.to_le_bytes());
+    bytes.extend_from_slice(&fileoff.to_le_bytes());
+    bytes.extend_from_slice(&filesize.to_le_bytes());
+    bytes.extend_from_slice(&maxprot.to_le_bytes());
+    bytes.extend_from_slice(&initprot.to_le_bytes());
+    bytes.extend_from_slice(&section_count.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
 }
 
 fn push_fixed_name(bytes: &mut Vec<u8>, name: &str) {
@@ -506,6 +836,19 @@ mod tests {
             fat32(&[(CPU_TYPE_ARM64, 0, thin.clone())]),
             fat32(&[(CPU_TYPE_ARM64, 0, thin)])
         );
+        assert_eq!(disassembly_x86_64(), disassembly_x86_64());
+        assert_eq!(disassembly_arm64(), disassembly_arm64());
+        assert_eq!(disassembly_arm64e(), disassembly_arm64e());
+        assert_eq!(disassembly_fat(), disassembly_fat());
+        assert_eq!(
+            disassembly_fat_x86_subtypes(),
+            disassembly_fat_x86_subtypes()
+        );
+        assert_eq!(
+            disassembly_x86_64_aliases(10),
+            disassembly_x86_64_aliases(10)
+        );
+        assert_eq!(disassembly_malformed_objc(), disassembly_malformed_objc());
         let symbols = thin64_x86_64_with_symbols(&[SymbolFixture {
             name: "_fixture",
             external: true,

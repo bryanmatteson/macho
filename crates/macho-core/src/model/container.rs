@@ -137,6 +137,7 @@ impl<'data> FatArch<'data> {
 pub struct FatBinary<'data> {
     header: FatHeader,
     arches: Vec<FatArch<'data>>,
+    bytes: &'data [u8],
 }
 
 impl<'data> FatBinary<'data> {
@@ -144,8 +145,9 @@ impl<'data> FatBinary<'data> {
     pub(crate) fn try_new(
         header: FatHeader,
         arches: Vec<FatArch<'data>>,
-        container_len: usize,
+        bytes: &'data [u8],
     ) -> Result<Self> {
+        let container_len = bytes.len();
         if arches.is_empty() {
             return Err(Error::format("fat binary has zero architectures"));
         }
@@ -188,7 +190,11 @@ impl<'data> FatBinary<'data> {
                 )));
             }
         }
-        Ok(Self { header, arches })
+        Ok(Self {
+            header,
+            arches,
+            bytes,
+        })
     }
 
     /// Fat header.
@@ -199,6 +205,11 @@ impl<'data> FatBinary<'data> {
     /// Validated architecture slices in table order.
     pub fn arches(&self) -> &[FatArch<'data>] {
         &self.arches
+    }
+
+    /// Complete bytes of the enclosing universal Mach-O input.
+    pub fn bytes(&self) -> &'data [u8] {
+        self.bytes
     }
 
     /// Find an architecture by CPU type.
@@ -229,6 +240,14 @@ pub enum MachoContainer<'data> {
 }
 
 impl<'data> MachoContainer<'data> {
+    /// Complete bytes of the original thin or universal Mach-O input.
+    pub fn bytes(&self) -> &'data [u8] {
+        match self {
+            Self::Thin(macho) => macho.bytes(),
+            Self::Fat(fat) => fat.bytes(),
+        }
+    }
+
     /// Whether the container is thin.
     pub fn is_thin(&self) -> bool {
         matches!(self, Self::Thin(_))

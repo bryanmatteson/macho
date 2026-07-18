@@ -76,7 +76,7 @@ together:
 2. core parsing, validation, limits, addressing, models, construction, and
    errors;
 3. symbols, dyld, code signing, DWARF, ObjC, Swift, C++, in-process language
-   tooling, and host-signing ownership;
+   tooling, and in-process signing ownership;
 4. instruction decoding and relocation callers;
 5. analysis planning, caching, domain dependencies, snapshots, diff, audit,
    reconstruction, and large-module seams;
@@ -98,9 +98,9 @@ is true:
 
 - `macho-core`, a metadata crate, `macho-insn`, or `macho-mutate` depends on
   `macho-analysis`, `macho-workflow`, the façade, or the CLI;
-- a production inspection, recovery, demangling, header-correlation, or header-
-  validation path invokes `xcrun`, a compiler, a demangler process, or another
-  host executable;
+- a production inspection, recovery, demangling, header-correlation, header-
+  validation, or signing path invokes `xcrun`, `codesign`, a compiler, a
+  demangler process, or another host executable;
 - a public invariant-bearing type can be assembled into a state the parser would
   reject;
 - recoverable parsing and hard structural failure are still conflated;
@@ -141,7 +141,7 @@ and workspace crate manifests) both report 18 packages. The target graph has 19:
 | Façade | `macho --no-default-features` depends only on `macho-core`. | Preserve the minimal tree and extend the feature authority only where header syntax requires it. |
 | Verifier | `crates/xtask` already routes `architecture`, `docs --check`, `release --check`, `verify`, and `verify-fuzz`. Its architecture registry does not yet know `macho-header-syntax` or the amended dependency edges. | Extend the existing verifier and its invalid fixtures; do not create a new skeleton or a second verifier. |
 | Snapshot/report schema | Analysis and CLI tests still assert snapshot/report schema version 2. | Implement schema 3, the normative language/recovery wire registry, exact rejection fixtures, and per-domain schema goldens. |
-| Header validation | Production `header_infer` constructs `XcrunClangValidator`, and the CLI adapter launches `std::process::Command`. | Replace production inspection/recovery validation with `macho-header-syntax`; retain process execution only in the explicitly permitted signing adapter. |
+| Header validation and signing | Production `header_infer` constructs `XcrunClangValidator`, and the CLI signing adapter launches `std::process::Command`. | Replace production inspection/recovery validation with `macho-header-syntax`; replace host signing with the process-free `macho-mutate` backend specified by plan 18. |
 | Language surfaces | C/C++ recovery, ObjC, and Swift crates exist, and the worktree contains in-progress Swift, symbol-demangling, and CLI-output edits. | Reconcile those edits with plans 10, 13, 15, and 16; complete evidence conservation, targeted execution, report schemas, and live-corpus acceptance without resetting user work. |
 | Quality authority | `.github/workflows/ci.yml`, seven fuzz targets with corpora, one Criterion benchmark, and the xtask gate exist. | Extend the existing authorities with the amended schema/header/language fixtures and checks; do not claim their old PASS state covers the amended contract. |
 
@@ -205,12 +205,12 @@ belong to `macho-cli`; cargo metadata/tooling dependencies belong to `xtask`.
 | `macho-cpp` | RTTI/vtable parsing and architecture-specific ABI/body inference | `core/rtti/` and pure ABI inference from `analysis/reconstruct/cpp/abi.rs` | Header filesystem output, compiler invocation, generic diff/reporting |
 | `macho-header-syntax` | Typed supported C/C++/Objective-C declaration ASTs, bundled in-process parsing, deterministic rendering, and syntax plus semantic validation | Consolidate header AST/parser/render/validation code split across reconstruction, ObjC rendering, and header inference | Mach-O evidence, runtime encodings, recovery facts, prompts, model hypotheses, process execution, filesystem access |
 | `macho-analysis` | Domain planning/execution, snapshots, diff, audit, dependency compatibility, strings/xrefs, container analysis, recovery facts, and safe header projection | Existing crate plus normalized `core/image.rs` and path/compatibility policy | Mutation, CLI arguments, host processes, filesystem writes, C-family parser implementation |
-| `macho-mutate` | Owned model, layout, patch planning/application, signing mutation, structural preview, and transactional validation | Existing crate | Analysis dependency/reexport, semantic diff, CLI concerns |
+| `macho-mutate` | Owned model, layout, patch planning/application, process-free signing and verification, structural preview, and transactional validation | Existing crate | Analysis dependency/reexport, semantic diff, credential-file I/O, CLI concerns |
 | `macho-workflow` | Cross-layer patch workflow and semantic before/after preview | Semantic portions of `mutate/preview.rs` and transaction orchestration that consumes analysis | CLI parsing/rendering, low-level parsers |
 | `macho-dyld-cache` | Dyld shared-cache model, parsing, and extraction-bytes API | `macho/src/inputs/dyld_cache/` | Filesystem writes, CLI flags, text output |
 | `macho-header-infer` | Bounded deterministic-report projection, prompt/response artifacts, model hypothesis records, and validation orchestration | Reusable inference logic now reached from `header_infer`; parser implementation moves to `macho-header-syntax` | Recovery-fact ownership, parser/AST ownership, process execution, environment discovery, filesystem writes |
 | `macho` | Feature-gated library façade | Existing `lib.rs`, rebuilt as a clean reexport surface; no import path is preserved for its own sake | `commands`, `inputs`, Clap, `memmap2`, `anyhow`, direct implementation logic |
-| `macho-cli` | Command grammar, file mapping, explicit inputs, host-signing adapters, orchestration, renderers, writers, and exit policy | All `macho/src/commands/` plus CLI-specific input and file-output code | Reimplementation of parsing or analysis algorithms; process-backed inspection or recovery |
+| `macho-cli` | Command grammar, file mapping, explicit signing inputs, orchestration, renderers, writers, and exit policy | All `macho/src/commands/` plus CLI-specific input and file-output code | Reimplementation of parsing, analysis, or signing algorithms; process-backed inspection, recovery, or signing |
 | `macho-test-support` | Deterministic byte-level Mach-O/fat/cache fixtures shared by tests, fuzz seeds, docs, and benchmarks | Consolidate duplicated test builders | Production dependency, host files, process execution |
 
 If a move exposes a cycle, do not add a reverse dependency. Move the shared
@@ -891,14 +891,16 @@ Inspection and recovery are process-free on every platform:
 - no inspection, recovery, demangling, or validation path has a degraded
   process-backed fallback.
 
-`macho-mutate::SignatureProvider` remains the sole injectable host-process
-boundary because signing is an explicit mutation action, not inspection. The
-CLI can own host-signing implementations under `macho-cli/src/adapters/`.
+`macho-mutate::SignatureProvider` remains the injectable bytes-in/bytes-out
+boundary for signing. Its production implementation signs and verifies in
+process; `macho-cli` owns only explicit PKCS#12, password-file, entitlement, and
+output-path delivery concerns. Plan 18 is the authoritative signing contract.
 
 The architecture verifier rejects `std::process::Command`, `Command::new`,
-`xcrun`, and known compiler/demangler paths throughout product code except the
-explicit signing-adapter module. Tests use in-process fakes and synthetic data;
-they never require Xcode.
+`xcrun`, and known compiler/demangler/signing paths throughout product code.
+Tests use in-process fakes and synthetic data; the optional macOS acceptance
+oracle may invoke `/usr/bin/codesign` only from test code and is never a runtime
+dependency.
 
 ## CLI contract
 
@@ -942,7 +944,7 @@ info deps codesign dwarf
 symbols imports exports fixups relocations ranges
 strings xrefs vtables
 objc swift cpp c
-diff audit container snapshot
+disassemble diff audit container snapshot
 patch header-infer
 fileset cache
 ```
@@ -1126,7 +1128,7 @@ failure and print the command that failed.
 edge matrix. It also scans source ownership for:
 
 - `clap`, `memmap2`, and `anyhow` outside allowed delivery/tool crates;
-- process execution outside the explicit signing adapter and build tooling;
+- process execution outside tests and build tooling;
 - CLI output bypasses;
 - `macho-analysis` references in `macho-mutate`;
 - `commands` or `inputs` modules in the façade;
@@ -1340,8 +1342,8 @@ failed patch and workflow fixtures preserve original and destination bytes.
 2. Keep public paths stable through narrow `mod.rs` reexports.
 3. Convert renderers to pure string/model output.
 4. Make analysis and header inference consume `macho-header-syntax`; prove both
-   syntax and semantic header validation, and implement the isolated
-   host-signing adapter with typed capability results.
+   syntax and semantic header validation, and implement the isolated in-process
+   signing provider with typed capability and verification results.
 5. Make Objective-C projection consume the shared Objective-C syntax AST and
    prove render/reparse/semantic validation without a host process.
 6. Enforce the production-file size ceiling.
@@ -1459,7 +1461,8 @@ cargo bench --workspace --all-features --no-run
 
 `cargo xtask verify-fuzz` then runs `cargo fuzz build` under the configured
 nightly toolchain. Both commands are mandatory final gates. CI additionally
-runs bounded fuzz smoke targets and the macOS host-signing adapter suite.
+runs bounded fuzz smoke targets and the portable in-process signing suite; a
+test-only macOS job runs the Apple verifier oracle.
 The agent must also run these independent inspections after `verify`:
 
 ```text
@@ -1518,7 +1521,7 @@ The plan is complete only when all statements are true:
 | --- | --- | --- | --- |
 | Undefined or split serialized contracts | WP0, WP2, WP4 | normative wire registry plus schema equality and canonical goldens | unknown keys/tags, stale versions, dangling IDs, duplicate IDs, and registry drift are rejected |
 | False core boundary and heavy dependencies | WP1, WP2 | metadata/tree matrix | forbidden-edge fixture |
-| Recovery process execution | WP2, WP6 | source ownership check, in-process parser/demangler tests | process-call fixture outside the signing adapter |
+| Recovery or signing process execution | WP2, WP6 | source ownership check, in-process parser/demangler/signer tests | process-call fixture in any production crate |
 | Split header ownership or syntax-only validation | WP2, WP6 | one header-syntax AST/parser/renderer/semantic-validator contract consumed by analysis and inference | dependency-cycle fixture plus syntax-valid unresolved-type/conflicting-redeclaration fixtures |
 | Misleading ObjC/Swift language output | WP2, WP4, WP6, WP8 | canonical partitioned reports plus recorded iMazing language-surface acceptance | referenced/symbol-only/partial/malformed fixtures cannot become local definitions or an unaccounted zero |
 | Open model invariants and panic/allocating helpers | WP1 | core API/tests/docs | zero-fat, overlap, overflow, compile-fail field construction |
@@ -1547,8 +1550,8 @@ The plan is complete only when all statements are true:
 - No crate is introduced as an empty scaffold; its ownership, dependencies,
   public role, fixtures, and gate are defined.
 - Cross-layer semantic preview has one owner rather than a convenience backedge.
-- Host tooling exists only for the explicit signing adapter; inspection,
-  recovery, demangling, parsing, and validation are process-free.
+- Inspection, recovery, demangling, parsing, validation, and signing are
+  process-free; host tooling exists only in build tooling and explicit tests.
 - Selectivity is an execution property, not a report-filtering convention.
 - Stale syntax is removed, not mapped; docs are generated from the live
   router.

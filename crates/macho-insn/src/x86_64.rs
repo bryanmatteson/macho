@@ -110,14 +110,16 @@ fn extract_branch_target(insn: &Instruction) -> BranchTarget {
     {
         let target_va = insn.near_branch_target();
         let insn_va = insn.ip();
-        let offset = target_va as i64 - insn_va as i64;
+        // Wrapping two's-complement displacement: a plain `as i64 - as i64`
+        // overflows when target and instruction straddle the i64 sign boundary.
+        let offset = target_va.wrapping_sub(insn_va) as i64;
         return BranchTarget::Direct(offset);
     }
 
     if insn.op0_kind() == OpKind::FarBranch16 || insn.op0_kind() == OpKind::FarBranch32 {
         let target_va = insn.far_branch32() as u64;
         let insn_va = insn.ip();
-        let offset = target_va as i64 - insn_va as i64;
+        let offset = target_va.wrapping_sub(insn_va) as i64;
         return BranchTarget::Direct(offset);
     }
 
@@ -131,7 +133,7 @@ fn extract_branch_target(insn: &Instruction) -> BranchTarget {
 fn rip_relative_displacement(insn: &Instruction) -> Option<i64> {
     if insn.is_ip_rel_memory_operand() {
         let target = insn.ip_rel_memory_address();
-        let disp = target as i64 - insn.ip() as i64;
+        let disp = target.wrapping_sub(insn.ip()) as i64;
         return Some(disp);
     }
     None
@@ -281,7 +283,9 @@ pub(crate) fn disassemble(bytes: &[u8], base_va: u64) -> Result<Vec<(u64, String
     while decoder.can_decode() {
         let insn = decoder.decode();
         if insn.is_invalid() {
-            break;
+            return Err(DecodeError {
+                message: "invalid instruction".into(),
+            });
         }
         let mut output = String::new();
         formatter.format(&insn, &mut output);

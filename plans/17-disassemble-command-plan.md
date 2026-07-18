@@ -154,9 +154,9 @@ feature_contract:
     - "Add aligned text, JSON, diagnostics, and exit behavior."
   required_internal_changes:
     - "Remove silent prefix success from the multi-instruction formatter."
-    - "Add a fail-closed streaming export-trie visitor in macho-dyld and implement the existing collecting API on top of it."
+    - "Add fail-closed visitor and transactional fold APIs for raw nlist, export-trie, and Objective-C IMP metadata; implement collecting exports on the fold."
     - "Add validated disassembly request/report/service modules in macho-analysis."
-    - "Add an internal work observer for deterministic scaling and allocation-bound assertions."
+    - "Add an internal work observer for deterministic metadata-traversal, section-index, decode, scaling, and allocation-bound assertions."
     - "Reexport the service through the analysis façade feature."
     - "Add deterministic fixtures, tests, benchmarks, fuzz checks, docs, and verifier coverage."
   required_error_handling:
@@ -169,7 +169,8 @@ feature_contract:
     - "Preserve the flat grammar, common output envelope, snapshot schema 3, domain registry, façade dependency direction, and existing Intel/bad64 formatter spellings."
     - "Do not retain the existing silent partial-success behavior as compatibility."
   performance_requirements:
-    - "Runtime is linear in input bytes hashed for common identity plus metadata bytes/observations scanned plus examined bytes plus owned/serialized output bytes; exact symbol selection visits each nlist/export/Objective-C authority once per selected slice."
+    - "Runtime is bounded by input bytes hashed for common identity plus at most two physical metadata folds per authority, a slice-local index over parsed sections, indexed range queries, decode-eligible bytes, and owned/serialized output bytes; exact-symbol discovery completes before bounded presentation retention."
+    - "Every leaf decoder invocation and its input window are charged; atomic recovery lookahead that is not retained is reported separately and bounded by selector-eligible bytes."
     - "Examined bytes and retained presentation ranges have independent hard per-slice limits."
     - "Symbol matching streams input metadata without retaining an unbounded all-symbol copy."
     - "No allocation trusts an unchecked input-derived count or byte length."
@@ -326,6 +327,13 @@ metadata, does not discard decoded bytes: it adds a
 `analysis.disassembly.symbol.metadata_invalid` slice issue, marks that slice
 partial, and omits only labels/target annotations that cannot be proven.
 
+The Objective-C ownership fold reads class/category runtime lists and nested
+method-list entries directly. Class names, category owners, selector strings,
+entry sizes, and non-zero IMP addresses are required evidence: no
+`unwrap_or_default`, placeholder name, or zero IMP can turn corruption into an
+absent owner. A later nested error discards the fold accumulator, so neither a
+successful prefix nor a partially collected metadata graph reaches the report.
+
 An address selection on a fat input requires `--arch`, because one virtual
 address is not a portable selector across slices. Without `--arch`, default,
 section, and symbol modes select every slice in container order; one unsupported
@@ -419,31 +427,45 @@ must make that function strict or replace it with an explicit strict/recovering
 pair. Existing callers and tests must migrate in the same change; a compatibility
 wrapper that preserves silent partial success is forbidden by plan 15.
 
-The analysis service uses `decode_iter` for strict mode and `decode_lossy` for
-recovering mode, with the boundary checks specified below. It does not infer
-instruction boundaries from formatted text.
+Under approved amendment E004, the analysis service invokes the leaf
+`decode_one` classifier for each strict or recovering probe and the leaf
+`disassemble_one` formatter only for retained instructions. Recovering-mode gap
+extension remains service-owned so every probe and formatting re-decode is
+charged explicitly; no aggregate helper can hide nested decoder work. The
+service does not infer instruction boundaries from formatted text.
 
 ### Export-trie traversal correction
 
-`macho-dyld` adds a public fail-closed `visit_exports` API that yields one owned
-`Export` at a time to a fallible callback and retains no `Vec<Export>` internally.
+`macho-dyld` adds public fail-closed visitor and transactional fold APIs. The
+visitor preserves callback fail-closed behavior for side-effecting callers. The
+fold yields owned `Export` values into caller-owned bounded state and returns
+that state only after the single physical trie walk succeeds.
 
 ```rust
 pub fn visit_exports(
     macho: &MachoFile<'_>,
     visitor: impl FnMut(Export) -> Result<()>,
 ) -> Result<()>;
+
+pub fn fold_exports<State>(
+    macho: &MachoFile<'_>,
+    state: State,
+    folder: impl FnMut(&mut State, Export) -> Result<()>,
+) -> Result<State>;
 ```
 
 Traversal scratch remains bounded by the existing node-count/depth safety
 limits. Truncated ULEB values, terminal payloads, labels, child offsets, cycles,
 and out-of-bounds nodes return typed errors; the visitor never reports a
 successful prefix. Existing `parse_exports` remains source-compatible and is
-implemented solely by collecting `visit_exports` callbacks. `find_export`
+implemented by collecting the transactional fold. `find_export`
 retains its direct lookup path but adopts the same fail-closed malformed-trie
-semantics. `macho-analysis` uses the visitor for matching, boundary evidence,
+semantics. `macho-analysis` uses `fold_exports` for matching, boundary evidence,
 budgeted labels, and target ranges, so the command never materializes the full
-export set.
+export set or hides the visitor's validation walk from its work observer. Nlist
+and Objective-C IMP authorities expose equivalent transactional folds for the
+same reason: a malformed suffix discards the candidate accumulator, and every
+successful authority pass is one physical traversal.
 
 ## Typed report and JSON contract
 
@@ -599,10 +621,16 @@ bound was reached. A recovering decode gap makes the slice `partial` without
 making either truncation field true. Exact symbol selection scans requested
 names before the bounded presentation/range index is built, so a label bound
 cannot turn a present requested symbol into a false missing-symbol error. That
-scan visits every nlist/export/Objective-C observation in the selected slice in the worst case, but it
-streams matches and next-start candidates rather than retaining an unbounded
-copy; CPU time is input-metadata bounded and retained range memory remains
-bounded by `--max-ranges`.
+discovery pass visits every nlist/export observation in the selected slice,
+after which a second transactional fold builds bounded presentation state and
+exact next-start candidates. Objective-C IMPs require one fold after the exact
+nlist/export starts are known. Each fold retains only requested-selector
+evidence, exact next-boundary state, and at most `--max-ranges` presentation
+observations; it never retains an unbounded authority copy. CPU time is bounded
+by two physical traversals of each metadata authority and retained range memory
+remains bounded by `--max-ranges` plus requested-name state. A slice-local
+section ownership/name index retains at most five entries per parsed section and
+serves logarithmic observation, selector, and direct-target ownership queries.
 
 Budget retention is deterministic and bounded. After canonical requested-symbol
 observations are reserved (`nlist` before `export_trie` at an equal name/VA),
@@ -628,28 +656,56 @@ those evidence losses makes the slice `partial`.
 ### Executable work and allocation bounds
 
 The service has an internal observer used by tests (not a public report field)
-with counters for container bytes hashed, slice bytes hashed, metadata
-observations and name bytes visited per source, aliases retained, decode
-attempts, examined bytes, records retained, owned report bytes, and serialized
-bytes. The implementation performs one metadata pass per source and proves:
+with counters for container bytes hashed, slice bytes hashed, physical metadata
+traversals, metadata observations and name bytes visited per source, aliases
+retained, parsed sections, section-index entries and queries, boundary queries,
+label-range queries, target-owner queries, decode attempts, decoder input bytes,
+unexamined lookahead bytes, decode-eligible bytes, examined bytes, records
+retained, owned report bytes, and serialized bytes.
+`decode_attempts` counts every leaf architecture-decoder invocation, including
+recovery probes and formatting re-decodes; aggregate helpers cannot hide nested
+invocations. `unexamined_lookahead_bytes` counts with multiplicity one byte for
+each decoder probe start not ultimately covered by a retained instruction or
+gap. `decode_eligible_bytes` is the sum, per selected region, of file-backed
+candidate-start bytes the decoder may inspect: the requested byte extent plus
+the bounded architecture tail needed to classify a clipped instruction, or the
+natural section suffix for an instruction-count extent. `decoder_input_bytes`
+is the sum of leaf decoder window lengths, with overlapping windows charged
+repeatedly. Exact-symbol selection performs at most two bounded metadata
+traversals per source (selector discovery, then presentation/range
+construction); other selectors perform one. The observer counts both
+traversals and proves:
 
 - container-plus-slice hashing visits at most `2 * input_len` bytes; a thin
   input reuses its one image digest;
 - aliases retained never exceed `max_symbol_ranges_per_slice`, including
   equal-VA aliases;
-- records retained never exceed examined bytes, and decode attempts never exceed
-  examined bytes plus selected-region count;
+- section-index entries never exceed five times the parsed section count, and
+  selector/boundary/label/target lookups are charged once per actual query;
+- records retained never exceed examined bytes;
+- `decode_attempts <= 2 * examined_bytes + unexamined_lookahead_bytes`;
+- `unexamined_lookahead_bytes <= decode_eligible_bytes`;
+- on x86-64, `decoder_input_bytes <= 15 * decode_attempts`; on arm64/arm64e,
+  `decoder_input_bytes <= 4 * decode_attempts`;
 - raw instruction/gap bytes retained equal examined bytes; and
-- other owned memory and rendering work are charged to retained metadata-name
-  bytes or actual serialized output bytes, not to an unchecked file count.
+- other owned memory and rendering work are charged to bounded section-index
+  entries, retained metadata-name bytes, or actual serialized output bytes, not
+  to an unchecked observation count.
 
-`disassembly_work_bounds` runs fixed-content fixtures at N and 2N selected bytes,
-asserts each relevant counter grows by at most 2x plus one region's constant
-overhead, and runs an alias flood at 10x the configured budget to prove retained
-aliases remain exactly at the cap while truncation is reported. A malformed
-export fixture proves streaming returns an error instead of successful-prefix
-statistics. These are deterministic count assertions; elapsed wall time is not
-used as acceptance evidence.
+`disassembly_work_bounds` runs fixed-content fixtures at N and 2N selected
+bytes, metadata observations, selected regions, and parsed sections; asserts
+each relevant counter grows by at most 2x plus one region's constant overhead;
+and verifies that physical traversal, observation, name-byte, section-index,
+boundary, label-range, and target-owner counters obey their stated formulas. It
+runs an alias flood at 10x the configured budget to prove retained aliases
+remain exactly at the cap while truncation is reported. A malformed export
+fixture proves streaming returns an error instead of successful-prefix
+statistics. These are
+deterministic count assertions; elapsed wall time is not used as acceptance
+evidence. An invalid x86 recovery unit longer than the remaining decoded-byte
+budget remains wholly unexamined and unretained while its leaf recovery probes
+are charged to `unexamined_lookahead_bytes`; that boundary case asserts every
+decode-work formula above.
 
 Direct branch/call/conditional targets come from the structured `InsnKind`, not
 from parsing display text. When a target belongs to a known range, the report
@@ -786,9 +842,9 @@ inspectable report with exit code 0 and explicit partial state.
 
 1. Replace silent partial success in `macho_insn::disassemble` with an explicit
    strict result or strict/recovering APIs.
-2. Add fail-closed streaming `macho-dyld::visit_exports`; rebuild
-   `parse_exports` on that visitor and remove successful-prefix malformed-trie
-   behavior.
+2. Add fail-closed streaming `macho-dyld::visit_exports` plus transactional
+   `fold_exports`; rebuild `parse_exports` on the fold and remove
+   successful-prefix malformed-trie behavior.
 3. Add paired invalid-byte/incomplete-word instruction tests and streaming,
    collecting-parity, alias-order, and malformed export-trie tests.
 4. Extend the instruction and export-trie fuzz targets so arbitrary bytes cannot
@@ -902,7 +958,7 @@ pre-existing failures into feature success.
 | A009 | invalid/recoverable stream | instructions plus gaps account for every examined byte exactly once | byte-conservation assertion |
 | A010 | strict invalid stream | exit 1, empty stdout, typed stderr | captured and real-process tests |
 | A011 | decoded-byte and symbol-observation limits | no examined byte or retained alias crosses its limit; partial state names each truncation cause; requested-symbol count above the range budget is usage failure | limit boundary tests |
-| A012 | JSON report | valid empty and non-empty v1 examples round trip; wrong version, unknown field/enum, bad digest/hex, bad thin/container coordinate, duplicate slice identity, record disorder/overlap/hole, inconsistent instruction size, region/slice count sum, target option set, request extent, boundary, truncation flag, and complete/partial status each reject | full DTO validator negative matrix and JSON goldens |
+| A012 | JSON report | valid empty and non-empty v1 examples round trip, including a checked-in gap variant with raw bytes/code/message; wrong version, unknown field/enum, bad digest/hex, bad thin/container coordinate, duplicate slice identity, record disorder/overlap/hole, inconsistent instruction size, region/slice count sum, target option set, request extent, boundary, false zero-length byte/count truncation, truncation flag, and complete/partial status each reject | full DTO validator negative matrix and JSON goldens |
 | A013 | labels and branch targets | direct target comes from `InsnKind`; raw/display names and offsets are correct | x86-64 and arm64 fixtures |
 | A014 | malformed/missing section | usage error for grammar; input error for absent section; empty stdout | negative CLI tests |
 | A015 | missing/ambiguous/non-code symbol | exact diagnostic suggests address selection where applicable | negative analysis/CLI tests |
@@ -918,7 +974,7 @@ pre-existing failures into feature success.
 | A025 | common identity and offset coordinates | common identity preserves raw subtype and slice index; thin/container offsets agree for thin and differ by the exact fat slice base for fat | v1 JSON golden and checked-offset assertions |
 | A026 | nlist/export symbol followed by Objective-C IMP | selected symbol ends at the IMP, reports `end_source: objc_metadata`, and never decodes into the next owner | typed range assertion and text/JSON golden |
 | A027 | more same-VA aliases than `--max-ranges` | each unique source/name alias consumes one unit; canonical requested aliases reserve first; retained count equals the cap; truncation is true; output ordering and direct-target choice follow the locked precedence | alias-flood and exact-bound tests |
-| A028 | N/2N work scaling and export stream | observer counters satisfy every stated hash/metadata/decode/retention/output bound; 10x alias flood stays capped; malformed export traversal errors without a prefix | `disassembly_work_bounds` and `macho-dyld` visitor tests |
+| A028 | N/2N work scaling, atomic lookahead, and export stream | observer counters satisfy every stated hash/physical-metadata/section-index/range-query/decode/retention/output bound across N/2N byte, observation, region, and section fixtures, including one traversal for non-symbol selection, at most two for exact-symbol selection, truthful leaf decoder/input charging, and bounded unexamined lookahead; 10x alias flood stays capped; malformed export traversal errors without a prefix | `disassembly_work_bounds` plus raw nlist, export, and Objective-C transactional-fold tests |
 
 Unacceptable results:
 
@@ -950,14 +1006,16 @@ Unacceptable results:
 | V011 | compare real process and `run_captured` for valid text, valid JSON, usage failure, strict decode failure, and limit truncation | independent I/O route | byte-identical stdout, stderr, and exit status |
 | V012 | run captured and real-process output-policy matrix for disassemble SARIF, disassemble JSON/color-always, info JSON/color-always, audit SARIF auto/never, audit SARIF/color-always, and text color-always | shared output-policy regression | exact exit/code/channel behavior from A024; audit remains the sole SARIF success command |
 | V013 | `cargo test -p macho-dyld exports` | streaming export visitor, collecting compatibility, and malformed-trie behavior | visitor and collector agree on ordered valid exports; truncation/cycle/bounds cases fail without successful prefixes |
-| V014 | `cargo test -p macho-analysis --all-features disassembly_work_bounds` | executable work/allocation limits | N/2N counters remain within linear inequalities; record/raw-byte/alias caps hold; 10x alias flood truncates at the exact cap |
+| V014 | `cargo test -p macho-analysis --all-features disassembly_work_bounds` | executable work/allocation limits | N/2N counters and atomic over-budget recovery satisfy every metadata, decoder-attempt/input/lookahead, record/raw-byte, allocation, serialization, and alias inequality; 10x alias flood truncates at the exact cap |
 
 ## Exception ledger
 
 | ID | Type | Description | Owner | Requested by | Impact | User decision required | Status |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | E001 | baseline_churn | Planning-time architecture probes changed from import failure, to size failures, to green as unrelated analysis files moved; the latest `cargo xtask architecture` passes. | existing in-progress analysis work | planner | Refresh the gate before implementation and separate any renewed unrelated failure from feature failures; no baseline failure is fixed incidentally. | false | resolved |
-| E002 | dirty_overlap_risk | The shared dirty tree already contains changes under `macho-analysis::report`, CLI arguments/output/router, test support, and plan 15. | existing user/in-progress work | independent reviewer | Before implementation, reopen `git status` and diffs for every target; prefer new modules and additive tests, and STOP if same-line ownership cannot be isolated. | false | pending |
+| E002 | dirty_overlap_risk | The shared dirty tree already contains changes under `macho-analysis::report`, CLI arguments/output/router, test support, and plan 15. | existing user/in-progress work | independent reviewer | Implementation preserved the parallel Plan 18 signing slice, isolated Plan 17 additions where possible, and passed the combined whole-tree gate. | false | resolved |
+| E003 | performance_contract_amendment | The original one-pass requirement conflicted with exact next-owner resolution over unsorted metadata and memory bounded independently of observation count. The user approved at most two bounded traversals per authority so exactness and bounded retention remain required. | Plan 17 | implementor and implementation reviewer | Relaxes only traversal count; no selector behavior, exactness, malformed-metadata handling, retention bound, or verification is removed. | true | approved_by_user |
+| E004 | atomic_decode_work_accounting | Atomic invalid-unit budget handling may require looking past the remaining byte budget while leaving the whole unit unexamined. The user approved separate counters and bounds for every leaf decoder invocation, decoder input bytes, selector-eligible bytes, and unexamined lookahead; byte conservation and atomic budget behavior remain unchanged. | Plan 17 | implementation reviewer | Replaces only the impossible `decode_attempts <= examined_bytes + selected_region_count` inequality with truthful formulas that expose and bound unretained lookahead work. | true | approved_by_user |
 
 No skipped feature verification, behavior mismatch, or proposed scope reduction
 is accepted by this contract. Any such condition discovered during

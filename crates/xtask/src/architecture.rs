@@ -81,6 +81,18 @@ pub fn check(root: &Path) -> Result<()> {
             ) {
                 violations.push(violation);
             }
+            if dependency.name == "apple-codesign"
+                && (dependency.uses_default_features
+                    || dependency
+                        .features
+                        .iter()
+                        .any(|feature| matches!(feature.as_str(), "notarize" | "notarization")))
+            {
+                violations.push(format!(
+                    "macho signing must disable apple-codesign default/notarization features: {}",
+                    package.name
+                ));
+            }
         }
     }
 
@@ -120,6 +132,11 @@ fn dependency_violation(
     {
         return Some(format!(
             "symbol-demangling dependency {dependency} is owned by macho-symbols, not {package}"
+        ));
+    }
+    if dependency == "apple-codesign" && package != "macho-mutate" {
+        return Some(format!(
+            "signing dependency apple-codesign is owned by macho-mutate, not {package}"
         ));
     }
     None
@@ -567,9 +584,7 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
     };
     let mut facts = SourceFacts::default();
     facts.visit_file(&syntax);
-    let allowed_process = crate_name == "xtask"
-        || is_test
-        || crate_name == "macho-cli" && path == "crates/macho-cli/src/adapters/signing.rs";
+    let allowed_process = crate_name == "xtask" || is_test;
     if !allowed_process && facts.process_call {
         violations.push(format!(
             "host process reference outside adapters/tooling/tests: {path}"
@@ -696,6 +711,14 @@ mod tests {
                 None
             );
         }
+        assert!(
+            dependency_violation("macho-cli", "apple-codesign", &workspace_names, &allowed)
+                .is_some()
+        );
+        assert_eq!(
+            dependency_violation("macho-mutate", "apple-codesign", &workspace_names, &allowed),
+            None
+        );
     }
 
     #[test]
@@ -715,6 +738,11 @@ mod tests {
                 "macho-cli",
                 "crates/macho-cli/src/adapters.rs",
                 "fn fixture() { Command::new(\"xcrun\"); }",
+            ),
+            (
+                "macho-cli",
+                "crates/macho-cli/src/adapters/signing.rs",
+                "fn fixture() { std::process::Command::new(\"codesign\"); }",
             ),
             (
                 "macho-cli",
@@ -778,14 +806,6 @@ mod tests {
                 "macho-core",
                 Path::new("crates/macho-core/src/model.rs"),
                 "pub fn values() -> &'static [u8] { &[] }"
-            )
-            .is_empty()
-        );
-        assert!(
-            scan_source(
-                "macho-cli",
-                Path::new("crates/macho-cli/src/adapters/signing.rs"),
-                "fn fixture() { let tool = std::process::Command::new(\"xcrun\"); }"
             )
             .is_empty()
         );

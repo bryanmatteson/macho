@@ -14,9 +14,10 @@ Every implementation pass must read these interacting contracts together:
 | [`13-llm-header-inference-plan.md`](13-llm-header-inference-plan.md) | Optional offline model hypothesis artifacts and validation only |
 | [`15-architecture-coherence-implementation-plan.md`](15-architecture-coherence-implementation-plan.md) | Workspace ownership, dependencies, selective analysis, snapshot schema 3, ObjC/Swift integration, CLI delivery, and whole-tree gates |
 | [`16-evidence-first-c-cpp-recovery-plan.md`](16-evidence-first-c-cpp-recovery-plan.md) | Deterministic C/C++ recovery schema, identity, evidence, targeted execution, safe header projection, snapshots/diffs, and recovery verification |
+| [`17-disassemble-command-plan.md`](17-disassemble-command-plan.md) | Bounded subtype-aware instruction disassembly, typed reports, exact selectors, CLI delivery, and decode/export fail-closed corrections |
 | [`18-in-process-signing-plan.md`](18-in-process-signing-plan.md) | Process-free ad-hoc and PKCS#12 signing, final-layout verification, patch integration, and signing-specific gates |
 
-The serialized contract used by all four plans is
+The serialized language-recovery contract used by plans 10, 13, 15, and 16 is
 [`schemas/language-recovery-wire-v1.md`](schemas/language-recovery-wire-v1.md).
 It is normative for common report identities, JSON rules, header-syntax DTOs,
 closed enum/code registries, language reports, hypothesis artifacts, and the
@@ -79,8 +80,8 @@ Historical records cover:
 9. binary-data analysis.
 
 Surviving behavior from those records must be preserved when it does not
-conflict with an active authority. Current ownership and type names always come
-from plans 10, 13, 15, and 16.
+conflict with an active authority. Language and architecture ownership and type
+names come from plans 10, 13, 15, and 16; signing ownership comes from plan 18.
 
 ## Repository Anchors
 
@@ -94,13 +95,15 @@ from plans 10, 13, 15, and 16.
 - Shared C/C++/Objective-C header AST/parser/renderer/validator target:
   `crates/macho-header-syntax/src/`
 - Optional hypothesis artifacts: `crates/macho-header-infer/src/`
-- Mutation: `crates/macho-mutate/src/`
+- Mutation and in-process signing: `crates/macho-mutate/src/`
 - Feature-gated façade: `crates/macho/src/`
 - CLI grammar and output: `crates/macho-cli/src/`
 - Architecture/docs/release verifier: `crates/xtask/`
 - Plan acceptance evidence: `plans/evidence/`
 - Current amended completion record:
   [`evidence/15-amended-final.md`](evidence/15-amended-final.md)
+- In-process signing implementation record:
+  [`evidence/18-implementation-report.md`](evidence/18-implementation-report.md)
 
 The verified baseline had 18 packages; the completed workspace has the required
 nineteenth package at `crates/macho-header-syntax`. It is a production authority,

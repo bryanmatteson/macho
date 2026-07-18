@@ -1,0 +1,111 @@
+{
+  "command": "disassemble",
+  "data": {
+    "container": {
+      "byte_len": 367,
+      "container": "thin",
+      "content_sha256": "2bf72d8f38af6566c5d42457b4a09cd439507aa003c0b0d9a53aeb33898f8f51",
+      "slice_count": 1
+    },
+    "request": {
+      "arch": null,
+      "demangle": false,
+      "max_decoded_bytes_per_slice": 67108864,
+      "max_symbol_ranges_per_slice": 1000000,
+      "mode": "recovering",
+      "selection": {
+        "extent": {
+          "kind": "instruction_count",
+          "value": 2
+        },
+        "kind": "address",
+        "start_va": 4294967552
+      }
+    },
+    "schema_version": 1,
+    "slices": [
+      {
+        "container_offset": 0,
+        "decoded_bytes": 3,
+        "decoded_bytes_truncated": false,
+        "identity": {
+          "image": {
+            "architecture": {
+              "cpu_subtype": 3,
+              "cpu_type": 16777223
+            },
+            "byte_len": 367,
+            "container": "thin",
+            "content_sha256": "2bf72d8f38af6566c5d42457b4a09cd439507aa003c0b0d9a53aeb33898f8f51",
+            "slice_index": 0,
+            "uuid": null
+          }
+        },
+        "issues": [],
+        "regions": [
+          {
+            "emitted_instruction_count": 2,
+            "end_source": null,
+            "examined_end_va": 4294967555,
+            "instruction_flags": {
+              "pure_instructions": true,
+              "some_instructions": true
+            },
+            "labels": [
+              {
+                "display_name": "_main",
+                "raw_name": "_main",
+                "source": "nlist",
+                "va": 4294967552
+              }
+            ],
+            "next_unexamined_va": null,
+            "range_source": null,
+            "records": [
+              {
+                "bytes": "eb02",
+                "container_file_offset": 256,
+                "direct_target": {
+                  "display_symbol": "_helper",
+                  "offset": 0,
+                  "raw_symbol": "_helper",
+                  "source": "nlist",
+                  "va": 4294967556
+                },
+                "kind": "branch",
+                "record_type": "instruction",
+                "size": 2,
+                "text": "jmp short 0000000100000104h",
+                "thin_file_offset": 256,
+                "va": 4294967552
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 258,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 258,
+                "va": 4294967554
+              }
+            ],
+            "requested_end_va": null,
+            "requested_instruction_count": 2,
+            "section": "__text",
+            "segment": "__TEXT",
+            "selection_source": "address",
+            "start_va": 4294967552
+          }
+        ],
+        "slice_size": 367,
+        "status": "complete",
+        "symbol_ranges_truncated": false
+      }
+    ]
+  },
+  "diagnostics": [],
+  "ok": true,
+  "schema_version": 1
+}

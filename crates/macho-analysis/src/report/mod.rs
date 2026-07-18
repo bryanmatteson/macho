@@ -2,6 +2,8 @@
 
 mod canonical;
 mod common;
+/// Versioned disassembly report schema.
+pub mod disassembly;
 mod header;
 mod header_correlation;
 mod objc;

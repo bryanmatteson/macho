@@ -1,0 +1,781 @@
+{
+  "command": "disassemble",
+  "data": {
+    "container": {
+      "byte_len": 367,
+      "container": "thin",
+      "content_sha256": "2bf72d8f38af6566c5d42457b4a09cd439507aa003c0b0d9a53aeb33898f8f51",
+      "slice_count": 1
+    },
+    "request": {
+      "arch": null,
+      "demangle": false,
+      "max_decoded_bytes_per_slice": 67108864,
+      "max_symbol_ranges_per_slice": 1000000,
+      "mode": "recovering",
+      "selection": {
+        "kind": "executable_sections"
+      }
+    },
+    "schema_version": 1,
+    "slices": [
+      {
+        "container_offset": 0,
+        "decoded_bytes": 64,
+        "decoded_bytes_truncated": false,
+        "identity": {
+          "image": {
+            "architecture": {
+              "cpu_subtype": 3,
+              "cpu_type": 16777223
+            },
+            "byte_len": 367,
+            "container": "thin",
+            "content_sha256": "2bf72d8f38af6566c5d42457b4a09cd439507aa003c0b0d9a53aeb33898f8f51",
+            "slice_index": 0,
+            "uuid": null
+          }
+        },
+        "issues": [],
+        "regions": [
+          {
+            "emitted_instruction_count": 62,
+            "end_source": null,
+            "examined_end_va": 4294967616,
+            "instruction_flags": {
+              "pure_instructions": true,
+              "some_instructions": true
+            },
+            "labels": [
+              {
+                "display_name": "_main",
+                "raw_name": "_main",
+                "source": "nlist",
+                "va": 4294967552
+              },
+              {
+                "display_name": "_helper",
+                "raw_name": "_helper",
+                "source": "nlist",
+                "va": 4294967556
+              }
+            ],
+            "next_unexamined_va": null,
+            "range_source": null,
+            "records": [
+              {
+                "bytes": "eb02",
+                "container_file_offset": 256,
+                "direct_target": {
+                  "display_symbol": "_helper",
+                  "offset": 0,
+                  "raw_symbol": "_helper",
+                  "source": "nlist",
+                  "va": 4294967556
+                },
+                "kind": "branch",
+                "record_type": "instruction",
+                "size": 2,
+                "text": "jmp short 0000000100000104h",
+                "thin_file_offset": 256,
+                "va": 4294967552
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 258,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 258,
+                "va": 4294967554
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 259,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 259,
+                "va": 4294967555
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 260,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 260,
+                "va": 4294967556
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 261,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 261,
+                "va": 4294967557
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 262,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 262,
+                "va": 4294967558
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 263,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 263,
+                "va": 4294967559
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 264,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 264,
+                "va": 4294967560
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 265,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 265,
+                "va": 4294967561
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 266,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 266,
+                "va": 4294967562
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 267,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 267,
+                "va": 4294967563
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 268,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 268,
+                "va": 4294967564
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 269,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 269,
+                "va": 4294967565
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 270,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 270,
+                "va": 4294967566
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 271,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 271,
+                "va": 4294967567
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 272,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 272,
+                "va": 4294967568
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 273,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 273,
+                "va": 4294967569
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 274,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 274,
+                "va": 4294967570
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 275,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 275,
+                "va": 4294967571
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 276,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 276,
+                "va": 4294967572
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 277,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 277,
+                "va": 4294967573
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 278,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 278,
+                "va": 4294967574
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 279,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 279,
+                "va": 4294967575
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 280,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 280,
+                "va": 4294967576
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 281,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 281,
+                "va": 4294967577
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 282,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 282,
+                "va": 4294967578
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 283,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 283,
+                "va": 4294967579
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 284,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 284,
+                "va": 4294967580
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 285,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 285,
+                "va": 4294967581
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 286,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 286,
+                "va": 4294967582
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 287,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 287,
+                "va": 4294967583
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 288,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 288,
+                "va": 4294967584
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 289,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 289,
+                "va": 4294967585
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 290,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 290,
+                "va": 4294967586
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 291,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 291,
+                "va": 4294967587
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 292,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 292,
+                "va": 4294967588
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 293,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 293,
+                "va": 4294967589
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 294,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 294,
+                "va": 4294967590
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 295,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 295,
+                "va": 4294967591
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 296,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 296,
+                "va": 4294967592
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 297,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 297,
+                "va": 4294967593
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 298,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 298,
+                "va": 4294967594
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 299,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 299,
+                "va": 4294967595
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 300,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 300,
+                "va": 4294967596
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 301,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 301,
+                "va": 4294967597
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 302,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 302,
+                "va": 4294967598
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 303,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 303,
+                "va": 4294967599
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 304,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 304,
+                "va": 4294967600
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 305,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 305,
+                "va": 4294967601
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 306,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 306,
+                "va": 4294967602
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 307,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 307,
+                "va": 4294967603
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 308,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 308,
+                "va": 4294967604
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 309,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 309,
+                "va": 4294967605
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 310,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 310,
+                "va": 4294967606
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 311,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 311,
+                "va": 4294967607
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 312,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 312,
+                "va": 4294967608
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 313,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 313,
+                "va": 4294967609
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 314,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 314,
+                "va": 4294967610
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 315,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 315,
+                "va": 4294967611
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 316,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 316,
+                "va": 4294967612
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 317,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 317,
+                "va": 4294967613
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 318,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 318,
+                "va": 4294967614
+              },
+              {
+                "bytes": "0f",
+                "code": "insn.decode.invalid",
+                "container_file_offset": 319,
+                "message": "decode: invalid instruction",
+                "record_type": "gap",
+                "thin_file_offset": 319,
+                "va": 4294967615
+              }
+            ],
+            "requested_end_va": 4294967616,
+            "requested_instruction_count": null,
+            "section": "__text",
+            "segment": "__TEXT",
+            "selection_source": "executable_section",
+            "start_va": 4294967552
+          }
+        ],
+        "slice_size": 367,
+        "status": "partial",
+        "symbol_ranges_truncated": false
+      }
+    ]
+  },
+  "diagnostics": [],
+  "ok": true,
+  "schema_version": 1
+}

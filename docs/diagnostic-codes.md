@@ -13,6 +13,21 @@ unregistered constants, and rows without an owning constant.
 | `analysis.dependency.advisory_failed` | warning | An advisory prerequisite failed and analysis continued. |
 | `analysis.dependency.advisory_unsupported` | warning | An advisory prerequisite was unavailable and analysis continued. |
 | `analysis.dependency.required_failed` | error | A required prerequisite did not complete. |
+| `analysis.disassembly.address.cross_section` | error | An explicit address range crosses its file-backed section. |
+| `analysis.disassembly.address.unaligned` | error | A selected ARM instruction start is not four-byte aligned. |
+| `analysis.disassembly.address.unmapped` | error | A selected virtual address is outside file-backed section bytes. |
+| `analysis.disassembly.arch.ambiguous` | error | A display architecture name matches more than one raw CPU tuple. |
+| `analysis.disassembly.arch.unsupported` | error | A selected raw CPU tuple is absent or unsupported by the decoder. |
+| `analysis.disassembly.count.unsatisfied` | error | Natural section end was reached before the requested instruction count. |
+| `analysis.disassembly.report.invalid` | error | A schema-version-1 disassembly report is internally inconsistent. |
+| `analysis.disassembly.request.invalid` | error | A disassembly request has an invalid cross-field combination. |
+| `analysis.disassembly.section.invalid` | error | An exact section selector is malformed. |
+| `analysis.disassembly.section.missing` | error | An exact selected section is absent or not file-backed. |
+| `analysis.disassembly.selection.partial_instruction` | error | A caller-selected byte end falls inside a valid instruction. |
+| `analysis.disassembly.symbol.ambiguous` | error | An exact raw symbol name resolves to multiple virtual addresses. |
+| `analysis.disassembly.symbol.metadata_invalid` | error | Metadata required to prove symbol ownership is malformed. |
+| `analysis.disassembly.symbol.missing` | error | An exact raw symbol name is absent from nlist and export authorities. |
+| `analysis.disassembly.symbol.non_code` | error | An exact selected symbol is not backed by an instruction section. |
 | `analysis.dwarf.failed` | error | DWARF analysis failed while retaining its typed source. |
 | `analysis.dyld.failed` | error | Dyld analysis failed while retaining its typed source. |
 | `analysis.exports.failed` | warning | Export extraction failed and the selected domain returned an issue. |
@@ -29,6 +44,7 @@ unregistered constants, and rows without an owning constant.
 | `cli.input.failed` | error | The CLI could not map, parse, or select the requested input. |
 | `cli.policy.threshold` | error | A completed report crossed a caller-selected policy threshold. |
 | `cli.usage.invalid_arguments` | error | Command-line arguments do not satisfy the live command grammar. |
+| `cli.usage.color_machine` | error | Explicit color was requested for JSON or SARIF output. |
 | `cli.usage.unsupported_format` | error | The selected command does not support the requested output format. |
 | `codesign.address.invalid` | error | Code-signature metadata contains an address or offset that cannot be mapped safely. |
 | `codesign.bounds.exceeded` | error | Code-signature metadata references bytes outside the bounded input. |

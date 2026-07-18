@@ -34,7 +34,8 @@ pub use patch::{
     TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
 };
 pub use sign::{
-    AdhocSignatureProvider, SignatureProvider, SignatureProviderError, SignatureRequest,
+    InProcessSignatureProvider, SignatureKind, SignatureProvider, SignatureProviderError,
+    SignatureRequest, verify_signed_binary,
 };
 pub use transaction::{PatchPlan, PatchTransaction, PreparedPatch};
 

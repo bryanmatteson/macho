@@ -61,7 +61,9 @@ fn resign_plan_for_signed_binary() {
     assert!(plan.identifier.is_some());
     assert!(plan.hash_type.is_some());
     assert!(plan.has_cms_signature);
-    assert!(plan.suggested_command.contains("codesign"));
+    assert!(plan.suggested_command.starts_with("macho patch"));
+    assert!(plan.suggested_command.contains("--sign-p12"));
+    assert!(!plan.suggested_command.contains("xcrun"));
 }
 
 #[test]
@@ -109,7 +111,8 @@ fn resign_plan_display() {
     let plan = ResignPlan::from_mach(macho);
     let display = format!("{plan}");
     assert!(display.contains("Re-sign assistance:"));
-    assert!(display.contains("codesign"));
+    assert!(display.contains("Native command:"));
+    assert!(display.contains("macho patch"));
 }
 
 #[test]

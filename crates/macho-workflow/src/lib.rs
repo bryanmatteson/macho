@@ -5,7 +5,8 @@ use macho_analysis::diff::{DiffReport, diff_documents};
 use macho_analysis::{AnalysisPlan, Analyzer};
 use macho_mutate::preview::StructuralPatchPreview;
 use macho_mutate::{
-    PatchPlan, PatchTransaction, SignatureProvider, SignatureProviderError, SignatureRequest,
+    PatchPlan, PatchTransaction, SignatureKind, SignatureProvider, SignatureProviderError,
+    SignatureRequest,
 };
 
 /// Stage at which a semantic patch workflow failed.
@@ -123,16 +124,18 @@ pub fn execute(
         source: source.into(),
     })?;
 
-    let candidate = if let Some(signing) = signing {
-        signing
+    let (candidate, signing_kind) = if let Some(signing) = signing {
+        let kind = signing.provider.kind();
+        let bytes = signing
             .provider
             .sign(&prepared.bytes, signing.request)
             .map_err(|source| WorkflowError {
                 stage: WorkflowStage::Sign,
                 source: source.into(),
-            })?
+            })?;
+        (bytes, Some(kind))
     } else {
-        prepared.bytes
+        (prepared.bytes, None)
     };
     let after_container = macho_core::parse(&candidate).map_err(|source| WorkflowError {
         stage: WorkflowStage::ValidateAfter,
@@ -162,9 +165,20 @@ pub fn execute(
         })?;
     let semantic = diff_documents(&before_document, &after_document, analysis_plan.domains());
 
+    let mut structural = prepared.preview;
+    if let Some(kind) = signing_kind {
+        structural.signature_outcome = match kind {
+            SignatureKind::AdHoc => macho_mutate::preview::SignatureOutcome::SignedAdHoc,
+            SignatureKind::Certificate => {
+                macho_mutate::preview::SignatureOutcome::SignedCertificate
+            }
+        };
+        structural.resign_plan = None;
+    }
+
     Ok(WorkflowResult {
         preview: WorkflowPreview {
-            structural: prepared.preview,
+            structural,
             semantic,
         },
         bytes: candidate,
@@ -198,6 +212,10 @@ mod tests {
         ) -> Result<Vec<u8>, SignatureProviderError> {
             Ok(bytes.to_vec())
         }
+
+        fn kind(&self) -> SignatureKind {
+            SignatureKind::AdHoc
+        }
     }
 
     struct InvalidSigner;
@@ -209,6 +227,10 @@ mod tests {
             _request: &SignatureRequest,
         ) -> Result<Vec<u8>, SignatureProviderError> {
             Ok(vec![0, 0, 0, 0])
+        }
+
+        fn kind(&self) -> SignatureKind {
+            SignatureKind::AdHoc
         }
     }
 
@@ -236,6 +258,11 @@ mod tests {
         .expect("workflow succeeds");
         macho_core::parse(&result.bytes).expect("workflow returns strictly valid bytes");
         assert!(result.preview.semantic.findings.is_empty());
+        assert_eq!(
+            result.preview.structural.signature_outcome,
+            macho_mutate::preview::SignatureOutcome::SignedAdHoc
+        );
+        assert!(result.preview.structural.resign_plan.is_none());
     }
 
     #[test]

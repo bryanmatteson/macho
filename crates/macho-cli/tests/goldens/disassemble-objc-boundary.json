@@ -1,0 +1,120 @@
+{
+  "command": "disassemble",
+  "data": {
+    "container": {
+      "byte_len": 791,
+      "container": "thin",
+      "content_sha256": "b9e75f5656a6aff26f5ca9ec9975f9bff4c3ff1d963048080ed168088f6ea2e7",
+      "slice_count": 1
+    },
+    "request": {
+      "arch": null,
+      "demangle": false,
+      "max_decoded_bytes_per_slice": 67108864,
+      "max_symbol_ranges_per_slice": 1000000,
+      "mode": "recovering",
+      "selection": {
+        "kind": "symbols",
+        "names": [
+          "_main"
+        ]
+      }
+    },
+    "schema_version": 1,
+    "slices": [
+      {
+        "container_offset": 0,
+        "decoded_bytes": 4,
+        "decoded_bytes_truncated": false,
+        "identity": {
+          "image": {
+            "architecture": {
+              "cpu_subtype": 3,
+              "cpu_type": 16777223
+            },
+            "byte_len": 791,
+            "container": "thin",
+            "content_sha256": "b9e75f5656a6aff26f5ca9ec9975f9bff4c3ff1d963048080ed168088f6ea2e7",
+            "slice_index": 0,
+            "uuid": null
+          }
+        },
+        "issues": [],
+        "regions": [
+          {
+            "emitted_instruction_count": 3,
+            "end_source": "objc_metadata",
+            "examined_end_va": 4294967812,
+            "instruction_flags": {
+              "pure_instructions": true,
+              "some_instructions": true
+            },
+            "labels": [
+              {
+                "display_name": "_main",
+                "raw_name": "_main",
+                "source": "nlist",
+                "va": 4294967808
+              }
+            ],
+            "next_unexamined_va": null,
+            "range_source": "nlist",
+            "records": [
+              {
+                "bytes": "eb02",
+                "container_file_offset": 512,
+                "direct_target": {
+                  "display_symbol": "-[Fixture next]",
+                  "offset": 0,
+                  "raw_symbol": "-[Fixture next]",
+                  "source": "objc_metadata",
+                  "va": 4294967812
+                },
+                "kind": "branch",
+                "record_type": "instruction",
+                "size": 2,
+                "text": "jmp short 0000000100000204h",
+                "thin_file_offset": 512,
+                "va": 4294967808
+              },
+              {
+                "bytes": "90",
+                "container_file_offset": 514,
+                "direct_target": null,
+                "kind": "nop",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "nop",
+                "thin_file_offset": 514,
+                "va": 4294967810
+              },
+              {
+                "bytes": "c3",
+                "container_file_offset": 515,
+                "direct_target": null,
+                "kind": "return",
+                "record_type": "instruction",
+                "size": 1,
+                "text": "ret",
+                "thin_file_offset": 515,
+                "va": 4294967811
+              }
+            ],
+            "requested_end_va": 4294967812,
+            "requested_instruction_count": null,
+            "section": "__text",
+            "segment": "__TEXT",
+            "selection_source": "symbol",
+            "start_va": 4294967808
+          }
+        ],
+        "slice_size": 791,
+        "status": "complete",
+        "symbol_ranges_truncated": false
+      }
+    ]
+  },
+  "diagnostics": [],
+  "ok": true,
+  "schema_version": 1
+}

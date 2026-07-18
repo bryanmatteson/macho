@@ -14,5 +14,5 @@ pub mod sarif;
 
 pub use delivery::{Diagnostic, write_diagnostics, write_failure, write_success};
 pub use error::{Error, Result};
-pub use format::{ColorChoice, Format, Options};
+pub use format::{ColorChoice, Format, Options, PolicyError, validate_policy};
 pub use style::Style;

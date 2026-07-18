@@ -13,3 +13,6 @@ macho-core.workspace = true
 macho-dyld.workspace = true
 macho-header-syntax.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+macho-test-support.workspace = true

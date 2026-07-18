@@ -16,6 +16,8 @@ pub mod data_surface;
 pub mod deps;
 /// The diff module.
 pub mod diff;
+/// Disassembly command.
+pub mod disassemble;
 /// The dwarf module.
 pub mod dwarf;
 /// The dyld_cache module.

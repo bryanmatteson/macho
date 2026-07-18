@@ -1,0 +1,73 @@
+Decode selected executable instructions
+
+Usage: macho disassemble [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>
+          Path to the input file
+
+Options:
+      --arch <ARCH>
+          Select one architecture name, such as `arm64`, `arm64e`, or `x86_64`
+
+      --format <FORMAT>
+          Select the output representation
+
+          Possible values:
+          - text:  Human-readable text
+          - json:  Versioned JSON envelope
+          - sarif: SARIF 2.1 report
+          
+          [default: text]
+
+      --color <COLOR>
+          Control ANSI color in human-readable output
+
+          Possible values:
+          - auto:   Enable color only for a terminal that permits it
+          - always: Always enable color for human text output
+          - never:  Never emit ANSI color
+          
+          [default: auto]
+
+      --symbol <SYMBOL>
+          Select an exact raw nlist or export-trie symbol name (repeatable)
+
+      --section <SECTION>
+          Select an exact SEGMENT,SECTION pair (repeatable)
+
+      --address <ADDRESS>
+          Select one virtual address (hexadecimal, with optional 0x prefix)
+
+      --length <LENGTH>
+          Select this many bytes from --address (decimal or 0x-prefixed hexadecimal)
+
+      --count <COUNT>
+          Decode this many instructions from --address
+
+      --demangle
+          Demangle retained symbol labels while preserving their raw names
+
+      --strict
+          Fail on the first invalid byte or caller-clipped instruction
+
+      --max-decoded-bytes <MAX_DECODED_BYTES>
+          Maximum decoded bytes examined per selected slice
+          
+          [default: 67108864]
+
+      --max-ranges <MAX_RANGES>
+          Maximum symbol observations retained per selected slice
+          
+          [default: 1000000]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+SARIF output is supported only by the audit command.
+
+Examples:
+  macho disassemble app
+  macho disassemble app --arch arm64e --symbol _main
+  macho disassemble app --address 0x100003f50 --count 8
+  macho disassemble app --section __TEXT,__text --format json

@@ -60,6 +60,45 @@ impl fmt::Display for ColorChoice {
     }
 }
 
+/// Invalid combinations of shared output arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum PolicyError {
+    /// SARIF was selected for a command that does not produce SARIF reports.
+    #[error("SARIF output is supported only by the audit command")]
+    UnsupportedSarif,
+    /// Explicit ANSI color was requested for a machine-readable format.
+    #[error("--color always is incompatible with machine output")]
+    ColorMachine,
+}
+
+const UNSUPPORTED_FORMAT_CODE: &str = "cli.usage.unsupported_format";
+const COLOR_MACHINE_CODE: &str = "cli.usage.color_machine";
+
+impl PolicyError {
+    /// Stable diagnostic code for this usage-policy failure.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::UnsupportedSarif => UNSUPPORTED_FORMAT_CODE,
+            Self::ColorMachine => COLOR_MACHINE_CODE,
+        }
+    }
+}
+
+/// Validate shared output arguments before command dispatch.
+pub const fn validate_policy(
+    format: Format,
+    color: ColorChoice,
+    sarif_supported: bool,
+) -> Result<(), PolicyError> {
+    if format.is_machine() && matches!(color, ColorChoice::Always) {
+        return Err(PolicyError::ColorMachine);
+    }
+    if matches!(format, Format::Sarif) && !sarif_supported {
+        return Err(PolicyError::UnsupportedSarif);
+    }
+    Ok(())
+}
+
 /// Resolved rendering options for one output stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
@@ -128,7 +167,59 @@ impl Options {
 
 #[cfg(test)]
 mod tests {
-    use super::{ColorChoice, Format, Options};
+    use super::{ColorChoice, Format, Options, PolicyError, validate_policy};
+
+    #[test]
+    fn shared_output_policy_rejects_machine_color_and_non_audit_sarif() {
+        assert_eq!(
+            validate_policy(Format::Json, ColorChoice::Always, false),
+            Err(PolicyError::ColorMachine)
+        );
+        assert_eq!(
+            validate_policy(Format::Sarif, ColorChoice::Always, true),
+            Err(PolicyError::ColorMachine)
+        );
+        assert_eq!(
+            validate_policy(Format::Sarif, ColorChoice::Auto, false),
+            Err(PolicyError::UnsupportedSarif)
+        );
+        assert_eq!(PolicyError::ColorMachine.code(), "cli.usage.color_machine");
+        assert_eq!(
+            PolicyError::ColorMachine.to_string(),
+            "--color always is incompatible with machine output"
+        );
+        assert_eq!(
+            PolicyError::UnsupportedSarif.code(),
+            "cli.usage.unsupported_format"
+        );
+        assert_eq!(
+            PolicyError::UnsupportedSarif.to_string(),
+            "SARIF output is supported only by the audit command"
+        );
+    }
+
+    #[test]
+    fn shared_output_policy_preserves_text_color_and_audit_sarif() {
+        for color in [ColorChoice::Auto, ColorChoice::Always, ColorChoice::Never] {
+            assert_eq!(validate_policy(Format::Text, color, false), Ok(()));
+        }
+        assert_eq!(
+            validate_policy(Format::Json, ColorChoice::Auto, false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_policy(Format::Json, ColorChoice::Never, false),
+            Ok(())
+        );
+        assert_eq!(
+            validate_policy(Format::Sarif, ColorChoice::Auto, true),
+            Ok(())
+        );
+        assert_eq!(
+            validate_policy(Format::Sarif, ColorChoice::Never, true),
+            Ok(())
+        );
+    }
 
     #[test]
     fn machine_formats_never_enable_color() {

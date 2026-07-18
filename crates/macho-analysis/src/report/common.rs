@@ -60,6 +60,10 @@ impl HexBytes {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl<'de> Deserialize<'de> for HexBytes {
@@ -126,6 +130,12 @@ digest_type!(SwiftDiagnosticId);
 digest_type!(SwiftGapId);
 digest_type!(HypothesisId);
 digest_type!(ContentHash);
+
+impl ContentHash {
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+}
 
 macro_rules! exact_version {
     ($name:ident, $expected:literal) => {
@@ -291,6 +301,10 @@ impl CanonicalUuid {
                 _ => byte.is_ascii_digit() || (b'A'..=b'F').contains(&byte),
             });
         valid.then_some(Self(value)).ok_or(WireValueError::Uuid)
+    }
+
+    pub(crate) fn capacity(&self) -> usize {
+        self.0.capacity()
     }
 }
 

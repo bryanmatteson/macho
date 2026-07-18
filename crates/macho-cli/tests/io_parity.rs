@@ -144,6 +144,71 @@ fn production_and_injected_io_are_byte_identical() {
         "cli.usage.invalid_arguments"
     );
 
+    let colored_json = assert_process_matches_injected(vec![
+        OsString::from("info"),
+        OsString::from("--format"),
+        OsString::from("json"),
+        OsString::from("--color"),
+        OsString::from("always"),
+        old.clone().into_os_string(),
+    ]);
+    assert_eq!(colored_json.code, 2);
+    assert!(colored_json.stdout.is_empty());
+    let color_diagnostic: serde_json::Value =
+        serde_json::from_slice(&colored_json.stderr).expect("color usage envelope");
+    assert_eq!(
+        color_diagnostic["diagnostics"][0]["code"],
+        "cli.usage.color_machine"
+    );
+    assert_eq!(
+        color_diagnostic["diagnostics"][0]["message"],
+        "--color always is incompatible with machine output"
+    );
+
+    for color in ["auto", "never"] {
+        let audit_sarif = assert_process_matches_injected(vec![
+            OsString::from("audit"),
+            OsString::from("--format"),
+            OsString::from("sarif"),
+            OsString::from("--color"),
+            OsString::from(color),
+            old.clone().into_os_string(),
+        ]);
+        assert_eq!(audit_sarif.code, 0, "audit SARIF with color={color}");
+        assert!(audit_sarif.stderr.is_empty());
+        let report: serde_json::Value =
+            serde_json::from_slice(&audit_sarif.stdout).expect("valid SARIF report");
+        assert_eq!(report["version"], "2.1.0");
+    }
+
+    let colored_sarif = assert_process_matches_injected(vec![
+        OsString::from("audit"),
+        OsString::from("--format"),
+        OsString::from("sarif"),
+        OsString::from("--color"),
+        OsString::from("always"),
+        old.clone().into_os_string(),
+    ]);
+    assert_eq!(colored_sarif.code, 2);
+    assert!(colored_sarif.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(colored_sarif.stderr).expect("UTF-8 SARIF usage failure"),
+        "Error: --color always is incompatible with machine output\n"
+    );
+
+    let unsupported_sarif = assert_process_matches_injected(vec![
+        OsString::from("info"),
+        OsString::from("--format"),
+        OsString::from("sarif"),
+        old.clone().into_os_string(),
+    ]);
+    assert_eq!(unsupported_sarif.code, 2);
+    assert!(unsupported_sarif.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(unsupported_sarif.stderr).expect("UTF-8 SARIF usage failure"),
+        "Error: SARIF output is supported only by the audit command\n"
+    );
+
     let unwritable_output = fixture_path("unwritable-output");
     std::fs::create_dir_all(&unwritable_output).expect("create directory output obstacle");
     let output_failure = assert_process_matches_injected(vec![

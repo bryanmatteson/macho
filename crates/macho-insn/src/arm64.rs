@@ -195,8 +195,11 @@ fn classify(word: u32, va: u64) -> InsnKind {
         let immlo = ((word >> 29) & 0x3) as i32;
         let imm = (immhi << 2) | immlo;
         let offset = sign_extend_21(imm) as i64 * 4096;
-        let page_va = va & !0xFFF;
-        let target = (page_va as i64 + offset) - va as i64;
+        // Displacement from the instruction to the target page. Since
+        // `page_va == va & !0xFFF`, `(page_va + offset) - va` reduces to
+        // `offset - (va & 0xFFF)`, which stays in range instead of overflowing
+        // i64 when `va` sits near the sign boundary.
+        let target = offset - (va & 0xFFF) as i64;
         return InsnKind::PcRelative(PcRelInfo {
             displacement: target,
         });
