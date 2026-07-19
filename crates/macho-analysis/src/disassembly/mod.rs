@@ -4,6 +4,7 @@ mod decode;
 mod metadata;
 mod section_index;
 mod selection;
+mod sink;
 
 #[cfg(test)]
 mod tests;
@@ -17,14 +18,16 @@ use macho_core::model::header::ArchSpec;
 use macho_insn::Arch;
 
 use crate::report::disassembly::{
-    DisassemblyReport, DisassemblyReportRequest, DisassemblySchemaVersion, ReportAddressExtent,
-    ReportDecodeMode, ReportSectionSelector, ReportSelection,
+    DisassemblyReport, DisassemblyReportRequest, ReportAddressExtent, ReportDecodeMode,
+    ReportSectionSelector, ReportSelection,
 };
 use crate::report::{Architecture, ContainerKind, ReportContainerIdentity};
 
 use self::decode::decode_slice;
 use self::metadata::collect_metadata;
 use self::selection::{SelectedSlice, resolve_regions};
+use self::sink::CollectingSink;
+pub use self::sink::{DisassemblySink, RegionHeader, RegionSummary, SliceHeader, SliceSummary};
 
 /// Unsupported selected CPU tuple.
 pub const ARCH_UNSUPPORTED_CODE: &str = "analysis.disassembly.arch.unsupported";
@@ -56,6 +59,8 @@ pub const COUNT_UNSATISFIED_CODE: &str = "analysis.disassembly.count.unsatisfied
 pub const REQUEST_INVALID_CODE: &str = "analysis.disassembly.request.invalid";
 /// Internally or externally inconsistent schema-version-1 report.
 pub const REPORT_INVALID_CODE: &str = "analysis.disassembly.report.invalid";
+/// Failure writing streamed disassembly output through a sink.
+pub const OUTPUT_FAILED_CODE: &str = "analysis.disassembly.output.failed";
 
 /// Requested slices.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -332,6 +337,15 @@ impl DisassemblyError {
     }
 }
 
+impl From<std::io::Error> for DisassemblyError {
+    fn from(error: std::io::Error) -> Self {
+        Self::new(
+            OUTPUT_FAILED_CODE,
+            format!("failed to write disassembly output: {error}"),
+        )
+    }
+}
+
 /// Resolve a display architecture name or exact raw tuple against the input.
 pub fn resolve_architecture_selector(
     container: &MachoContainer<'_>,
@@ -383,19 +397,36 @@ pub fn resolve_architecture_selector(
     }
 }
 
-/// Execute a validated, bounded disassembly request.
+/// Execute a validated, bounded disassembly request, materializing the report.
 pub fn disassemble(
     container: &MachoContainer<'_>,
     request: &DisassemblyRequest,
 ) -> Result<DisassemblyReport, DisassemblyError> {
-    disassemble_inner(container, request, None)
+    let mut sink = CollectingSink::new();
+    streaming_inner(container, request, &mut sink, None)?;
+    let report = sink.into_report();
+    report
+        .validate()
+        .map_err(|error| DisassemblyError::new(REPORT_INVALID_CODE, error.to_string()))?;
+    Ok(report)
 }
 
-fn disassemble_inner(
+/// Execute a validated, bounded disassembly request, streaming each record to
+/// `sink` with output-side memory that is constant in the instruction count.
+pub fn disassemble_streaming(
     container: &MachoContainer<'_>,
     request: &DisassemblyRequest,
+    sink: &mut dyn DisassemblySink,
+) -> Result<(), DisassemblyError> {
+    streaming_inner(container, request, sink, None)
+}
+
+fn streaming_inner(
+    container: &MachoContainer<'_>,
+    request: &DisassemblyRequest,
+    sink: &mut dyn DisassemblySink,
     mut observer: Option<&mut WorkStats>,
-) -> Result<DisassemblyReport, DisassemblyError> {
+) -> Result<(), DisassemblyError> {
     validate_request(container, request)?;
     let selected = selected_slices(container, &request.arches)?;
     let report_request = report_request(request)?;
@@ -416,13 +447,13 @@ fn disassemble_inner(
         container: container_kind,
         slice_count: selected.len() as u32,
     };
+    sink.begin(&container_identity, &report_request)?;
 
     let symbol_mode = matches!(request.selection, DisassemblySelection::Symbols(_));
     let requested_names = match &request.selection {
         DisassemblySelection::Symbols(names) => names.as_slice(),
         _ => &[],
     };
-    let mut slices = Vec::with_capacity(selected.len());
     for selected_slice in selected {
         let mut metadata = collect_metadata(
             selected_slice.macho,
@@ -437,13 +468,14 @@ fn disassemble_inner(
             }
         }
         let regions = resolve_regions(&selected_slice, request, &metadata)?;
-        let decoded = decode_slice(
+        decode_slice(
             &selected_slice,
             request,
             regions,
             &mut metadata,
             container_hash.clone(),
             container_kind,
+            sink,
             observer.as_deref_mut(),
         )?;
         if let Some(stats) = observer.as_deref_mut() {
@@ -460,31 +492,12 @@ fn disassemble_inner(
             stats.label_range_queries += metadata.label_range_query_count();
             stats.target_owner_queries += metadata.target_owner_query_count();
         }
-        slices.push(decoded);
     }
-    let report = DisassemblyReport {
-        schema_version: DisassemblySchemaVersion::CURRENT,
-        container: container_identity,
-        request: report_request,
-        slices,
-    };
-    report
-        .validate()
-        .map_err(|error| DisassemblyError::new(REPORT_INVALID_CODE, error.to_string()))?;
-    if let Some(stats) = observer {
-        stats.serialized_bytes = serde_json::to_vec(&report)
-            .map_err(|error| {
-                DisassemblyError::new(
-                    REPORT_INVALID_CODE,
-                    format!("failed to measure serialized report: {error}"),
-                )
-            })?
-            .len() as u64;
-        stats.owned_report_bytes = owned_report_bytes(&report);
-    }
-    Ok(report)
+    sink.finish()?;
+    Ok(())
 }
 
+#[cfg(test)]
 fn owned_report_bytes(report: &DisassemblyReport) -> u64 {
     use std::mem::size_of;
 
@@ -569,7 +582,21 @@ fn disassemble_with_work_stats(
     request: &DisassemblyRequest,
 ) -> Result<(DisassemblyReport, WorkStats), DisassemblyError> {
     let mut stats = WorkStats::default();
-    let report = disassemble_inner(container, request, Some(&mut stats))?;
+    let mut sink = CollectingSink::new();
+    streaming_inner(container, request, &mut sink, Some(&mut stats))?;
+    let report = sink.into_report();
+    report
+        .validate()
+        .map_err(|error| DisassemblyError::new(REPORT_INVALID_CODE, error.to_string()))?;
+    stats.serialized_bytes = serde_json::to_vec(&report)
+        .map_err(|error| {
+            DisassemblyError::new(
+                REPORT_INVALID_CODE,
+                format!("failed to measure serialized report: {error}"),
+            )
+        })?
+        .len() as u64;
+    stats.owned_report_bytes = owned_report_bytes(&report);
     Ok((report, stats))
 }
 

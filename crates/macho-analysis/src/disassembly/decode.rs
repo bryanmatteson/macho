@@ -2,8 +2,7 @@ use macho_core::model::addr::ThinFileOffset;
 use macho_insn::{BranchTarget, Insn, InsnKind};
 
 use crate::report::disassembly::{
-    DirectTarget, DisassemblyRecord, DisassemblyRegion, DisassemblySlice, DisassemblyStatus,
-    InstructionKind,
+    DirectTarget, DisassemblyRecord, DisassemblyStatus, InstructionKind,
 };
 use crate::report::{
     CanonicalUuid, ContainerKind, ContentHash, HexBytes, ImageIdentity, ReportSliceIdentity,
@@ -11,8 +10,14 @@ use crate::report::{
 
 use super::metadata::Metadata;
 use super::selection::{RegionExtent, RegionPlan, SelectedSlice};
+use super::sink::{DisassemblySink, RegionHeader, RegionSummary, SliceHeader, SliceSummary};
 use super::{DecodeMode, DisassemblyError, DisassemblyRequest, WorkStats};
 
+// The streaming decode threads the selected slice, request, resolved plans,
+// mutable metadata, container identity, the event sink, and the optional
+// work-stats observer through one pass; splitting them would fragment the single
+// decode path without removing any argument.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn decode_slice(
     slice: &SelectedSlice<'_, '_>,
     request: &DisassemblyRequest,
@@ -20,8 +25,9 @@ pub(crate) fn decode_slice(
     metadata: &mut Metadata,
     container_hash: ContentHash,
     container_kind: ContainerKind,
+    sink: &mut dyn DisassemblySink,
     mut observer: Option<&mut WorkStats>,
-) -> Result<DisassemblySlice, DisassemblyError> {
+) -> Result<(), DisassemblyError> {
     let image_hash = if container_kind == ContainerKind::Thin {
         container_hash
     } else {
@@ -51,13 +57,18 @@ pub(crate) fn decode_slice(
         },
     };
 
+    sink.slice_start(SliceHeader {
+        identity,
+        container_offset: slice.container_offset,
+        slice_size: slice.macho.file_size() as u64,
+    })?;
+
     let mut remaining = request.max_decoded_bytes_per_slice.get() as u64;
     let mut decoded_bytes = 0u64;
     let mut decoded_bytes_truncated = false;
     let mut has_gap = false;
-    let mut regions = Vec::with_capacity(plans.len());
     for plan in plans {
-        let decoded = decode_region(slice, request, &plan, &mut remaining, metadata)?;
+        let decoded = decode_region(slice, request, &plan, &mut remaining, metadata, sink)?;
         decoded_bytes = decoded_bytes
             .checked_add(decoded.decoded_bytes)
             .ok_or_else(|| {
@@ -75,31 +86,28 @@ pub(crate) fn decode_slice(
             stats.decode_eligible_bytes += decoded.decode_eligible_bytes;
             stats.examined_bytes += decoded.decoded_bytes;
             stats.raw_bytes_retained += decoded.decoded_bytes;
-            stats.records_retained += decoded.region.records.len() as u64;
+            stats.records_retained += decoded.records_count;
         }
-        regions.push(decoded.region);
     }
     let partial =
         has_gap || decoded_bytes_truncated || metadata.truncated || !metadata.issues.is_empty();
-    Ok(DisassemblySlice {
-        identity,
-        container_offset: slice.container_offset,
-        slice_size: slice.macho.file_size() as u64,
-        status: if partial {
-            DisassemblyStatus::Partial
-        } else {
-            DisassemblyStatus::Complete
+    sink.slice_end(
+        SliceSummary {
+            status: if partial {
+                DisassemblyStatus::Partial
+            } else {
+                DisassemblyStatus::Complete
+            },
+            decoded_bytes,
+            decoded_bytes_truncated,
+            symbol_ranges_truncated: metadata.truncated,
         },
-        decoded_bytes,
-        decoded_bytes_truncated,
-        symbol_ranges_truncated: metadata.truncated,
-        regions,
-        issues: metadata.issues.clone(),
-    })
+        &metadata.issues,
+    )?;
+    Ok(())
 }
 
 struct DecodedRegion {
-    region: DisassemblyRegion,
     decoded_bytes: u64,
     truncated: bool,
     has_gap: bool,
@@ -107,6 +115,7 @@ struct DecodedRegion {
     decoder_input_bytes: u64,
     unexamined_lookahead_bytes: u64,
     decode_eligible_bytes: u64,
+    records_count: u64,
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +156,7 @@ fn decode_region(
     plan: &RegionPlan,
     remaining: &mut u64,
     metadata: &Metadata,
+    sink: &mut dyn DisassemblySink,
 ) -> Result<DecodedRegion, DisassemblyError> {
     let start_delta = plan.start.checked_sub(plan.section_start).ok_or_else(|| {
         DisassemblyError::new(
@@ -195,8 +205,19 @@ fn decode_region(
         RegionExtent::Instructions(count) => Some(count),
         RegionExtent::Bytes(_) => None,
     };
+    sink.region_start(RegionHeader {
+        segment: plan.segment.clone(),
+        section: plan.section.clone(),
+        selection_source: plan.selection_source,
+        range_source: plan.range_source,
+        end_source: plan.end_source,
+        start_va: plan.start,
+        requested_end_va: byte_end,
+        requested_instruction_count: requested_count,
+        instruction_flags: plan.flags,
+    })?;
     let mut cursor = plan.start;
-    let mut records = Vec::new();
+    let mut records_count = 0u64;
     let mut instruction_count = 0u64;
     let mut has_gap = false;
     let mut truncated = false;
@@ -278,14 +299,19 @@ fn decode_region(
                     }
                     let bytes = &tail[..selected_len as usize];
                     work.cover_pending_probe(cursor);
-                    records.push(gap_record(
-                        slice,
-                        plan,
-                        cursor,
-                        bytes,
-                        "analysis.disassembly.selection.partial_instruction",
-                        "selection ends inside a valid instruction",
-                    )?);
+                    emit_record(
+                        sink,
+                        metadata,
+                        gap_record(
+                            slice,
+                            plan,
+                            cursor,
+                            bytes,
+                            "analysis.disassembly.selection.partial_instruction",
+                            "selection ends inside a valid instruction",
+                        )?,
+                    )?;
+                    records_count += 1;
                     *remaining -= selected_len;
                     cursor = end;
                     has_gap = true;
@@ -303,15 +329,12 @@ fn decode_region(
                         DisassemblyError::new(macho_insn::DecodeError::CODE, error.to_string())
                     })?;
                 work.cover_pending_probe(cursor);
-                records.push(instruction_record(
-                    slice,
-                    plan,
-                    cursor,
-                    bytes,
-                    text,
-                    &instruction,
+                emit_record(
+                    sink,
                     metadata,
-                )?);
+                    instruction_record(slice, plan, cursor, bytes, text, &instruction, metadata)?,
+                )?;
+                records_count += 1;
                 *remaining -= len;
                 cursor = instruction_end;
                 instruction_count += 1;
@@ -346,14 +369,19 @@ fn decode_region(
                     break;
                 }
                 work.cover_pending_probe(cursor);
-                records.push(gap_record(
-                    slice,
-                    plan,
-                    cursor,
-                    &tail[..gap_len as usize],
-                    macho_insn::DecodeError::CODE,
-                    &error.to_string(),
-                )?);
+                emit_record(
+                    sink,
+                    metadata,
+                    gap_record(
+                        slice,
+                        plan,
+                        cursor,
+                        &tail[..gap_len as usize],
+                        macho_insn::DecodeError::CODE,
+                        &error.to_string(),
+                    )?,
+                )?;
+                records_count += 1;
                 *remaining -= gap_len;
                 cursor += gap_len;
                 has_gap = true;
@@ -374,23 +402,15 @@ fn decode_region(
     let labels_end = cursor;
     let labels = metadata.labels_between(plan.start, labels_end);
     let decoded_bytes = cursor - plan.start;
-    Ok(DecodedRegion {
-        region: DisassemblyRegion {
-            segment: plan.segment.clone(),
-            section: plan.section.clone(),
-            selection_source: plan.selection_source,
-            range_source: plan.range_source,
-            end_source: plan.end_source,
-            start_va: plan.start,
-            requested_end_va: byte_end,
-            requested_instruction_count: requested_count,
+    sink.region_end(
+        RegionSummary {
             emitted_instruction_count: instruction_count,
             examined_end_va: cursor,
             next_unexamined_va: truncated.then_some(cursor),
-            instruction_flags: plan.flags,
-            labels,
-            records,
         },
+        &labels,
+    )?;
+    Ok(DecodedRegion {
         decoded_bytes,
         truncated,
         has_gap,
@@ -398,7 +418,18 @@ fn decode_region(
         decoder_input_bytes: work.decoder_input_bytes,
         unexamined_lookahead_bytes: work.unexamined_lookahead_bytes,
         decode_eligible_bytes,
+        records_count,
     })
+}
+
+/// Emit one record to the sink with the labels whose VA equals the record VA.
+fn emit_record(
+    sink: &mut dyn DisassemblySink,
+    metadata: &Metadata,
+    record: DisassemblyRecord,
+) -> Result<(), DisassemblyError> {
+    let labels = metadata.labels_at(record.va());
+    sink.record(&record, &labels)
 }
 
 struct ExtendedGap {

@@ -16,6 +16,7 @@ Every implementation pass must read these interacting contracts together:
 | [`16-evidence-first-c-cpp-recovery-plan.md`](16-evidence-first-c-cpp-recovery-plan.md) | Deterministic C/C++ recovery schema, identity, evidence, targeted execution, safe header projection, snapshots/diffs, and recovery verification |
 | [`17-disassemble-command-plan.md`](17-disassemble-command-plan.md) | Bounded subtype-aware instruction disassembly, typed reports, exact selectors, CLI delivery, and decode/export fail-closed corrections |
 | [`18-in-process-signing-plan.md`](18-in-process-signing-plan.md) | Process-free ad-hoc and PKCS#12 signing, final-layout verification, patch integration, and signing-specific gates |
+| [`19-streaming-disassembly-plan.md`](19-streaming-disassembly-plan.md) | Line-oriented streaming `macho disassemble` delivery: constant-memory text and NDJSON output over a sink event core, with the materialized report API retained on the same decode path |
 
 The serialized language-recovery contract used by plans 10, 13, 15, and 16 is
 [`schemas/language-recovery-wire-v1.md`](schemas/language-recovery-wire-v1.md).
@@ -26,7 +27,8 @@ projections; the schema document wins if wording differs.
 
 Plan 15 owns placement and shared execution/delivery mechanics. Plan 18 amends
 plan 15's former host-signing exception and owns the in-process raw Mach-O
-signing contract. Plan 10 owns
+signing contract. Plan 19 amends plan 17's disassembly delivery model to
+line-oriented streaming (text and NDJSON) with constant output memory. Plan 10 owns
 Objective-C behavior. Plan 16 owns deterministic C/C++ behavior. Plan 13 consumes
 validated plan-16 artifacts and cannot change deterministic facts. If wording
 appears to overlap, that ownership order resolves it; a contradiction must be

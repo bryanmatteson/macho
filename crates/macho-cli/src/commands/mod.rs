@@ -497,77 +497,98 @@ where
                 return ExitStatus::USAGE_ERROR;
             }
 
-            let mut rendered = Vec::new();
-            let mut warnings = Vec::new();
-            match dispatch(cli.command, output_options, &mut rendered, &mut warnings) {
-                Ok(()) => {
-                    if let Err(error) =
-                        output::write_success(io.stdout, output_options, command_name, &rendered)
-                    {
-                        let _ = output::write_failure(
-                            io.stderr,
-                            diagnostic_options,
-                            command_name,
-                            EXECUTION_FAILED_CODE,
-                            &error.to_string(),
-                        );
-                        return ExitStatus::EXECUTION_FAILURE;
+            match cli.command {
+                Commands::Disassemble(disassemble_args) => finish_stream(
+                    subcommands::disassemble::run_streaming(
+                        disassemble_args,
+                        output_options,
+                        io.stdout,
+                    )
+                    .map_err(CliError::from_anyhow),
+                    io,
+                    diagnostic_options,
+                    command_name,
+                ),
+                command => {
+                    let mut rendered = Vec::new();
+                    let mut warnings = Vec::new();
+                    match dispatch(command, output_options, &mut rendered, &mut warnings) {
+                        Ok(()) => {
+                            if let Err(error) = output::write_success(
+                                io.stdout,
+                                output_options,
+                                command_name,
+                                &rendered,
+                            ) {
+                                let _ = output::write_failure(
+                                    io.stderr,
+                                    diagnostic_options,
+                                    command_name,
+                                    EXECUTION_FAILED_CODE,
+                                    &error.to_string(),
+                                );
+                                return ExitStatus::EXECUTION_FAILURE;
+                            }
+                            let _ = output::write_diagnostics(
+                                io.stderr,
+                                diagnostic_options,
+                                command_name,
+                                &warnings,
+                            );
+                            ExitStatus::SUCCESS
+                        }
+                        Err(err) if err.kind == CliErrorKind::Policy => {
+                            if let Err(error) = output::write_success(
+                                io.stdout,
+                                output_options,
+                                command_name,
+                                &rendered,
+                            ) {
+                                let _ = output::write_failure(
+                                    io.stderr,
+                                    diagnostic_options,
+                                    command_name,
+                                    EXECUTION_FAILED_CODE,
+                                    &error.to_string(),
+                                );
+                                return ExitStatus::EXECUTION_FAILURE;
+                            }
+                            let _ = output::write_diagnostics(
+                                io.stderr,
+                                diagnostic_options,
+                                command_name,
+                                &warnings,
+                            );
+                            let _ = output::write_failure(
+                                io.stderr,
+                                diagnostic_options,
+                                command_name,
+                                err.code(),
+                                &err.to_string(),
+                            );
+                            ExitStatus::POLICY_FAILURE
+                        }
+                        Err(err) if err.kind == CliErrorKind::Usage => {
+                            let _ = output::write_failure(
+                                io.stderr,
+                                diagnostic_options,
+                                command_name,
+                                err.code(),
+                                &err.to_string(),
+                            );
+                            ExitStatus::USAGE_ERROR
+                        }
+                        Err(err) => {
+                            let _ = output::write_failure(
+                                io.stderr,
+                                diagnostic_options,
+                                command_name,
+                                err.code(),
+                                &err.to_string(),
+                            );
+                            ExitStatus::EXECUTION_FAILURE
+                        }
                     }
-                    let _ = output::write_diagnostics(
-                        io.stderr,
-                        diagnostic_options,
-                        command_name,
-                        &warnings,
-                    );
-                    ExitStatus::SUCCESS
-                }
-                Err(err) if err.kind == CliErrorKind::Policy => {
-                    if let Err(error) =
-                        output::write_success(io.stdout, output_options, command_name, &rendered)
-                    {
-                        let _ = output::write_failure(
-                            io.stderr,
-                            diagnostic_options,
-                            command_name,
-                            EXECUTION_FAILED_CODE,
-                            &error.to_string(),
-                        );
-                        return ExitStatus::EXECUTION_FAILURE;
-                    }
-                    let _ = output::write_diagnostics(
-                        io.stderr,
-                        diagnostic_options,
-                        command_name,
-                        &warnings,
-                    );
-                    let _ = output::write_failure(
-                        io.stderr,
-                        diagnostic_options,
-                        command_name,
-                        err.code(),
-                        &err.to_string(),
-                    );
-                    ExitStatus::POLICY_FAILURE
-                }
-                Err(err) if err.kind == CliErrorKind::Usage => {
-                    let _ = output::write_failure(
-                        io.stderr,
-                        diagnostic_options,
-                        command_name,
-                        err.code(),
-                        &err.to_string(),
-                    );
-                    ExitStatus::USAGE_ERROR
-                }
-                Err(err) => {
-                    let _ = output::write_failure(
-                        io.stderr,
-                        diagnostic_options,
-                        command_name,
-                        err.code(),
-                        &err.to_string(),
-                    );
-                    ExitStatus::EXECUTION_FAILURE
                 }
             }
         }
@@ -586,6 +607,50 @@ where
                 );
                 ExitStatus::USAGE_ERROR
             }
+        }
+    }
+}
+
+/// Finish a streaming command that wrote directly to stdout: map any error to a
+/// typed stderr diagnostic and exit status. Streamed commands emit their issues
+/// in-band, so there is no separate diagnostics channel to flush here.
+fn finish_stream(
+    result: Result<(), CliError>,
+    io: &mut CliIo<'_>,
+    diagnostic_options: OutputOptions,
+    command_name: &str,
+) -> ExitStatus {
+    match result {
+        Ok(()) => ExitStatus::SUCCESS,
+        Err(err) if err.kind == CliErrorKind::Policy => {
+            let _ = output::write_failure(
+                io.stderr,
+                diagnostic_options,
+                command_name,
+                err.code(),
+                &err.to_string(),
+            );
+            ExitStatus::POLICY_FAILURE
+        }
+        Err(err) if err.kind == CliErrorKind::Usage => {
+            let _ = output::write_failure(
+                io.stderr,
+                diagnostic_options,
+                command_name,
+                err.code(),
+                &err.to_string(),
+            );
+            ExitStatus::USAGE_ERROR
+        }
+        Err(err) => {
+            let _ = output::write_failure(
+                io.stderr,
+                diagnostic_options,
+                command_name,
+                err.code(),
+                &err.to_string(),
+            );
+            ExitStatus::EXECUTION_FAILURE
         }
     }
 }
@@ -620,7 +685,9 @@ fn dispatch(
         Commands::Cpp(args) => subcommands::cpp::run(args, output, out),
         Commands::C(args) => subcommands::c::run(args, output, out),
         // Analysis
-        Commands::Disassemble(args) => subcommands::disassemble::run(args, output, out),
+        Commands::Disassemble(_) => {
+            unreachable!("disassemble streams to stdout before dispatch")
+        }
         Commands::Diff(args) => subcommands::diff::run(args, format, out),
         Commands::Audit(args) => subcommands::audit::run(args, format, out),
         Commands::Container(args) => subcommands::container::run(args, format, out),

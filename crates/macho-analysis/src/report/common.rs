@@ -61,6 +61,7 @@ impl HexBytes {
         &self.0
     }
 
+    #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
         self.0.capacity()
     }
@@ -132,6 +133,7 @@ digest_type!(HypothesisId);
 digest_type!(ContentHash);
 
 impl ContentHash {
+    #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
         self.0.capacity()
     }
@@ -303,6 +305,7 @@ impl CanonicalUuid {
         valid.then_some(Self(value)).ok_or(WireValueError::Uuid)
     }
 
+    #[cfg(test)]
     pub(crate) fn capacity(&self) -> usize {
         self.0.capacity()
     }

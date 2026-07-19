@@ -6,7 +6,7 @@ mod disassembly_objc;
 mod disassembly_scale;
 
 pub use disassembly_objc::{disassembly_objc_boundary, disassembly_objc_category_labels};
-pub use disassembly_scale::disassembly_x86_64_sections;
+pub use disassembly_scale::{disassembly_x86_64_dense, disassembly_x86_64_sections};
 
 /// CPU type used by [`thin64_arm64`].
 pub const CPU_TYPE_ARM64: u32 = 0x0100_000c;

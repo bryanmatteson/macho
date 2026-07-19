@@ -19,6 +19,7 @@ unregistered constants, and rows without an owning constant.
 | `analysis.disassembly.arch.ambiguous` | error | A display architecture name matches more than one raw CPU tuple. |
 | `analysis.disassembly.arch.unsupported` | error | A selected raw CPU tuple is absent or unsupported by the decoder. |
 | `analysis.disassembly.count.unsatisfied` | error | Natural section end was reached before the requested instruction count. |
+| `analysis.disassembly.output.failed` | error | Streamed disassembly output could not be written to its destination. |
 | `analysis.disassembly.report.invalid` | error | A schema-version-1 disassembly report is internally inconsistent. |
 | `analysis.disassembly.request.invalid` | error | A disassembly request has an invalid cross-field combination. |
 | `analysis.disassembly.section.invalid` | error | An exact section selector is malformed. |

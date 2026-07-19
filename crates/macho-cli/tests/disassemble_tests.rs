@@ -29,6 +29,21 @@ fn strip_ansi(text: &str) -> String {
     plain
 }
 
+/// Parse the disassemble NDJSON stream: one complete JSON object per non-empty
+/// line, in emission order.
+fn ndjson(stdout: &[u8]) -> Vec<serde_json::Value> {
+    stdout
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("each NDJSON line is one JSON object"))
+        .collect()
+}
+
+/// Borrow every line whose `event` tag equals `event`, in emission order.
+fn events<'a>(lines: &'a [serde_json::Value], event: &str) -> Vec<&'a serde_json::Value> {
+    lines.iter().filter(|line| line["event"] == event).collect()
+}
+
 fn assert_json_error(path: &str, extra: &[&str], expected_code: &str, expected_exit: u8) {
     let mut args = vec!["disassemble", path];
     args.extend_from_slice(extra);
@@ -99,11 +114,10 @@ fn thin_x86_64_default_selection_has_text_and_gap_json_goldens() {
         json.stdout,
         include_str!("goldens/disassemble-thin-x86-default.json").as_bytes()
     );
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    let gap = value["data"]["slices"][0]["regions"][0]["records"]
-        .as_array()
-        .unwrap()
-        .iter()
+    let lines = ndjson(&json.stdout);
+    let gap = events(&lines, "record")
+        .into_iter()
+        .map(|line| &line["record"])
         .find(|record| record["record_type"] == "gap")
         .expect("recovering output must retain the invalid trailing byte as a gap");
     assert_eq!(gap["bytes"], "0f");
@@ -126,15 +140,14 @@ fn empty_executable_selection_has_a_complete_machine_and_text_shape() {
         "--color",
         "never",
     ]);
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let lines = ndjson(&json.stdout);
     assert_eq!(json.code, 0);
-    assert_eq!(value["data"]["slices"][0]["status"], "complete");
-    assert!(
-        value["data"]["slices"][0]["regions"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    let slice_ends = events(&lines, "slice_end");
+    assert_eq!(slice_ends.len(), 1);
+    assert_eq!(slice_ends[0]["status"], "complete");
+    // No executable sections means the slice carries no region and no record.
+    assert!(events(&lines, "region").is_empty());
+    assert!(events(&lines, "record").is_empty());
     std::fs::remove_file(path).unwrap();
 }
 
@@ -186,14 +199,8 @@ fn section_symbol_and_address_failures_keep_exact_codes_and_channels() {
         "never",
     ]);
     assert_eq!(repeated.code, 0);
-    let value: serde_json::Value = serde_json::from_slice(&repeated.stdout).unwrap();
-    assert_eq!(
-        value["data"]["slices"][0]["regions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    let lines = ndjson(&repeated.stdout);
+    assert_eq!(events(&lines, "region").len(), 1);
 
     let repeated_symbols = macho_cli::run_captured([
         "disassemble",
@@ -210,18 +217,13 @@ fn section_symbol_and_address_failures_keep_exact_codes_and_channels() {
         "never",
     ]);
     assert_eq!(repeated_symbols.code, 0);
-    let value: serde_json::Value = serde_json::from_slice(&repeated_symbols.stdout).unwrap();
+    let lines = ndjson(&repeated_symbols.stdout);
+    let header = events(&lines, "header");
     assert_eq!(
-        value["data"]["request"]["selection"]["names"],
+        header[0]["request"]["selection"]["names"],
         serde_json::json!(["_helper", "_main"])
     );
-    assert_eq!(
-        value["data"]["slices"][0]["regions"]
-            .as_array()
-            .unwrap()
-            .len(),
-        2
-    );
+    assert_eq!(events(&lines, "region").len(), 2);
 
     assert_json_error(
         x86,
@@ -365,16 +367,16 @@ fn recovering_text_json_and_color_share_one_report() {
         "--color",
         "never",
     ]);
-    let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let lines = ndjson(&json.stdout);
+    // D1: the enveloped `{command, ok, data}` document is gone; success is a
+    // zero exit with a clean stderr and a well-formed NDJSON stream whose header
+    // carries the schema version the old `data.schema_version` asserted.
     assert_eq!(json.code, 0);
     assert!(json.stderr.is_empty());
-    assert_eq!(envelope["command"], "disassemble");
-    assert_eq!(envelope["ok"], true);
-    assert_eq!(envelope["data"]["schema_version"], 1);
-    assert_eq!(
-        envelope["data"]["slices"][0]["regions"][0]["selection_source"],
-        "address"
-    );
+    let header = events(&lines, "header");
+    assert_eq!(header.len(), 1);
+    assert_eq!(header[0]["schema_version"], 1);
+    assert_eq!(events(&lines, "region")[0]["selection_source"], "address");
     assert_eq!(
         json.stdout,
         include_str!("goldens/disassemble-address-count2.json").as_bytes()
@@ -416,16 +418,13 @@ fn objc_boundary_parser_path_has_text_and_json_goldens() {
         json.stdout,
         include_str!("goldens/disassemble-objc-boundary.json").as_bytes()
     );
-    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
-    assert_eq!(
-        value["data"]["slices"][0]["regions"][0]["end_source"],
-        "objc_metadata"
-    );
+    let lines = ndjson(&json.stdout);
+    assert_eq!(events(&lines, "region")[0]["end_source"], "objc_metadata");
     std::fs::remove_file(path).unwrap();
 }
 
 #[test]
-fn strict_failure_is_empty_and_typed_in_both_io_routes() {
+fn strict_failure_streams_a_typed_prefix_in_both_io_routes() {
     let path = fixture_path("strict", &macho_test_support::disassembly_x86_64());
     let args = [
         "disassemble",
@@ -438,7 +437,19 @@ fn strict_failure_is_empty_and_typed_in_both_io_routes() {
     ];
     let captured = macho_cli::run_captured(args);
     assert_eq!(captured.code, 1);
-    assert!(captured.stdout.is_empty());
+    // D3: a stream cannot retract already-written lines, so the records decoded
+    // before the invalid byte precede the typed error on stdout. The prefix is
+    // well-formed NDJSON and, because strict aborts instead of recovering, it
+    // never contains the invalid byte as a gap record.
+    assert!(!captured.stdout.is_empty());
+    let lines = ndjson(&captured.stdout);
+    assert!(!events(&lines, "record").is_empty());
+    assert!(
+        !events(&lines, "record")
+            .iter()
+            .any(|line| line["record"]["record_type"] == "gap"),
+        "strict mode must abort on the invalid byte, not emit it as a gap"
+    );
     let diagnostic: serde_json::Value = serde_json::from_slice(&captured.stderr).unwrap();
     assert_eq!(diagnostic["diagnostics"][0]["code"], "insn.decode.invalid");
 
@@ -520,10 +531,11 @@ fn fat_requires_arch_for_addresses_and_raw_tuple_selects_exactly() {
         "{}",
         String::from_utf8_lossy(&selected.stderr)
     );
-    let envelope: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
-    assert_eq!(envelope["data"]["slices"].as_array().unwrap().len(), 1);
+    let lines = ndjson(&selected.stdout);
+    let slices = events(&lines, "slice");
+    assert_eq!(slices.len(), 1);
     assert_eq!(
-        envelope["data"]["slices"][0]["identity"]["image"]["architecture"]["cpu_subtype"],
+        slices[0]["identity"]["image"]["architecture"]["cpu_subtype"],
         2
     );
     std::fs::remove_file(path).unwrap();
@@ -549,12 +561,12 @@ fn fat_all_slice_json_order_offsets_and_process_route_are_stable() {
         "{}",
         String::from_utf8_lossy(&captured.stderr)
     );
-    let value: serde_json::Value = serde_json::from_slice(&captured.stdout).unwrap();
+    let lines = ndjson(&captured.stdout);
     assert_eq!(
         captured.stdout,
         include_str!("goldens/disassemble-fat-all.json").as_bytes()
     );
-    let slices = value["data"]["slices"].as_array().unwrap();
+    let slices = events(&lines, "slice");
     assert_eq!(slices.len(), 2);
     assert_eq!(
         slices[0]["identity"]["image"]["architecture"]["cpu_type"],
@@ -564,14 +576,29 @@ fn fat_all_slice_json_order_offsets_and_process_route_are_stable() {
         slices[1]["identity"]["image"]["architecture"]["cpu_type"],
         0x0100_000c
     );
-    for slice in slices {
-        let base = slice["container_offset"].as_u64().unwrap();
-        let record = &slice["regions"][0]["records"][0];
-        assert_eq!(
-            record["container_file_offset"].as_u64().unwrap(),
-            base + record["thin_file_offset"].as_u64().unwrap()
-        );
+    // Walk the ordered stream: every record's container_file_offset equals its
+    // owning slice's container_offset plus its thin_file_offset.
+    let mut container_offset: Option<u64> = None;
+    let mut records_checked = 0usize;
+    for line in &lines {
+        match line["event"].as_str().unwrap() {
+            "slice" => container_offset = Some(line["container_offset"].as_u64().unwrap()),
+            "record" => {
+                let base = container_offset.expect("a slice precedes every record");
+                let record = &line["record"];
+                assert_eq!(
+                    record["container_file_offset"].as_u64().unwrap(),
+                    base + record["thin_file_offset"].as_u64().unwrap()
+                );
+                records_checked += 1;
+            }
+            _ => {}
+        }
     }
+    assert!(
+        records_checked >= slices.len(),
+        "both slices must contribute at least one checked record"
+    );
     let process = Command::new(env!("CARGO_BIN_EXE_macho"))
         .args(args)
         .output()
@@ -621,9 +648,9 @@ fn architecture_collision_and_unsupported_slices_are_explicit() {
         "never",
     ]);
     assert_eq!(selected.code, 0);
-    let value: serde_json::Value = serde_json::from_slice(&selected.stdout).unwrap();
+    let lines = ndjson(&selected.stdout);
     assert_eq!(
-        value["data"]["slices"][0]["identity"]["image"]["architecture"]["cpu_subtype"],
+        events(&lines, "slice")[0]["identity"]["image"]["architecture"]["cpu_subtype"],
         8
     );
 

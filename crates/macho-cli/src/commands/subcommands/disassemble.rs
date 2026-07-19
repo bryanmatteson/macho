@@ -1,22 +1,27 @@
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::num::NonZeroUsize;
 
 use anyhow::Result;
 use macho::analysis::disassembly::{
-    AddressExtent, DecodeMode, DisassemblyRequest, DisassemblySelection, NonEmpty, SectionSelector,
-    SliceSelection, disassemble, resolve_architecture_selector,
+    AddressExtent, DecodeMode, DisassemblyRequest, DisassemblySelection, DisassemblySink, NonEmpty,
+    RegionHeader, RegionSummary, SectionSelector, SliceHeader, SliceSelection, SliceSummary,
+    disassemble_streaming, resolve_architecture_selector,
 };
-use macho::analysis::report::Architecture;
+use macho::analysis::report::disassembly::{
+    DisassemblyIssue, DisassemblyLabel, DisassemblyRecord, DisassemblyReportRequest,
+    DisassemblyStatus, InstructionFlags, RangeEndSource, SelectionSource, SymbolSource,
+};
+use macho::analysis::report::{Architecture, ReportContainerIdentity, ReportSliceIdentity};
+use serde::Serialize;
 
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Format, Options, columns};
+use crate::commands::output::{Format, Options};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::usage_message;
 
 #[derive(Debug, clap::Args)]
 #[command(
-    after_help = "SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --section __TEXT,__text --format json"
+    after_help = "Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --section __TEXT,__text --format json"
 )]
 /// Arguments for bounded instruction disassembly.
 pub struct DisassembleArgs {
@@ -63,8 +68,10 @@ pub struct DisassembleArgs {
     max_ranges: NonZeroUsize,
 }
 
-/// Execute the disassembly command and render its typed report.
-pub fn run(args: DisassembleArgs, output: Options, out: &mut dyn Write) -> Result<()> {
+/// Execute the disassembly command, streaming one line per record directly to
+/// `out` with output-side memory constant in the instruction count. Text is the
+/// default; `--format json` emits newline-delimited JSON (one object per line).
+pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write) -> Result<()> {
     let mmap = map_input(&args.input.path)?;
     let container = macho::parse(&mmap)?;
     if args
@@ -130,159 +137,408 @@ pub fn run(args: DisassembleArgs, output: Options, out: &mut dyn Write) -> Resul
         args.max_decoded_bytes,
         args.max_ranges,
     )?;
-    let report = disassemble(&container, &request)?;
     match output.format() {
-        Format::Json => crate::commands::output::json::write_pretty(out, &report)?,
-        Format::Text => render_text(&report, output, out)?,
+        Format::Json => {
+            let mut sink = NdjsonSink::new(out);
+            disassemble_streaming(&container, &request, &mut sink)?;
+        }
+        Format::Text => {
+            let mut sink = TextLineSink::new(output, out);
+            disassemble_streaming(&container, &request, &mut sink)?;
+        }
         Format::Sarif => unreachable!("central output policy rejects disassembly SARIF"),
     }
     Ok(())
 }
 
-fn render_text(
-    report: &macho::analysis::report::disassembly::DisassemblyReport,
-    output: Options,
-    out: &mut dyn Write,
-) -> Result<()> {
-    let style = output.style();
-    if report.slices.iter().all(|slice| slice.regions.is_empty()) {
-        writeln!(out, "No executable sections found.")?;
-        return Ok(());
+// ───────────────────────── text line sink ─────────────────────────
+
+struct TextLineSink<'a> {
+    out: &'a mut dyn Write,
+    options: Options,
+    multiple: bool,
+    raw_width: usize,
+    pending_titles: Vec<String>,
+    emitted_any_region: bool,
+}
+
+impl<'a> TextLineSink<'a> {
+    fn new(options: Options, out: &'a mut dyn Write) -> Self {
+        Self {
+            out,
+            options,
+            multiple: false,
+            raw_width: 8,
+            pending_titles: Vec::new(),
+            emitted_any_region: false,
+        }
     }
-    let multiple = report.slices.len() > 1;
-    for slice in &report.slices {
-        let raw_width = if slice.identity.image.architecture.cpu_type == 0x0100_0007 {
+}
+
+impl DisassemblySink for TextLineSink<'_> {
+    fn begin(
+        &mut self,
+        container: &ReportContainerIdentity,
+        _request: &DisassemblyReportRequest,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.multiple = container.slice_count > 1;
+        Ok(())
+    }
+
+    fn slice_start(
+        &mut self,
+        header: SliceHeader,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        let architecture = header.identity.image.architecture;
+        self.raw_width = if architecture.cpu_type == 0x0100_0007 {
             30
         } else {
             8
         };
-        if multiple {
-            let architecture = slice.identity.image.architecture;
+        if self.multiple {
+            let title = self.options.style().title(&format!(
+                "=== {} [slice {}, 0x{:08x}:0x{:08x}] ===",
+                architecture_name(architecture),
+                header.identity.image.slice_index + 1,
+                architecture.cpu_type as u32,
+                architecture.cpu_subtype as u32
+            ));
+            if self.emitted_any_region {
+                writeln!(self.out, "{title}")?;
+            } else {
+                self.pending_titles.push(title);
+            }
+        }
+        Ok(())
+    }
+
+    fn region_start(
+        &mut self,
+        header: RegionHeader,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        if !self.emitted_any_region {
+            for title in std::mem::take(&mut self.pending_titles) {
+                writeln!(self.out, "{title}")?;
+            }
+            self.emitted_any_region = true;
+        }
+        let extent = header
+            .requested_end_va
+            .map(|end| format!("{:#018x}..{end:#018x}", header.start_va))
+            .unwrap_or_else(|| {
+                format!(
+                    "{:#018x} ({} instructions)",
+                    header.start_va,
+                    header.requested_instruction_count.unwrap_or(0)
+                )
+            });
+        writeln!(
+            self.out,
+            "{}  {}",
+            self.options
+                .style()
+                .heading(&format!("{},{}", header.segment, header.section)),
+            extent
+        )?;
+        Ok(())
+    }
+
+    fn record(
+        &mut self,
+        record: &DisassemblyRecord,
+        labels: &[DisassemblyLabel],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        let style = self.options.style();
+        for label in labels {
             writeln!(
-                out,
+                self.out,
                 "{}",
-                style.title(&format!(
-                    "=== {} [slice {}, 0x{:08x}:0x{:08x}] ===",
-                    architecture_name(architecture),
-                    slice.identity.image.slice_index + 1,
-                    architecture.cpu_type as u32,
-                    architecture.cpu_subtype as u32
-                ))
+                style.accent(&format!("{}:", label.display_name))
             )?;
         }
-        for region in &slice.regions {
-            let extent = region
-                .requested_end_va
-                .map(|end| format!("{:#018x}..{end:#018x}", region.start_va))
-                .unwrap_or_else(|| {
-                    format!(
-                        "{:#018x} ({} instructions)",
-                        region.start_va,
-                        region.requested_instruction_count.unwrap_or(0)
+        let (va, bytes, tail) = match record {
+            DisassemblyRecord::Instruction {
+                va,
+                bytes,
+                text,
+                direct_target,
+                ..
+            } => {
+                let annotation = direct_target.as_ref().map_or_else(String::new, |target| {
+                    target.display_symbol.as_ref().map_or_else(
+                        || format!("; {:#x}", target.va),
+                        |name| {
+                            let offset = target.offset.unwrap_or(0);
+                            if offset == 0 {
+                                format!("; {name}")
+                            } else {
+                                format!("; {name}+{offset:#x}")
+                            }
+                        },
                     )
                 });
-            writeln!(
-                out,
-                "{}  {}",
-                style.heading(&format!("{},{}", region.segment, region.section)),
-                extent
-            )?;
-            let labels: BTreeMap<u64, Vec<_>> =
-                region
-                    .labels
-                    .iter()
-                    .fold(BTreeMap::new(), |mut labels, label| {
-                        labels.entry(label.va).or_default().push(label);
-                        labels
-                    });
-            let mut rows = Vec::new();
-            for record in &region.records {
-                let va = record.va();
-                if let Some(labels) = labels.get(&va) {
-                    for label in labels {
-                        rows.push(vec![format!("{}:", label.display_name)]);
-                    }
-                }
-                match record {
-                    macho::analysis::report::disassembly::DisassemblyRecord::Instruction {
-                        va,
-                        bytes,
-                        text,
-                        direct_target,
-                        ..
-                    } => {
-                        let annotation =
-                            direct_target.as_ref().map_or_else(String::new, |target| {
-                                target.display_symbol.as_ref().map_or_else(
-                                    || format!("; {:#x}", target.va),
-                                    |name| {
-                                        let offset = target.offset.unwrap_or(0);
-                                        if offset == 0 {
-                                            format!("; {name}")
-                                        } else {
-                                            format!("; {name}+{offset:#x}")
-                                        }
-                                    },
-                                )
-                            });
-                        rows.push(vec![
-                            format!("{va:#018x}"),
-                            format!("{:<raw_width$}", bytes.as_str()),
-                            format!("{text}{annotation}"),
-                        ]);
-                    }
-                    macho::analysis::report::disassembly::DisassemblyRecord::Gap {
-                        va,
-                        bytes,
-                        code,
-                        message,
-                        ..
-                    } => rows.push(vec![
-                        format!("{va:#018x}"),
-                        format!("{:<raw_width$}", bytes.as_str()),
-                        format!("<{code}> {message}"),
-                    ]),
-                }
+                (
+                    *va,
+                    bytes.as_str().to_owned(),
+                    format!("{text}{annotation}"),
+                )
             }
-            for mut line in columns::align(&rows) {
-                if line.starts_with("0x") {
-                    if let Some(end) = line.find("  ") {
-                        let address = style.address(&line[..end]);
-                        line.replace_range(..end, &address);
-                    }
-                    writeln!(out, "  {line}")?;
-                } else {
-                    writeln!(out, "{}", style.accent(&line))?;
-                }
-            }
-            if region.next_unexamined_va.is_some() {
-                writeln!(
-                    out,
-                    "  {} decoded-byte limit reached; next VA {:#x}",
-                    style.warning("Partial:"),
-                    region.next_unexamined_va.unwrap_or(region.examined_end_va)
-                )?;
-            }
+            DisassemblyRecord::Gap {
+                va,
+                bytes,
+                code,
+                message,
+                ..
+            } => (
+                *va,
+                bytes.as_str().to_owned(),
+                format!("<{code}> {message}"),
+            ),
+        };
+        let mut line = String::from("  ");
+        line.push_str(&style.address(&format!("{va:#018x}")));
+        line.push_str("  ");
+        line.push_str(&bytes);
+        for _ in bytes.len()..self.raw_width {
+            line.push(' ');
         }
-        if slice.symbol_ranges_truncated {
+        line.push_str("  ");
+        line.push_str(&tail);
+        writeln!(self.out, "{line}")?;
+        Ok(())
+    }
+
+    fn region_end(
+        &mut self,
+        summary: RegionSummary,
+        _labels: &[DisassemblyLabel],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        if let Some(next) = summary.next_unexamined_va {
             writeln!(
-                out,
+                self.out,
+                "  {} decoded-byte limit reached; next VA {next:#x}",
+                self.options.style().warning("Partial:")
+            )?;
+        }
+        Ok(())
+    }
+
+    fn slice_end(
+        &mut self,
+        summary: SliceSummary,
+        issues: &[DisassemblyIssue],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        let style = self.options.style();
+        if summary.symbol_ranges_truncated {
+            writeln!(
+                self.out,
                 "{} symbol range limit reached",
                 style.warning("Partial:")
             )?;
         }
-        for issue in &slice.issues {
+        for issue in issues {
             writeln!(
-                out,
+                self.out,
                 "{} [{}] {}",
                 style.warning("Warning:"),
                 issue.code,
                 issue.message
             )?;
         }
+        Ok(())
     }
-    Ok(())
+
+    fn finish(&mut self) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        if !self.emitted_any_region {
+            writeln!(self.out, "No executable sections found.")?;
+        }
+        self.out.flush()?;
+        Ok(())
+    }
 }
+
+// ───────────────────────── NDJSON line sink ─────────────────────────
+
+#[derive(Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
+enum Line<'a> {
+    Header {
+        schema_version: u32,
+        container: &'a ReportContainerIdentity,
+        request: &'a DisassemblyReportRequest,
+    },
+    Slice {
+        identity: &'a ReportSliceIdentity,
+        container_offset: u64,
+        slice_size: u64,
+    },
+    Region {
+        segment: &'a str,
+        section: &'a str,
+        selection_source: SelectionSource,
+        range_source: Option<SymbolSource>,
+        end_source: Option<RangeEndSource>,
+        start_va: u64,
+        requested_end_va: Option<u64>,
+        requested_instruction_count: Option<u64>,
+        instruction_flags: InstructionFlags,
+    },
+    Record {
+        record: &'a DisassemblyRecord,
+    },
+    Label {
+        label: &'a DisassemblyLabel,
+    },
+    RegionEnd {
+        emitted_instruction_count: u64,
+        examined_end_va: u64,
+        next_unexamined_va: Option<u64>,
+    },
+    SliceEnd {
+        status: DisassemblyStatus,
+        decoded_bytes: u64,
+        decoded_bytes_truncated: bool,
+        symbol_ranges_truncated: bool,
+    },
+    Issue {
+        issue: &'a DisassemblyIssue,
+    },
+}
+
+struct NdjsonSink<'a> {
+    out: &'a mut dyn Write,
+    container: Option<ReportContainerIdentity>,
+    request: Option<DisassemblyReportRequest>,
+    header_emitted: bool,
+}
+
+impl<'a> NdjsonSink<'a> {
+    fn new(out: &'a mut dyn Write) -> Self {
+        Self {
+            out,
+            container: None,
+            request: None,
+            header_emitted: false,
+        }
+    }
+
+    fn write_line(
+        &mut self,
+        line: &Line<'_>,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        serde_json::to_writer(&mut *self.out, line).map_err(std::io::Error::other)?;
+        self.out.write_all(b"\n")?;
+        Ok(())
+    }
+
+    /// Emit the container/request header exactly once, before the first slice.
+    /// Deferring it keeps stdout empty when a pre-decode error aborts the run.
+    fn ensure_header(&mut self) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        if self.header_emitted {
+            return Ok(());
+        }
+        self.header_emitted = true;
+        let container = self.container.take().expect("begin() runs before slices");
+        let request = self.request.take().expect("begin() runs before slices");
+        let line = Line::Header {
+            schema_version: 1,
+            container: &container,
+            request: &request,
+        };
+        self.write_line(&line)?;
+        self.container = Some(container);
+        self.request = Some(request);
+        Ok(())
+    }
+}
+
+impl DisassemblySink for NdjsonSink<'_> {
+    fn begin(
+        &mut self,
+        container: &ReportContainerIdentity,
+        request: &DisassemblyReportRequest,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.container = Some(container.clone());
+        self.request = Some(request.clone());
+        Ok(())
+    }
+
+    fn slice_start(
+        &mut self,
+        header: SliceHeader,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.ensure_header()?;
+        self.write_line(&Line::Slice {
+            identity: &header.identity,
+            container_offset: header.container_offset,
+            slice_size: header.slice_size,
+        })
+    }
+
+    fn region_start(
+        &mut self,
+        header: RegionHeader,
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.write_line(&Line::Region {
+            segment: &header.segment,
+            section: &header.section,
+            selection_source: header.selection_source,
+            range_source: header.range_source,
+            end_source: header.end_source,
+            start_va: header.start_va,
+            requested_end_va: header.requested_end_va,
+            requested_instruction_count: header.requested_instruction_count,
+            instruction_flags: header.instruction_flags,
+        })
+    }
+
+    fn record(
+        &mut self,
+        record: &DisassemblyRecord,
+        _labels: &[DisassemblyLabel],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.write_line(&Line::Record { record })
+    }
+
+    fn region_end(
+        &mut self,
+        summary: RegionSummary,
+        labels: &[DisassemblyLabel],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        for label in labels {
+            self.write_line(&Line::Label { label })?;
+        }
+        self.write_line(&Line::RegionEnd {
+            emitted_instruction_count: summary.emitted_instruction_count,
+            examined_end_va: summary.examined_end_va,
+            next_unexamined_va: summary.next_unexamined_va,
+        })
+    }
+
+    fn slice_end(
+        &mut self,
+        summary: SliceSummary,
+        issues: &[DisassemblyIssue],
+    ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.write_line(&Line::SliceEnd {
+            status: summary.status,
+            decoded_bytes: summary.decoded_bytes,
+            decoded_bytes_truncated: summary.decoded_bytes_truncated,
+            symbol_ranges_truncated: summary.symbol_ranges_truncated,
+        })?;
+        for issue in issues {
+            self.write_line(&Line::Issue { issue })?;
+        }
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
+        self.out.flush()?;
+        Ok(())
+    }
+}
+
+// ───────────────────────── argument parsing ─────────────────────────
 
 fn architecture_name(architecture: Architecture) -> String {
     macho::model::header::ArchSpec {

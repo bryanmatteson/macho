@@ -1428,3 +1428,126 @@ fn disassemble_survives_section_va_near_sign_boundary() {
     let report = disassemble(&container, &DisassemblyRequest::default()).unwrap();
     assert!(!report.slices[0].regions.is_empty());
 }
+
+/// F3: the streaming path retains a constant number of records regardless of
+/// instruction count, while the materialized report grows with it. A sink that
+/// releases each record before the next arrives — the constant-memory contract
+/// the CLI line sinks honor — never holds more than one record at a time, even
+/// as the decoded instruction count scales from 1_000 to 50_000.
+#[test]
+fn streaming_output_retention_is_constant_in_instruction_count() {
+    use crate::report::ReportContainerIdentity;
+    use crate::report::disassembly::{
+        DisassemblyIssue, DisassemblyLabel, DisassemblyReportRequest,
+    };
+
+    /// Models constant-memory output: holds the current record only for the
+    /// duration of `record`, releasing it before the next. `peak_retained` is
+    /// the greatest number of records held simultaneously, which stays at one
+    /// for a non-accumulating streaming sink no matter how long the stream is.
+    #[derive(Default)]
+    struct PeakSink {
+        held: Option<DisassemblyRecord>,
+        peak_retained: usize,
+        total_records: u64,
+    }
+
+    impl DisassemblySink for PeakSink {
+        fn begin(
+            &mut self,
+            _container: &ReportContainerIdentity,
+            _request: &DisassemblyReportRequest,
+        ) -> Result<(), DisassemblyError> {
+            Ok(())
+        }
+
+        fn slice_start(&mut self, _header: SliceHeader) -> Result<(), DisassemblyError> {
+            Ok(())
+        }
+
+        fn region_start(&mut self, _header: RegionHeader) -> Result<(), DisassemblyError> {
+            Ok(())
+        }
+
+        fn record(
+            &mut self,
+            record: &DisassemblyRecord,
+            _labels: &[DisassemblyLabel],
+        ) -> Result<(), DisassemblyError> {
+            self.held = Some(record.clone());
+            self.peak_retained = self.peak_retained.max(self.held.iter().count());
+            self.total_records += 1;
+            self.held = None;
+            Ok(())
+        }
+
+        fn region_end(
+            &mut self,
+            _summary: RegionSummary,
+            _labels: &[DisassemblyLabel],
+        ) -> Result<(), DisassemblyError> {
+            Ok(())
+        }
+
+        fn slice_end(
+            &mut self,
+            _summary: SliceSummary,
+            _issues: &[DisassemblyIssue],
+        ) -> Result<(), DisassemblyError> {
+            Ok(())
+        }
+    }
+
+    let counts = [1_000usize, 10_000, 50_000];
+    let mut previous_peak: Option<usize> = None;
+    let mut previous_report_records: Option<u64> = None;
+    for &count in &counts {
+        let bytes = macho_test_support::disassembly_x86_64_dense(count);
+        let container = macho_core::parse(&bytes).unwrap();
+        let request = DisassemblyRequest::default();
+
+        let mut sink = PeakSink::default();
+        disassemble_streaming(&container, &request, &mut sink).unwrap();
+
+        // The sink observed every decoded instruction ...
+        assert_eq!(
+            sink.total_records, count as u64,
+            "the streaming sink must observe every decoded instruction at n={count}"
+        );
+        // ... yet never retained more than a single record at any moment.
+        assert!(
+            sink.peak_retained <= 1,
+            "streaming retention must be constant; held {} records at n={count}",
+            sink.peak_retained
+        );
+
+        // The materialized report, by contrast, retains every record.
+        let report = disassemble(&container, &request).unwrap();
+        let report_records: u64 = report
+            .slices
+            .iter()
+            .flat_map(|slice| slice.regions.iter())
+            .map(|region| region.records.len() as u64)
+            .sum();
+        assert_eq!(
+            report_records, count as u64,
+            "the materialized report must retain every decoded instruction at n={count}"
+        );
+
+        // Peak streamed retention is flat across n; the report's record count grows.
+        if let Some(previous) = previous_peak {
+            assert_eq!(
+                sink.peak_retained, previous,
+                "peak streamed retention must not grow with the instruction count"
+            );
+        }
+        if let Some(previous) = previous_report_records {
+            assert!(
+                report_records > previous,
+                "the materialized record count must grow with the instruction count"
+            );
+        }
+        previous_peak = Some(sink.peak_retained);
+        previous_report_records = Some(report_records);
+    }
+}

@@ -64,7 +64,7 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 
-SARIF output is supported only by the audit command.
+Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.
 
 Examples:
   macho disassemble app
