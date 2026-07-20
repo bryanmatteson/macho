@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use macho_core::{MachoFile, Section};
 use macho_objc::{ObjCMetadataScan, ObjCRecordKind};
@@ -55,12 +55,28 @@ pub(super) fn record_entity_ids(
         .collect()
 }
 
-pub(super) fn name_counts<'a>(values: impl Iterator<Item = &'a str>) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    for value in values {
-        *counts.entry(value.to_owned()).or_default() += 1;
+pub(super) fn record_name_counts(
+    scan: &ObjCMetadataScan,
+    kind: ObjCRecordKind,
+) -> BTreeMap<String, usize> {
+    let mut occurrences = BTreeMap::<String, BTreeSet<u64>>::new();
+    for record in scan
+        .observations
+        .iter()
+        .filter(|record| record.kind == kind)
+    {
+        let Some(name) = &record.parsed_name else {
+            continue;
+        };
+        occurrences
+            .entry(name.clone())
+            .or_default()
+            .insert(record.runtime_address.unwrap_or(record.ordinal as u64));
     }
-    counts
+    occurrences
+        .into_iter()
+        .map(|(name, addresses)| (name, addresses.len()))
+        .collect()
 }
 
 fn occurrence_entity_id(
@@ -106,13 +122,21 @@ pub(super) fn unique_defined_ids<'a>(
 }
 
 pub(super) fn category_counts(scan: &ObjCMetadataScan) -> BTreeMap<(String, String), usize> {
-    let mut counts = BTreeMap::new();
-    for value in &scan.metadata.categories {
-        *counts
+    let records = scan
+        .observations
+        .iter()
+        .filter(|record| record.kind == ObjCRecordKind::Category && record.parsed_name.is_some());
+    let mut occurrences = BTreeMap::<(String, String), BTreeSet<u64>>::new();
+    for (value, record) in scan.metadata.categories.iter().zip(records) {
+        occurrences
             .entry((value.class_name.clone(), value.name.clone()))
-            .or_default() += 1;
+            .or_default()
+            .insert(record.runtime_address.unwrap_or(record.ordinal as u64));
     }
-    counts
+    occurrences
+        .into_iter()
+        .map(|(name, addresses)| (name, addresses.len()))
+        .collect()
 }
 
 pub(super) fn category_id(

@@ -45,8 +45,23 @@ Options:
       --count <COUNT>
           Decode this many instructions from --address
 
+      --end-address <END_ADDRESS>
+          Select bytes from --address up to this exclusive virtual address (hexadecimal, with optional 0x prefix)
+
       --demangle
           Demangle retained symbol labels while preserving their raw names
+
+      --no-addresses
+          Omit the virtual-address column from text output
+
+      --no-bytes
+          Omit the raw-bytes column from text output
+
+      --no-labels
+          Omit symbol-label lines from text output
+
+      --no-targets
+          Omit resolved direct-target annotations from text output
 
       --strict
           Fail on the first invalid byte or caller-clipped instruction
@@ -70,4 +85,7 @@ Examples:
   macho disassemble app
   macho disassemble app --arch arm64e --symbol _main
   macho disassemble app --address 0x100003f50 --count 8
+  macho disassemble app --address 0x100003f50 --end-address 0x100003f80
+  macho disassemble app --symbol _main --no-addresses --no-bytes
+  macho disassemble app --section __TEXT,__text --no-labels --no-targets
   macho disassemble app --section __TEXT,__text --format json

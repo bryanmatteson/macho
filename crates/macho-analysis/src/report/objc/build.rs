@@ -51,24 +51,14 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
     let scan = macho_objc::scan_objc_metadata(macho)?;
     let sections = macho.all_sections().collect::<Vec<_>>();
     let category_counts = category_counts(&scan);
-    let class_counts = name_counts(
-        scan.metadata
-            .classes
-            .iter()
-            .map(|value| value.name.as_str()),
-    );
-    let protocol_counts = name_counts(
-        scan.metadata
-            .protocols
-            .iter()
-            .map(|value| value.name.as_str()),
-    );
+    let class_counts = record_name_counts(&scan, ObjCRecordKind::Class);
+    let protocol_counts = record_name_counts(&scan, ObjCRecordKind::Protocol);
     let record_entity_ids =
         record_entity_ids(&scan, &class_counts, &category_counts, &protocol_counts);
     let mut observations = Vec::new();
     let mut evidence = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut origins = BTreeMap::<String, (ObjCObservationId, ObjCEvidenceId)>::new();
+    let mut origins = BTreeMap::<String, Vec<(ObjCObservationId, ObjCEvidenceId)>>::new();
 
     for (index, record) in scan.observations.iter().enumerate() {
         let observation_id = observation_id(&format!(
@@ -78,10 +68,10 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
         let evidence_id = evidence_id(&format!("runtime|{observation_id}"));
         let location = record_location(macho, &sections, record);
         let disposition = if let Some(entity_id) = &record_entity_ids[index] {
-            origins.insert(
-                entity_id.to_string(),
-                (observation_id.clone(), evidence_id.clone()),
-            );
+            origins
+                .entry(entity_id.to_string())
+                .or_default()
+                .push((observation_id.clone(), evidence_id.clone()));
             ObjCObservationDisposition::Included {
                 entity_ids: NonEmpty::new(vec![entity_id.clone()]).unwrap(),
             }
@@ -156,25 +146,36 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
         .collect::<BTreeMap<_, _>>();
 
     let mut entities = Vec::new();
+    let mut built_entity_ids = BTreeSet::new();
     for (value, id) in scan.metadata.classes.iter().zip(defined_class_ids) {
-        let (observation_id, evidence_id) = origins[&id.to_string()].clone();
+        if !built_entity_ids.insert(id.clone()) {
+            continue;
+        }
+        let entity_origins = &origins[&id.to_string()];
+        let (observation_id, evidence_id) = entity_origins[0].clone();
         let mut context = EntityBuildContext {
             macho,
             class_ids: &class_ids,
             protocol_ids: &protocol_ids,
             diagnostics: &mut diagnostics,
         };
-        entities.push(ObjCEntity::Class(class_entity(
+        let mut entity = ObjCEntity::Class(class_entity(
             value,
             id,
             observation_id,
             evidence_id,
             &mut context,
-        )));
+        ));
+        attach_observations(&mut entity, entity_origins);
+        entities.push(entity);
     }
     for (ordinal, value) in scan.metadata.categories.iter().enumerate() {
         let id = category_id(value, ordinal, &category_counts, &scan);
-        let (observation_id, evidence_id) = origins[&id.to_string()].clone();
+        if !built_entity_ids.insert(id.clone()) {
+            continue;
+        }
+        let entity_origins = &origins[&id.to_string()];
+        let (observation_id, evidence_id) = entity_origins[0].clone();
         if category_counts[&(value.class_name.clone(), value.name.clone())] > 1 {
             diagnostics.push(ObjCDiagnostic {
                 id: diagnostic_id(&format!("ambiguous-category|{id}")),
@@ -195,31 +196,40 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
             protocol_ids: &protocol_ids,
             diagnostics: &mut diagnostics,
         };
-        entities.push(ObjCEntity::Category(category_entity(
+        let mut entity = ObjCEntity::Category(category_entity(
             value,
             ordinal,
             id,
             observation_id,
             evidence_id,
             &mut context,
-        )));
+        ));
+        attach_observations(&mut entity, entity_origins);
+        entities.push(entity);
     }
     for (value, id) in scan.metadata.protocols.iter().zip(defined_protocol_ids) {
-        let (observation_id, evidence_id) = origins[&id.to_string()].clone();
+        if !built_entity_ids.insert(id.clone()) {
+            continue;
+        }
+        let entity_origins = &origins[&id.to_string()];
+        let (observation_id, evidence_id) = entity_origins[0].clone();
         let mut context = EntityBuildContext {
             macho,
             class_ids: &class_ids,
             protocol_ids: &protocol_ids,
             diagnostics: &mut diagnostics,
         };
-        entities.push(ObjCEntity::Protocol(protocol_entity(
+        let mut entity = ObjCEntity::Protocol(protocol_entity(
             value,
             id,
             observation_id,
             evidence_id,
             &mut context,
-        )));
+        ));
+        attach_observations(&mut entity, entity_origins);
+        entities.push(entity);
     }
+    let defined_entity_count = entities.len() as u64;
     for (name, id) in referenced_classes {
         let (observation_id, evidence_id) = add_reference_observation(
             &name,
@@ -287,16 +297,12 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
                 collector: ObjCCollectorId::RuntimeMetadata,
                 outcome: ObjCCollectorOutcome::Complete,
                 input_records: scan.observations.len() as u64,
-                output_records: scan.metadata.classes.len() as u64
-                    + scan.metadata.categories.len() as u64
-                    + scan.metadata.protocols.len() as u64,
+                output_records: defined_entity_count,
             },
             ObjCCollectorExecution {
                 collector: ObjCCollectorId::SemanticGraph,
                 outcome: ObjCCollectorOutcome::Complete,
-                input_records: scan.metadata.classes.len() as u64
-                    + scan.metadata.categories.len() as u64
-                    + scan.metadata.protocols.len() as u64,
+                input_records: defined_entity_count,
                 output_records: 0,
             },
         ])
@@ -309,6 +315,21 @@ pub fn recover_objc_surface(macho: &MachoFile<'_>) -> crate::Result<ObjCReport> 
         schema_version: ObjCReportVersion::CURRENT,
         slices: NonEmpty::new(vec![slice]).unwrap(),
     })
+}
+
+fn attach_observations(entity: &mut ObjCEntity, origins: &[(ObjCObservationId, ObjCEvidenceId)]) {
+    let common = match entity {
+        ObjCEntity::Class(value) => &mut value.common,
+        ObjCEntity::Category(value) => &mut value.common,
+        ObjCEntity::Protocol(value) => &mut value.common,
+    };
+    common.observation_ids = NonEmpty::new(
+        origins
+            .iter()
+            .map(|(observation_id, _)| observation_id.clone())
+            .collect(),
+    )
+    .expect("a decoded Objective-C entity has at least one observation");
 }
 
 struct EntityBuildContext<'a, 'data> {

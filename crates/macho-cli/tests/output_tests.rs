@@ -245,3 +245,72 @@ fn ranges_aligns_columns_with_and_without_color() {
     assert!(!machine.stdout.contains(&0x1b));
     serde_json::from_slice::<serde_json::Value>(&machine.stdout).expect("valid JSON envelope");
 }
+
+#[test]
+fn help_follows_the_color_policy_and_uses_the_shared_theme() {
+    // Piped output defaults to `auto`, which must stay escape-free so help
+    // goldens and redirected output remain plain text.
+    let piped = macho_cli::run_captured(["disassemble", "--help"]);
+    assert_eq!(piped.code, 0);
+    assert!(
+        !piped.stdout.contains(&0x1b),
+        "auto help must not colorize a non-terminal stream"
+    );
+
+    let never = macho_cli::run_captured(["disassemble", "--help", "--color", "never"]);
+    assert_eq!(never.code, 0);
+    assert!(!never.stdout.contains(&0x1b));
+
+    // `--color always` overrides the terminal check, and Clap renders through
+    // Macho's theme rather than its own default palette.
+    let always = macho_cli::run_captured(["disassemble", "--help", "--color", "always"]);
+    assert_eq!(always.code, 0);
+    assert!(
+        always.stdout.contains(&0x1b),
+        "explicit color must colorize help"
+    );
+    let colored = String::from_utf8(always.stdout).expect("UTF-8 help");
+
+    // Section headers take the subheading token (bold cyan), literals take the
+    // keyword token (bold blue), and placeholders the builtin-type token.
+    assert!(
+        colored.contains("\u{1b}[1m\u{1b}[36mUsage:\u{1b}[0m"),
+        "{colored:?}"
+    );
+    assert!(colored.contains("\u{1b}[1m\u{1b}[36mOptions:\u{1b}[0m"));
+    assert!(colored.contains("\u{1b}[1m\u{1b}[34m--arch\u{1b}[0m"));
+    assert!(colored.contains("\u{1b}[35m<PATH>\u{1b}[0m"));
+
+    // Colour is presentation only: stripping it reproduces the plain help.
+    assert_eq!(
+        strip_ansi(&colored),
+        String::from_utf8(never.stdout).unwrap()
+    );
+}
+
+#[test]
+fn usage_errors_stay_plain_text_under_every_color_choice() {
+    for choice in ["auto", "never", "always"] {
+        let result = macho_cli::run_captured(["not-a-command", "--color", choice]);
+        assert_eq!(result.code, 2, "usage errors exit 2");
+        assert!(result.stdout.is_empty());
+        let stderr = String::from_utf8(result.stderr).expect("UTF-8 stderr");
+
+        // The diagnostic renderer sanitizes what it writes, so Clap's own
+        // escapes are stripped beforehand; otherwise they would arrive as
+        // replacement characters.
+        assert!(
+            !stderr.contains('\u{fffd}'),
+            "clap escapes must not survive into the sanitizer: {stderr:?}"
+        );
+        assert!(stderr.contains("unrecognized subcommand 'not-a-command'"));
+        assert!(stderr.contains("Usage: macho <COMMAND> [OPTIONS]"));
+
+        // Only the label carries theme styling, and only when colour is on.
+        if choice == "always" {
+            assert!(stderr.contains("\u{1b}[1;31mError:\u{1b}[0m"));
+        } else {
+            assert!(!stderr.contains('\u{1b}'));
+        }
+    }
+}

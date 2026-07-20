@@ -179,6 +179,161 @@ fn command_parses_with_canonical_selectors_and_no_alias() {
         ])
         .is_err()
     );
+    macho_cli::commands::parse_only([
+        "macho",
+        "disassemble",
+        "fixture",
+        "--address",
+        "1000",
+        "--end-address",
+        "1010",
+        "--no-addresses",
+        "--no-bytes",
+        "--no-labels",
+        "--no-targets",
+    ])
+    .unwrap();
+    assert!(
+        macho_cli::commands::parse_only([
+            "macho",
+            "disassemble",
+            "fixture",
+            "--end-address",
+            "1010",
+        ])
+        .is_err()
+    );
+    assert!(
+        macho_cli::commands::parse_only([
+            "macho",
+            "disassemble",
+            "fixture",
+            "--address",
+            "1000",
+            "--end-address",
+            "1010",
+            "--length",
+            "4",
+        ])
+        .is_err()
+    );
+    assert!(
+        macho_cli::commands::parse_only([
+            "macho",
+            "disassemble",
+            "fixture",
+            "--address",
+            "1000",
+            "--end-address",
+            "1010",
+            "--count",
+            "1",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn end_address_selects_the_same_bytes_as_length() {
+    let path = fixture_path("end-address", &macho_test_support::disassembly_x86_64());
+    let path_text = path.to_str().unwrap();
+    let ranged = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000100",
+        "--end-address",
+        "0x100000104",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(
+        ranged.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&ranged.stderr)
+    );
+    let length = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000100",
+        "--length",
+        "4",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(length.code, 0);
+    assert_eq!(ranged.stdout, length.stdout);
+
+    let inverted = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000104",
+        "--end-address",
+        "100000104",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(inverted.code, 2);
+    assert!(inverted.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&inverted.stderr)
+            .contains("--end-address must be greater than --address")
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn text_display_suppression_flags_remove_requested_columns_and_annotations() {
+    let path = fixture_path("no-columns", &macho_test_support::disassembly_x86_64());
+    let path_text = path.to_str().unwrap();
+    let reduced = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000100",
+        "--count",
+        "2",
+        "--no-addresses",
+        "--no-bytes",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(
+        reduced.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&reduced.stderr)
+    );
+    let reduced = String::from_utf8(reduced.stdout).unwrap();
+    assert!(reduced.contains("_main:"));
+    assert!(reduced.contains("\n  jmp short 0000000100000104h  ; _helper\n"));
+    assert!(reduced.contains("\n  nop\n"));
+    // The region header keeps its extent; record lines drop both columns.
+    assert!(reduced.lines().all(|line| !line.starts_with("  0x")));
+    assert!(!reduced.contains("eb02"));
+
+    let instruction_only = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000100",
+        "--count",
+        "2",
+        "--no-labels",
+        "--no-targets",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(instruction_only.code, 0);
+    let instruction_only = String::from_utf8(instruction_only.stdout).unwrap();
+    assert!(!instruction_only.contains("_main:"));
+    assert!(!instruction_only.contains("; _helper"));
+    assert!(instruction_only.contains("jmp short 0000000100000104h"));
+    assert!(instruction_only.contains("nop"));
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]
@@ -785,5 +940,86 @@ fn captured_and_process_routes_match_core_disassembly_cases() {
         assert_eq!(process.stdout, captured.stdout, "{args:?}");
         assert_eq!(process.stderr, captured.stderr, "{args:?}");
     }
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn colored_disassembly_styles_tokens_without_changing_plain_text() {
+    let path = fixture_path("colorized", &macho_test_support::disassembly_x86_64());
+    let path_text = path.to_str().unwrap();
+    let plain = macho_cli::run_captured(["disassemble", path_text, "--color", "never"]);
+    let colored = macho_cli::run_captured(["disassemble", path_text, "--color", "always"]);
+    assert_eq!(plain.code, 0, "{}", String::from_utf8_lossy(&plain.stderr));
+    assert_eq!(colored.code, 0);
+
+    // Colour is presentation only: the styled stream must carry ANSI, and
+    // stripping it must reproduce the plain stream byte for byte.
+    assert!(colored.stdout.contains(&0x1b));
+    assert!(!plain.stdout.contains(&0x1b));
+    let plain_text = String::from_utf8(plain.stdout).expect("UTF-8 plain output");
+    let colored_text = String::from_utf8(colored.stdout).expect("UTF-8 colored output");
+    assert_eq!(strip_ansi(&colored_text), plain_text);
+
+    // The mnemonic, the raw-byte column, and the branch comment each carry
+    // their own styling rather than inheriting one line-wide colour.
+    let record = colored_text
+        .lines()
+        .find(|line| strip_ansi(line).contains("jmp short"))
+        .expect("a branch record");
+    assert!(record.contains("\u{1b}[1;34mjmp\u{1b}[0m"), "{record:?}");
+    assert!(record.contains("\u{1b}[2meb02\u{1b}[0m"), "{record:?}");
+    assert!(
+        record.contains("\u{1b}[32m; _helper\u{1b}[0m"),
+        "{record:?}"
+    );
+
+    // The invalid trailing byte keeps its diagnostic styling.
+    let gap = colored_text
+        .lines()
+        .find(|line| strip_ansi(line).contains("insn.decode.invalid"))
+        .expect("a gap record");
+    assert!(
+        gap.contains("\u{1b}[1;33m<insn.decode.invalid>\u{1b}[0m"),
+        "{gap:?}"
+    );
+
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn colored_and_plain_records_keep_the_same_instruction_column() {
+    let path = fixture_path(
+        "colorized-columns",
+        &macho_test_support::disassembly_x86_64(),
+    );
+    let path_text = path.to_str().unwrap();
+    let colored = macho_cli::run_captured([
+        "disassemble",
+        path_text,
+        "--address",
+        "100000100",
+        "--count",
+        "2",
+        "--color",
+        "always",
+    ]);
+    assert_eq!(colored.code, 0);
+    let colored_text = String::from_utf8(colored.stdout).expect("UTF-8 colored output");
+
+    // Styling the byte column must not disturb alignment: padding is computed
+    // from the unstyled width, so every stripped record shares one column.
+    let columns = colored_text
+        .lines()
+        .map(strip_ansi)
+        .filter(|line| line.trim_start().starts_with("0x"))
+        .map(|line| {
+            line.find("jmp")
+                .or_else(|| line.find("nop"))
+                .expect("an instruction column")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(columns.len(), 2);
+    assert_eq!(columns[0], columns[1]);
+
     std::fs::remove_file(path).unwrap();
 }

@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 
+mod filters;
 mod model;
 
+use filters::*;
 use model::*;
 
 use anyhow::{Context, Result};
@@ -19,6 +21,9 @@ use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
 #[derive(clap::Args)]
+#[command(
+    after_help = "Examples:\n  macho objc app --kind class --presence defined\n  macho objc app --name Controller --selector viewDidLoad\n  macho objc graph app --kind protocol\n  macho objc xrefs app --class AppDelegate"
+)]
 /// Evidence-accountable Objective-C runtime recovery.
 pub struct ObjCArgs {
     #[command(subcommand)]
@@ -27,12 +32,11 @@ pub struct ObjCArgs {
     input: OptionalInputArgs,
     #[command(flatten)]
     selection: ArchitectureArgs,
+    #[command(flatten)]
+    filters: ObjCFilterArgs,
     /// Render the validated typed header projection.
     #[arg(long)]
     headers: bool,
-    /// Select a class by exact runtime name.
-    #[arg(long)]
-    class: Option<String>,
 }
 
 #[derive(clap::Subcommand)]
@@ -43,9 +47,8 @@ enum ObjCAction {
         input: InputArgs,
         #[command(flatten)]
         selection: ArchitectureArgs,
-        /// Select a class by exact runtime name.
-        #[arg(long)]
-        class: Option<String>,
+        #[command(flatten)]
+        filters: ObjCFilterArgs,
     },
     /// Show selector ownership, origins, implementations, and ambiguity.
     Selectors {
@@ -63,9 +66,8 @@ enum ObjCAction {
         input: InputArgs,
         #[command(flatten)]
         selection: ArchitectureArgs,
-        /// Select a class by exact runtime name.
-        #[arg(long)]
-        class: Option<String>,
+        #[command(flatten)]
+        filters: ObjCFilterArgs,
     },
 }
 
@@ -80,8 +82,8 @@ pub fn run(args: ObjCArgs, output: OutputOptions, out: &mut dyn Write) -> Result
         Some(ObjCAction::Graph {
             input,
             selection,
-            class,
-        }) => run_graph(&input, &selection, class.as_deref(), output, out),
+            filters,
+        }) => run_graph(&input, &selection, &filters, output, out),
         Some(ObjCAction::Selectors {
             input,
             selection,
@@ -90,8 +92,8 @@ pub fn run(args: ObjCArgs, output: OutputOptions, out: &mut dyn Write) -> Result
         Some(ObjCAction::Xrefs {
             input,
             selection,
-            class,
-        }) => run_xrefs(&input, &selection, class.as_deref(), output, out),
+            filters,
+        }) => run_xrefs(&input, &selection, &filters, output, out),
         None => {
             let path = args
                 .input
@@ -102,7 +104,7 @@ pub fn run(args: ObjCArgs, output: OutputOptions, out: &mut dyn Write) -> Result
                 &input,
                 &args.selection,
                 args.headers,
-                args.class.as_deref(),
+                &args.filters,
                 output,
                 out,
             )
@@ -123,12 +125,12 @@ fn run_surface(
     input: &InputArgs,
     selection: &ArchitectureArgs,
     headers: bool,
-    class: Option<&str>,
+    filters: &ObjCFilterArgs,
     output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
     let (_mmap, mut report) = recover(input, selection)?;
-    apply_class_filter(&mut report, class);
+    apply_filters(&mut report, filters);
     if headers {
         if report.slices.as_slice().len() > 1 && selection.arch.is_none() {
             return Err(usage_message(
@@ -159,28 +161,6 @@ fn run_surface(
         OutputFormat::Sarif => unreachable!("rejected above"),
     }
     Ok(())
-}
-
-fn apply_class_filter(report: &mut ObjCReport, class: Option<&str>) {
-    let Some(class) = class else { return };
-    for slice in report.slices.as_mut_slice() {
-        slice.selection.selected_entity_ids = slice
-            .entities
-            .iter()
-            .filter(|entity| entity_matches_class(entity, class))
-            .map(|entity| entity.common().id.clone())
-            .collect();
-    }
-}
-
-fn entity_matches_class(entity: &ObjCEntity, class: &str) -> bool {
-    match entity {
-        ObjCEntity::Class(value) => known(&value.common.name).is_some_and(|name| name == class),
-        ObjCEntity::Category(value) => {
-            known(&value.extended_class).is_some_and(|reference| reference.name == class)
-        }
-        ObjCEntity::Protocol(_) => false,
-    }
 }
 
 fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
@@ -404,12 +384,12 @@ fn property_row(value: &macho::analysis::report::ObjCProperty, style: Style) -> 
 fn run_graph(
     input: &InputArgs,
     selection: &ArchitectureArgs,
-    class: Option<&str>,
+    filters: &ObjCFilterArgs,
     output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
     let (_mmap, mut report) = recover(input, selection)?;
-    apply_class_filter(&mut report, class);
+    apply_filters(&mut report, filters);
     let views = report
         .slices
         .as_slice()
@@ -509,7 +489,10 @@ fn graph_view(slice: &ObjCSliceReport) -> GraphView<'_> {
     let nodes = slice
         .entities
         .iter()
-        .filter(|entity| incident.contains(entity.common().id.as_str()))
+        .filter(|entity| {
+            selected.contains(entity.common().id.as_str())
+                || incident.contains(entity.common().id.as_str())
+        })
         .map(|entity| GraphNodeView {
             entity_id: entity.common().id.clone(),
             kind: entity_kind(entity),
@@ -670,7 +653,7 @@ fn selector_views(report: &ObjCReport, name: Option<&str>) -> Vec<SelectorView> 
 fn run_xrefs(
     input: &InputArgs,
     selection: &ArchitectureArgs,
-    class: Option<&str>,
+    filters: &ObjCFilterArgs,
     output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
@@ -678,7 +661,7 @@ fn run_xrefs(
     let container =
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.path.display()))?;
     let mut report = recover_objc_container(&container, selection.arch.as_deref())?;
-    apply_class_filter(&mut report, class);
+    apply_filters(&mut report, filters);
     let machos = container
         .macho_files()
         .filter(|macho| {

@@ -432,7 +432,7 @@ fn parse_offset(s: &str) -> Result<u64> {
 }
 
 fn parse_hex_bytes(hex: &str) -> Result<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(usage_message(format!(
             "hex string must have even length, got {}",
             hex.len()
@@ -606,15 +606,14 @@ fn select_fat_arch_indices(
         })
         .collect();
 
-    if selected.is_empty() {
-        if let Some(filter) = arch_filter {
-            let available: Vec<String> =
-                fat.arches().iter().map(|arch| arch.spec().name()).collect();
-            return Err(input_message(format!(
-                "no architecture matching '{filter}' found (available: {})",
-                available.join(", ")
-            )));
-        }
+    if selected.is_empty()
+        && let Some(filter) = arch_filter
+    {
+        let available: Vec<String> = fat.arches().iter().map(|arch| arch.spec().name()).collect();
+        return Err(input_message(format!(
+            "no architecture matching '{filter}' found (available: {})",
+            available.join(", ")
+        )));
     }
 
     Ok(selected)

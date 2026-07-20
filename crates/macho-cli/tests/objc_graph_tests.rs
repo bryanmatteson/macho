@@ -63,15 +63,15 @@ fn graph_selector_index() {
 fn graph_selector_lookup_existing() {
     let graph = graph_for("/usr/bin/plutil").expect("should have ObjC metadata");
     // Find any selector from PLUContext
-    if let Some(node) = graph.class("PLUContext") {
-        if let Some(method) = node.instance_methods.first() {
-            let owners = graph.selector_owners(&method.selector);
-            assert!(
-                !owners.is_empty(),
-                "selector '{}' should have at least one owner",
-                method.selector
-            );
-        }
+    if let Some(node) = graph.class("PLUContext")
+        && let Some(method) = node.instance_methods.first()
+    {
+        let owners = graph.selector_owners(&method.selector);
+        assert!(
+            !owners.is_empty(),
+            "selector '{}' should have at least one owner",
+            method.selector
+        );
     }
 }
 

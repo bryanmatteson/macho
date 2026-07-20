@@ -64,24 +64,24 @@ fn chained_fixups_have_bind_or_rebase() {
     let container = macho::parse(&mmap).expect("failed to parse");
 
     for macho in container.macho_files() {
-        if let Ok(fixups) = parse_chained_fixups(macho) {
-            if !fixups.fixups.is_empty() {
-                // At least one should be a bind or rebase
-                let has_bind = fixups
-                    .fixups
-                    .iter()
-                    .any(|f| matches!(f.kind, FixupKind::Bind { .. } | FixupKind::AuthBind { .. }));
-                let has_rebase = fixups.fixups.iter().any(|f| {
-                    matches!(
-                        f.kind,
-                        FixupKind::Rebase { .. } | FixupKind::AuthRebase { .. }
-                    )
-                });
-                assert!(
-                    has_bind || has_rebase,
-                    "expected at least one bind or rebase fixup"
-                );
-            }
+        if let Ok(fixups) = parse_chained_fixups(macho)
+            && !fixups.fixups.is_empty()
+        {
+            // At least one should be a bind or rebase
+            let has_bind = fixups
+                .fixups
+                .iter()
+                .any(|f| matches!(f.kind, FixupKind::Bind { .. } | FixupKind::AuthBind { .. }));
+            let has_rebase = fixups.fixups.iter().any(|f| {
+                matches!(
+                    f.kind,
+                    FixupKind::Rebase { .. } | FixupKind::AuthRebase { .. }
+                )
+            });
+            assert!(
+                has_bind || has_rebase,
+                "expected at least one bind or rebase fixup"
+            );
         }
     }
 }

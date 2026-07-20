@@ -5,7 +5,9 @@ use base64::Engine as _;
 mod disassembly_objc;
 mod disassembly_scale;
 
-pub use disassembly_objc::{disassembly_objc_boundary, disassembly_objc_category_labels};
+pub use disassembly_objc::{
+    disassembly_objc_boundary, disassembly_objc_category_labels, disassembly_objc_duplicate_class,
+};
 pub use disassembly_scale::{disassembly_x86_64_dense, disassembly_x86_64_sections};
 
 /// CPU type used by [`thin64_arm64`].

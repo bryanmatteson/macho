@@ -1,4 +1,4 @@
 __TEXT,__text  0x0000000100000100 (2 instructions)
 _main:
-  0x0000000100000100  eb02                            jmp short 0000000100000104h; _helper
+  0x0000000100000100  eb02                            jmp short 0000000100000104h  ; _helper
   0x0000000100000102  90                              nop

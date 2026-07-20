@@ -114,6 +114,45 @@ pub fn disassembly_objc_boundary() -> Vec<u8> {
     bytes
 }
 
+/// Build an x86-64 image whose `__objc_classlist` lists the same class pointer
+/// twice. Both entries resolve to one class object at the same runtime address,
+/// producing two same-address class observations — the shape that made real
+/// binaries fail entity-identity validation before duplicate entities were
+/// collapsed.
+pub fn disassembly_objc_duplicate_class() -> Vec<u8> {
+    // Class object built by [`disassembly_objc_boundary`].
+    const CLASS_OFFSET: u64 = 0x248;
+    // File offset of the second (`__objc_classlist`) section header: 32-byte
+    // Mach header + 72-byte segment command body + one 80-byte section header.
+    const CLASSLIST_SECTION_HEADER: usize = 184;
+    // `filesize` field within the single segment command body.
+    const SEGMENT_FILESIZE_FIELD: usize = 80;
+    let image_base = 0x1_0000_0000u64;
+
+    let mut bytes = disassembly_objc_boundary();
+    while bytes.len() % 8 != 0 {
+        bytes.push(0);
+    }
+    let table_offset = bytes.len() as u64;
+    let class_pointer = image_base + CLASS_OFFSET;
+    bytes.extend_from_slice(&class_pointer.to_le_bytes());
+    bytes.extend_from_slice(&class_pointer.to_le_bytes());
+    let end = bytes.len() as u64;
+
+    // Repoint `__objc_classlist` at the two-entry table: addr(+32), size(+40),
+    // offset(+48) within the section header.
+    bytes[CLASSLIST_SECTION_HEADER + 32..CLASSLIST_SECTION_HEADER + 40]
+        .copy_from_slice(&(image_base + table_offset).to_le_bytes());
+    bytes[CLASSLIST_SECTION_HEADER + 40..CLASSLIST_SECTION_HEADER + 48]
+        .copy_from_slice(&16u64.to_le_bytes());
+    bytes[CLASSLIST_SECTION_HEADER + 48..CLASSLIST_SECTION_HEADER + 52]
+        .copy_from_slice(&(table_offset as u32).to_le_bytes());
+
+    // Extend the segment's file coverage so the appended table is mapped.
+    bytes[SEGMENT_FILESIZE_FIELD..SEGMENT_FILESIZE_FIELD + 8].copy_from_slice(&end.to_le_bytes());
+    bytes
+}
+
 /// Build an x86-64 image with parsed Objective-C category instance and class
 /// methods so disassembly labels can prove their `-`/`+` distinction.
 pub fn disassembly_objc_category_labels() -> Vec<u8> {

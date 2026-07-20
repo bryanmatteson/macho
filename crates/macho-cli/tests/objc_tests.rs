@@ -166,10 +166,131 @@ fn objc_metadata_via_ext_trait() {
 
     for macho in container.macho_files() {
         let meta: Result<ObjCMetadata, _> = macho.ext();
-        if let Ok(meta) = meta {
-            if !meta.classes.is_empty() {
-                return; // success
-            }
+        if let Ok(meta) = meta
+            && !meta.classes.is_empty()
+        {
+            return; // success
         }
     }
+}
+
+/// Regression: a `__objc_classlist` that lists one class object through two
+/// pointer slots produces two same-address class observations. Before duplicate
+/// entities were collapsed, this failed entity-identity validation
+/// (`duplicate Objective-C entity ID`) and aborted the whole command — which is
+/// exactly what broke `objc` on large real-world binaries. The command must now
+/// succeed, collapse the duplicate to one class entity, and keep every entity
+/// identity unique.
+#[test]
+fn duplicate_class_pointers_collapse_to_one_entity() {
+    let path = std::env::temp_dir().join(format!(
+        "macho-objc-dupclass-{}-{}.macho",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::write(
+        &path,
+        macho_test_support::disassembly_objc_duplicate_class(),
+    )
+    .expect("write fixture");
+    let path_text = path.to_str().expect("utf8 path");
+
+    let text = macho_cli::run_captured(["objc", path_text, "--color", "never"]);
+    assert_eq!(
+        text.code,
+        0,
+        "objc text run failed: {}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+
+    let json = macho_cli::run_captured(["objc", path_text, "--format", "json", "--color", "never"]);
+    assert_eq!(
+        json.code,
+        0,
+        "objc json run failed: {}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+
+    let document: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("valid JSON envelope");
+    let entities = document["data"]["slices"][0]["entities"]
+        .as_array()
+        .expect("entities array");
+
+    let class_entities: Vec<&serde_json::Value> = entities
+        .iter()
+        .filter(|entity| entity["kind"] == "class")
+        .collect();
+    assert_eq!(
+        class_entities.len(),
+        1,
+        "the duplicated class must collapse to exactly one entity"
+    );
+    assert_eq!(
+        class_entities[0]["value"]["common"]["observation_ids"]
+            .as_array()
+            .expect("class observation IDs")
+            .len(),
+        2,
+        "the canonical entity must retain both source observations"
+    );
+
+    let baseline_path = path.with_file_name(format!(
+        "macho-objc-singleclass-{}-{}.macho",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    std::fs::write(
+        &baseline_path,
+        macho_test_support::disassembly_objc_boundary(),
+    )
+    .expect("write baseline fixture");
+    let baseline = macho_cli::run_captured([
+        "objc",
+        baseline_path.to_str().expect("utf8 path"),
+        "--format",
+        "json",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(
+        baseline.code,
+        0,
+        "baseline objc JSON run failed: {}",
+        String::from_utf8_lossy(&baseline.stderr)
+    );
+    let baseline_document: serde_json::Value =
+        serde_json::from_slice(&baseline.stdout).expect("valid baseline JSON envelope");
+    let baseline_id =
+        &baseline_document["data"]["slices"][0]["entities"][0]["value"]["common"]["id"];
+    assert_eq!(
+        &class_entities[0]["value"]["common"]["id"], baseline_id,
+        "duplicate pointer slots must not change stable entity identity"
+    );
+
+    let executions = document["data"]["slices"][0]["executions"]
+        .as_array()
+        .expect("collector executions");
+    assert_eq!(
+        executions[0]["output_records"], 1,
+        "runtime collector output counts canonical entities, not pointer slots"
+    );
+
+    let mut ids: Vec<&str> = entities
+        .iter()
+        .filter_map(|entity| entity["value"]["common"]["id"].as_str())
+        .collect();
+    let total = ids.len();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), total, "every entity identity must be unique");
+
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(&baseline_path);
 }

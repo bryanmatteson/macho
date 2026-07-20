@@ -25,5 +25,9 @@ $ macho snapshot --format json tests/cmd/fixture.macho
 $ macho not-a-command
 ? 2
 Error: error: unrecognized subcommand 'not-a-command'
-...
+
+Usage: macho <COMMAND> [OPTIONS]
+
+For more information, try '--help'.
+
 ```

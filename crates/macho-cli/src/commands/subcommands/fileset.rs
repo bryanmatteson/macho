@@ -79,10 +79,10 @@ fn run_list(
     if let Some(fileset) = report.fileset.as_ref() {
         let mut entries_by_arch: BTreeMap<&str, Vec<_>> = BTreeMap::new();
         for entry in &fileset.entries {
-            if let Some(filter) = arch {
-                if !entry.arch.eq_ignore_ascii_case(filter) {
-                    continue;
-                }
+            if let Some(filter) = arch
+                && !entry.arch.eq_ignore_ascii_case(filter)
+            {
+                continue;
             }
             entries_by_arch
                 .entry(entry.arch.as_str())

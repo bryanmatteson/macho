@@ -29,6 +29,15 @@ pub struct StringsArgs {
     /// Search for strings containing this query.
     #[arg(long)]
     search: Option<String>,
+    /// Match --search exactly instead of by substring.
+    #[arg(long, requires = "search")]
+    exact: bool,
+    /// Retain only strings with at least this many characters.
+    #[arg(long, default_value = "1")]
+    min_length: std::num::NonZeroUsize,
+    /// Show file offsets alongside virtual addresses in text output.
+    #[arg(long)]
+    offsets: bool,
     /// Also scan plausible untyped text sections.
     #[arg(long)]
     heuristic: bool,
@@ -44,8 +53,11 @@ pub struct VtablesArgs {
     #[command(flatten)]
     limits: AnalysisLimitArgs,
     /// Filter by class name.
-    #[arg(long, name = "class")]
+    #[arg(long = "class", alias = "class-filter", name = "class")]
     class_filter: Option<String>,
+    /// Demangle class and slot symbol names in text output.
+    #[arg(long)]
+    demangle: bool,
 }
 
 #[derive(clap::Args)]
@@ -60,9 +72,40 @@ pub struct RangesArgs {
     /// Look up the owner of a virtual address (hexadecimal).
     #[arg(long)]
     lookup: Option<String>,
+    /// Retain only entities whose name contains this text (raw or demangled).
+    #[arg(long)]
+    name: Option<String>,
+    /// Retain only ranges from this evidence source (repeatable).
+    #[arg(long, value_enum, action = clap::ArgAction::Append)]
+    source: Vec<RangeSourceArg>,
     /// Demangle symbol names.
     #[arg(long)]
     demangle: bool,
+}
+
+/// Command-line spelling of one symbol-range evidence source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum RangeSourceArg {
+    /// Defined nlist symbols.
+    Nlist,
+    /// Export-trie entries.
+    Export,
+    /// Objective-C metadata.
+    Objc,
+    /// Boundary-inferred ranges.
+    Inferred,
+}
+
+impl RangeSourceArg {
+    fn matches(self, source: RangeSource) -> bool {
+        matches!(
+            (self, source),
+            (Self::Nlist, RangeSource::Nlist)
+                | (Self::Export, RangeSource::ExportTrie)
+                | (Self::Objc, RangeSource::ObjCMetadata)
+                | (Self::Inferred, RangeSource::Inferred)
+        )
+    }
 }
 
 #[derive(clap::Args)]
@@ -80,6 +123,46 @@ pub struct XrefsArgs {
     /// Show references targeting this virtual address.
     #[arg(long)]
     to: Option<String>,
+    /// Show references targeting imports whose name contains this text.
+    #[arg(long, conflicts_with = "to")]
+    import: Option<String>,
+    /// Retain only references of this kind (repeatable).
+    #[arg(long, value_enum, action = clap::ArgAction::Append)]
+    kind: Vec<XrefKindArg>,
+    /// Demangle import names in text output.
+    #[arg(long)]
+    demangle: bool,
+}
+
+/// Command-line spelling of one cross-reference kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum XrefKindArg {
+    /// Stub-island references.
+    Stub,
+    /// Chained-fixup bind references.
+    ChainedBind,
+    /// Chained-fixup rebase references.
+    ChainedRebase,
+    /// Legacy dyld-info bind references.
+    LegacyBind,
+    /// Relocation-backed references.
+    Relocation,
+    /// Direct branch instructions.
+    Branch,
+}
+
+impl XrefKindArg {
+    fn matches(self, kind: XrefKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Stub, XrefKind::Stub)
+                | (Self::ChainedBind, XrefKind::ChainedBind)
+                | (Self::ChainedRebase, XrefKind::ChainedRebase)
+                | (Self::LegacyBind, XrefKind::LegacyBind)
+                | (Self::Relocation, XrefKind::Relocation)
+                | (Self::Branch, XrefKind::DirectBranch)
+        )
+    }
 }
 
 /// Analyze and render strings through an explicit [`crate::analysis::AnalysisPlan`].
@@ -94,9 +177,17 @@ pub fn run_strings(args: StringsArgs, format: OutputFormat, out: &mut dyn Write)
         (&args.limits).into(),
         args.heuristic,
     )?;
-    if let Some(query) = &args.search {
-        for (_, strings) in &mut values {
-            strings.retain(|value| value.value.contains(query));
+    let min_length = args.min_length.get();
+    for (_, strings) in &mut values {
+        if min_length > 1 {
+            strings.retain(|value| value.value.chars().count() >= min_length);
+        }
+        if let Some(query) = &args.search {
+            if args.exact {
+                strings.retain(|value| value.value == *query);
+            } else {
+                strings.retain(|value| value.value.contains(query));
+            }
         }
     }
     if format == OutputFormat::Json {
@@ -110,7 +201,15 @@ pub fn run_strings(args: StringsArgs, format: OutputFormat, out: &mut dyn Write)
         } else {
             writeln!(out, "Strings: {} found", strings.len())?;
             for value in strings {
-                writeln!(out, "  {:#018x}  {}", value.va.0, value.value)?;
+                if args.offsets {
+                    writeln!(
+                        out,
+                        "  {:#018x}  {:#010x}  {}",
+                        value.va.0, value.file_offset.0, value.value
+                    )?;
+                } else {
+                    writeln!(out, "  {:#018x}  {}", value.va.0, value.value)?;
+                }
             }
         }
     }
@@ -151,11 +250,14 @@ pub fn run_vtables(args: VtablesArgs, format: OutputFormat, out: &mut dyn Write)
         }
         writeln!(out, "C++ vtables: {} found", vtables.len())?;
         for vtable in vtables {
-            let name = vtable
-                .name
-                .as_deref()
-                .or(vtable.mangled_name.as_deref())
-                .unwrap_or("<unknown>");
+            let name = match (&vtable.name, &vtable.mangled_name) {
+                (Some(name), _) => name.clone(),
+                (None, Some(mangled)) if args.demangle => {
+                    demangle_symbol(mangled).unwrap_or_else(|| mangled.clone())
+                }
+                (None, Some(mangled)) => mangled.clone(),
+                (None, None) => "<unknown>".to_owned(),
+            };
             writeln!(
                 out,
                 "\n  {} @ {:#018x} ({} slots, {:#x} bytes)",
@@ -170,7 +272,7 @@ pub fn run_vtables(args: VtablesArgs, format: OutputFormat, out: &mut dyn Write)
                     "    +{:#06x}  {:#018x}  {}",
                     slot.offset,
                     slot.va.0,
-                    format_slot_target(&slot.target)
+                    format_slot_target(&slot.target, args.demangle)
                 )?;
             }
         }
@@ -197,6 +299,18 @@ pub fn run_ranges(args: RangesArgs, output: OutputOptions, out: &mut dyn Write) 
         for (_, ranges) in &mut values {
             ranges.retain(|range| range.start.0 <= va.0 && va.0 < range.end.0);
             ranges.truncate(1);
+        }
+    }
+    for (_, ranges) in &mut values {
+        if let Some(query) = &args.name {
+            ranges.retain(|range| entity_matches(&range.entity, query));
+        }
+        if !args.source.is_empty() {
+            ranges.retain(|range| {
+                args.source
+                    .iter()
+                    .any(|source| source.matches(range.source))
+            });
         }
     }
     if format == OutputFormat::Json {
@@ -267,10 +381,19 @@ pub fn run_xrefs(args: XrefsArgs, format: OutputFormat, out: &mut dyn Write) -> 
     for (_, references) in &mut values {
         if let Some(va) = from {
             references.retain(|xref| xref.source == va);
-        } else if let Some(va) = to {
+        }
+        if let Some(va) = to {
             references.retain(
                 |xref| matches!(xref.target, XrefTarget::Internal { va: target } if target == va),
             );
+        }
+        if let Some(query) = &args.import {
+            references.retain(
+                |xref| matches!(&xref.target, XrefTarget::Import { name, .. } if name.contains(query)),
+            );
+        }
+        if !args.kind.is_empty() {
+            references.retain(|xref| args.kind.iter().any(|kind| kind.matches(xref.kind)));
         }
     }
     if format == OutputFormat::Json {
@@ -289,7 +412,7 @@ pub fn run_xrefs(args: XrefsArgs, format: OutputFormat, out: &mut dyn Write) -> 
                 out,
                 "  {:#018x} -> {}  [{}]",
                 xref.source.0,
-                format_target(&xref.target),
+                format_target(&xref.target, args.demangle),
                 format_kind(xref.kind)
             )?;
         }
@@ -335,14 +458,39 @@ fn write_arch_header(out: &mut dyn Write, arch: &str, multi: bool) {
     }
 }
 
-fn format_slot_target(target: &SlotTarget) -> String {
+fn format_slot_target(target: &SlotTarget, demangle: bool) -> String {
     match target {
-        SlotTarget::Function { name, va } => format!("-> {name} ({:#x})", va.0),
+        SlotTarget::Function { name, va } => {
+            let name = if demangle {
+                demangle_symbol(name).unwrap_or_else(|| name.clone())
+            } else {
+                name.clone()
+            };
+            format!("-> {name} ({:#x})", va.0)
+        }
         SlotTarget::PureVirtual => "-> [pure virtual]".to_owned(),
         SlotTarget::TypeInfo { va } => format!("-> [typeinfo] ({:#x})", va.0),
         SlotTarget::OffsetToTop { value } => format!("-> [offset-to-top: {value}]"),
         SlotTarget::Unknown { value } => format!("-> {value:#018x}"),
         _ => "-> [unknown]".to_owned(),
+    }
+}
+
+/// Whether a range entity's raw or demangled name contains `query`.
+fn entity_matches(entity: &CodeEntity, query: &str) -> bool {
+    let name_matches = |name: &str| {
+        name.contains(query)
+            || demangle_symbol(name).is_some_and(|demangled| demangled.contains(query))
+    };
+    match entity {
+        CodeEntity::Symbol { name, .. } | CodeEntity::Export { name } => name_matches(name),
+        CodeEntity::ObjCMethod {
+            class_name,
+            selector,
+            ..
+        } => class_name.contains(query) || selector.contains(query),
+        CodeEntity::Anonymous { section_name } => section_name.contains(query),
+        _ => false,
     }
 }
 
@@ -391,10 +539,17 @@ fn format_source(source: RangeSource) -> &'static str {
     }
 }
 
-fn format_target(target: &XrefTarget) -> String {
+fn format_target(target: &XrefTarget, demangle: bool) -> String {
     match target {
         XrefTarget::Internal { va } => format!("{:#018x}", va.0),
-        XrefTarget::Import { name, ordinal } => format!("{name} (ordinal {ordinal})"),
+        XrefTarget::Import { name, ordinal } => {
+            let name = if demangle {
+                demangle_symbol(name).unwrap_or_else(|| name.clone())
+            } else {
+                name.clone()
+            };
+            format!("{name} (ordinal {ordinal})")
+        }
         _ => "<unknown target>".to_owned(),
     }
 }

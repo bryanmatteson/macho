@@ -24,10 +24,10 @@ fn infer_page_size(macho: &MachoFile<'_>) -> usize {
     for seg in macho.segments() {
         if seg.file_size() > 0 && seg.file_offset().0 > 0 {
             let offset = seg.file_offset().0 as usize;
-            if offset % 0x4000 == 0 {
+            if offset.is_multiple_of(0x4000) {
                 return 0x4000;
             }
-            if offset % 0x1000 == 0 {
+            if offset.is_multiple_of(0x1000) {
                 return 0x1000;
             }
         }

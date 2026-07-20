@@ -8,6 +8,8 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
+const TERMOSAIC_SOURCE: &str = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314";
+
 const PRODUCT_CRATES: &[&str] = &[
     "macho-core",
     "macho-insn",
@@ -93,6 +95,22 @@ pub fn check(root: &Path) -> Result<()> {
                     package.name
                 ));
             }
+            if dependency.name == "termosaic"
+                && (dependency.req.to_string() != "^0.2.0"
+                    || dependency
+                        .source
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .as_deref()
+                        != Some(TERMOSAIC_SOURCE)
+                    || dependency.uses_default_features
+                    || !dependency.features.is_empty())
+            {
+                violations.push(format!(
+                    "macho-cli must pin termosaic 0.2.0 at the approved revision with default features disabled: {}",
+                    package.name
+                ));
+            }
         }
     }
 
@@ -123,6 +141,11 @@ fn dependency_violation(
     {
         return Some(format!(
             "delivery dependency {dependency} is owned by {package}"
+        ));
+    }
+    if dependency == "termosaic" && package != "macho-cli" {
+        return Some(format!(
+            "presentation dependency termosaic is owned by macho-cli, not {package}"
         ));
     }
     if matches!(
@@ -701,6 +724,13 @@ mod tests {
                 None
             );
         }
+        assert!(
+            dependency_violation("macho-core", "termosaic", &workspace_names, &allowed).is_some()
+        );
+        assert_eq!(
+            dependency_violation("macho-cli", "termosaic", &workspace_names, &allowed),
+            None
+        );
         for dependency in ["cpp_demangle", "rustc-demangle", "swift-demangler"] {
             assert!(
                 dependency_violation("macho-analysis", dependency, &workspace_names, &allowed)

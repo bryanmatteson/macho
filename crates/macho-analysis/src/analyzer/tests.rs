@@ -61,6 +61,25 @@ fn excluded_domains_are_not_executed() {
 }
 
 #[test]
+fn selected_fat_slice_is_the_document_slice_count() {
+    let bytes = macho_test_support::disassembly_fat();
+    let container = macho_core::parse(&bytes).unwrap();
+    let document = Analyzer
+        .run(
+            &container,
+            &AnalysisPlan::new([AnalysisDomain::Header]).with_slices(["x86_64".to_owned()]),
+        )
+        .unwrap();
+
+    assert_eq!(document.container.format, "fat");
+    assert_eq!(document.container.slice_count, 1);
+    assert_eq!(document.slices.len(), 1);
+    assert_eq!(document.slices[0].identity.index, 0);
+    assert_eq!(document.slices[0].identity.arch, "x86_64");
+    document.validate().unwrap();
+}
+
+#[test]
 fn diff_exclusion_is_applied_before_dependency_execution() {
     let bytes = macho_test_support::thin64_arm64(2);
     let container = macho_core::parse(&bytes).unwrap();

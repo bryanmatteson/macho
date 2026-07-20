@@ -759,6 +759,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "unicode-width",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1090,7 +1102,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
 dependencies = [
- "console",
+ "console 0.15.11",
  "shell-words",
  "tempfile",
  "thiserror 1.0.69",
@@ -1985,6 +1997,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "laidout"
+version = "0.2.0"
+source = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314#9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314"
+dependencies = [
+ "thiserror 2.0.18",
+ "unicode-width",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2115,6 +2136,7 @@ dependencies = [
  "memmap2",
  "serde",
  "serde_json",
+ "termosaic",
  "thiserror 2.0.18",
  "trycmd",
 ]
@@ -3705,6 +3727,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "termosaic"
+version = "0.2.0"
+source = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314#9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314"
+dependencies = [
+ "console 0.16.4",
+ "laidout",
+ "thiserror 2.0.18",
+ "unicode-segmentation",
+ "unicode-width",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4175,6 +4209,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"

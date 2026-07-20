@@ -59,12 +59,12 @@ pub fn for_each_selected_mach(
     match container {
         MachoContainer::Thin(macho) => {
             let arch_name = arch_name_for_mach(macho);
-            if let Some(filter) = arch_filter {
-                if !arch_name.eq_ignore_ascii_case(filter) {
-                    return Err(input_message(format!(
-                        "no architecture matching '{filter}' found (available: {arch_name})"
-                    )));
-                }
+            if let Some(filter) = arch_filter
+                && !arch_name.eq_ignore_ascii_case(filter)
+            {
+                return Err(input_message(format!(
+                    "no architecture matching '{filter}' found (available: {arch_name})"
+                )));
             }
             f(macho, &arch_name, false)?;
         }
@@ -74,25 +74,23 @@ pub fn for_each_selected_mach(
 
             for arch in fat.arches() {
                 let arch_name = arch.spec().name();
-                if let Some(filter) = arch_filter {
-                    if !arch_name.eq_ignore_ascii_case(filter) {
-                        continue;
-                    }
+                if let Some(filter) = arch_filter
+                    && !arch_name.eq_ignore_ascii_case(filter)
+                {
+                    continue;
                 }
 
                 matched = true;
                 f(arch.macho(), &arch_name, show_headers)?;
             }
 
-            if !matched {
-                if let Some(filter) = arch_filter {
-                    let available: Vec<String> =
-                        fat.arches().iter().map(|arch| arch.spec().name()).collect();
-                    return Err(input_message(format!(
-                        "no architecture matching '{filter}' found (available: {})",
-                        available.join(", ")
-                    )));
-                }
+            if !matched && let Some(filter) = arch_filter {
+                let available: Vec<String> =
+                    fat.arches().iter().map(|arch| arch.spec().name()).collect();
+                return Err(input_message(format!(
+                    "no architecture matching '{filter}' found (available: {})",
+                    available.join(", ")
+                )));
             }
         }
     }

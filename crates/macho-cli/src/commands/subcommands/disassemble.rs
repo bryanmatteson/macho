@@ -14,14 +14,16 @@ use macho::analysis::report::disassembly::{
 use macho::analysis::report::{Architecture, ReportContainerIdentity, ReportSliceIdentity};
 use serde::Serialize;
 
+use termosaic::Span;
+
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Format, Options};
+use crate::commands::output::{ADDRESS_TOKEN, Format, Options, RAW_BYTES_TOKEN, asm};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::usage_message;
 
 #[derive(Debug, clap::Args)]
 #[command(
-    after_help = "Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --section __TEXT,__text --format json"
+    after_help = "Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --address 0x100003f50 --end-address 0x100003f80\n  macho disassemble app --symbol _main --no-addresses --no-bytes\n  macho disassemble app --section __TEXT,__text --no-labels --no-targets\n  macho disassemble app --section __TEXT,__text --format json"
 )]
 /// Arguments for bounded instruction disassembly.
 pub struct DisassembleArgs {
@@ -51,9 +53,30 @@ pub struct DisassembleArgs {
     #[arg(long, value_parser = parse_nonzero_decimal, requires = "address", conflicts_with = "length")]
     count: Option<NonZeroUsize>,
 
+    /// Select bytes from --address up to this exclusive virtual address
+    /// (hexadecimal, with optional 0x prefix).
+    #[arg(long, value_parser = parse_va, requires = "address", conflicts_with_all = ["length", "count"])]
+    end_address: Option<u64>,
+
     /// Demangle retained symbol labels while preserving their raw names.
     #[arg(long)]
     demangle: bool,
+
+    /// Omit the virtual-address column from text output.
+    #[arg(long)]
+    no_addresses: bool,
+
+    /// Omit the raw-bytes column from text output.
+    #[arg(long)]
+    no_bytes: bool,
+
+    /// Omit symbol-label lines from text output.
+    #[arg(long)]
+    no_labels: bool,
+
+    /// Omit resolved direct-target annotations from text output.
+    #[arg(long)]
+    no_targets: bool,
 
     /// Fail on the first invalid byte or caller-clipped instruction.
     #[arg(long)]
@@ -110,13 +133,21 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
             NonEmpty::try_from_vec(args.section).expect("non-empty selector branch"),
         )
     } else if let Some(start) = args.address {
-        let extent = match (args.length, args.count) {
-            (Some(length), None) => AddressExtent::ByteLength(length),
-            (None, Some(count)) => AddressExtent::InstructionCount(count),
-            (None, None) => {
+        let extent = match (args.length, args.count, args.end_address) {
+            (Some(length), None, None) => AddressExtent::ByteLength(length),
+            (None, Some(count), None) => AddressExtent::InstructionCount(count),
+            (None, None, Some(end)) => {
+                let length = end
+                    .checked_sub(start)
+                    .and_then(|length| usize::try_from(length).ok())
+                    .and_then(NonZeroUsize::new)
+                    .ok_or_else(|| usage_message("--end-address must be greater than --address"))?;
+                AddressExtent::ByteLength(length)
+            }
+            (None, None, None) => {
                 AddressExtent::InstructionCount(NonZeroUsize::new(1).expect("one is non-zero"))
             }
-            (Some(_), Some(_)) => unreachable!("Clap rejects conflicting extents"),
+            _ => unreachable!("Clap rejects conflicting extents"),
         };
         DisassemblySelection::Address {
             start: macho::model::addr::Va(start),
@@ -143,7 +174,14 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
             disassemble_streaming(&container, &request, &mut sink)?;
         }
         Format::Text => {
-            let mut sink = TextLineSink::new(output, out);
+            let mut sink = TextLineSink::new(
+                output,
+                args.no_addresses,
+                args.no_bytes,
+                args.no_labels,
+                args.no_targets,
+                out,
+            );
             disassemble_streaming(&container, &request, &mut sink)?;
         }
         Format::Sarif => unreachable!("central output policy rejects disassembly SARIF"),
@@ -156,21 +194,40 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
 struct TextLineSink<'a> {
     out: &'a mut dyn Write,
     options: Options,
+    no_addresses: bool,
+    no_bytes: bool,
+    no_labels: bool,
+    no_targets: bool,
     multiple: bool,
     raw_width: usize,
     pending_titles: Vec<String>,
     emitted_any_region: bool,
+    /// Reused across records so tokenizing a streamed instruction does not
+    /// allocate per line.
+    spans: Vec<termosaic::Span>,
 }
 
 impl<'a> TextLineSink<'a> {
-    fn new(options: Options, out: &'a mut dyn Write) -> Self {
+    fn new(
+        options: Options,
+        no_addresses: bool,
+        no_bytes: bool,
+        no_labels: bool,
+        no_targets: bool,
+        out: &'a mut dyn Write,
+    ) -> Self {
         Self {
             out,
             options,
+            no_addresses,
+            no_bytes,
+            no_labels,
+            no_targets,
             multiple: false,
             raw_width: 8,
             pending_titles: Vec::new(),
             emitted_any_region: false,
+            spans: Vec::new(),
         }
     }
 }
@@ -222,24 +279,36 @@ impl DisassemblySink for TextLineSink<'_> {
             }
             self.emitted_any_region = true;
         }
-        let extent = header
-            .requested_end_va
-            .map(|end| format!("{:#018x}..{end:#018x}", header.start_va))
-            .unwrap_or_else(|| {
-                format!(
-                    "{:#018x} ({} instructions)",
-                    header.start_va,
-                    header.requested_instruction_count.unwrap_or(0)
-                )
-            });
-        writeln!(
-            self.out,
-            "{}  {}",
-            self.options
-                .style()
-                .heading(&format!("{},{}", header.segment, header.section)),
-            extent
-        )?;
+        let style = self.options.style();
+        self.spans.clear();
+        self.spans.push(Span::new(
+            termosaic::tokens::TEXT_SUBHEADING,
+            format!("{},{}", header.segment, header.section),
+        ));
+        self.spans.push(asm::literal("  "));
+        self.spans.push(Span::new(
+            ADDRESS_TOKEN,
+            format!("{:#018x}", header.start_va),
+        ));
+        match header.requested_end_va {
+            Some(end) => {
+                self.spans
+                    .push(Span::new(termosaic::tokens::SYNTAX_PUNCTUATION, ".."));
+                self.spans
+                    .push(Span::new(ADDRESS_TOKEN, format!("{end:#018x}")));
+            }
+            None => {
+                self.spans.push(asm::literal(" "));
+                self.spans.push(Span::new(
+                    termosaic::tokens::TEXT_MUTED,
+                    format!(
+                        "({} instructions)",
+                        header.requested_instruction_count.unwrap_or(0)
+                    ),
+                ));
+            }
+        }
+        writeln!(self.out, "{}", style.render_spans(&self.spans))?;
         Ok(())
     }
 
@@ -249,62 +318,76 @@ impl DisassemblySink for TextLineSink<'_> {
         labels: &[DisassemblyLabel],
     ) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
         let style = self.options.style();
-        for label in labels {
-            writeln!(
-                self.out,
-                "{}",
-                style.accent(&format!("{}:", label.display_name))
-            )?;
+        if !self.no_labels {
+            for label in labels {
+                writeln!(
+                    self.out,
+                    "{}",
+                    style.accent(&format!("{}:", label.display_name))
+                )?;
+            }
         }
-        let (va, bytes, tail) = match record {
+        // The record line is assembled as one semantic span stream and rendered
+        // once, so every column resolves through the same theme.
+        self.spans.clear();
+        self.spans.push(asm::literal("  "));
+        let (va, bytes) = match record {
+            DisassemblyRecord::Instruction { va, bytes, .. }
+            | DisassemblyRecord::Gap { va, bytes, .. } => (*va, bytes.as_str()),
+        };
+        if !self.no_addresses {
+            self.spans
+                .push(Span::new(ADDRESS_TOKEN, format!("{va:#018x}")));
+            self.spans.push(asm::literal("  "));
+        }
+        if !self.no_bytes {
+            // Pad from the unstyled width so the instruction column stays
+            // aligned whether or not ANSI sequences were emitted.
+            let padding = self.raw_width.saturating_sub(bytes.len());
+            self.spans.push(Span::new(RAW_BYTES_TOKEN, bytes));
+            self.spans.push(asm::literal(" ".repeat(padding + 2)));
+        }
+        match record {
             DisassemblyRecord::Instruction {
-                va,
-                bytes,
                 text,
                 direct_target,
                 ..
             } => {
-                let annotation = direct_target.as_ref().map_or_else(String::new, |target| {
-                    target.display_symbol.as_ref().map_or_else(
-                        || format!("; {:#x}", target.va),
-                        |name| {
-                            let offset = target.offset.unwrap_or(0);
-                            if offset == 0 {
-                                format!("; {name}")
-                            } else {
-                                format!("; {name}+{offset:#x}")
-                            }
-                        },
-                    )
-                });
-                (
-                    *va,
-                    bytes.as_str().to_owned(),
-                    format!("{text}{annotation}"),
-                )
+                asm::instruction_spans_into(text, &mut self.spans);
+                let annotation = if self.no_targets {
+                    None
+                } else {
+                    direct_target.as_ref().map(|target| {
+                        target.display_symbol.as_ref().map_or_else(
+                            || format!("; {:#x}", target.va),
+                            |name| {
+                                let offset = target.offset.unwrap_or(0);
+                                if offset == 0 {
+                                    format!("; {name}")
+                                } else {
+                                    format!("; {name}+{offset:#x}")
+                                }
+                            },
+                        )
+                    })
+                };
+                if let Some(annotation) = annotation {
+                    self.spans.push(asm::literal("  "));
+                    self.spans
+                        .push(Span::new(termosaic::tokens::SYNTAX_COMMENT, annotation));
+                }
             }
-            DisassemblyRecord::Gap {
-                va,
-                bytes,
-                code,
-                message,
-                ..
-            } => (
-                *va,
-                bytes.as_str().to_owned(),
-                format!("<{code}> {message}"),
-            ),
-        };
-        let mut line = String::from("  ");
-        line.push_str(&style.address(&format!("{va:#018x}")));
-        line.push_str("  ");
-        line.push_str(&bytes);
-        for _ in bytes.len()..self.raw_width {
-            line.push(' ');
+            DisassemblyRecord::Gap { code, message, .. } => {
+                self.spans.push(Span::new(
+                    termosaic::tokens::DIAGNOSTIC_WARNING,
+                    format!("<{code}>"),
+                ));
+                self.spans.push(asm::literal(" "));
+                self.spans
+                    .push(Span::new(termosaic::tokens::TEXT_MUTED, message));
+            }
         }
-        line.push_str("  ");
-        line.push_str(&tail);
-        writeln!(self.out, "{line}")?;
+        writeln!(self.out, "{}", style.render_spans(&self.spans))?;
         Ok(())
     }
 

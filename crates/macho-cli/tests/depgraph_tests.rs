@@ -337,25 +337,25 @@ fn compat_arch_mismatch() {
     let mmap = load_binary("/usr/bin/true");
     let container = macho::parse(&mmap).expect("failed to parse");
 
-    if let MachoContainer::Fat(ref fat) = container {
-        if fat.arches().len() >= 2 {
-            let arch1 = fat.arches()[0].macho();
-            let arch2 = fat.arches()[1].macho();
+    if let MachoContainer::Fat(ref fat) = container
+        && fat.arches().len() >= 2
+    {
+        let arch1 = fat.arches()[0].macho();
+        let arch2 = fat.arches()[1].macho();
 
-            if arch1.header().cpu_type() != arch2.header().cpu_type() {
-                let report = CompatReport::check(arch1, "arch1", Some(arch2), Some("arch2"))
-                    .expect("compat check failed");
+        if arch1.header().cpu_type() != arch2.header().cpu_type() {
+            let report = CompatReport::check(arch1, "arch1", Some(arch2), Some("arch2"))
+                .expect("compat check failed");
 
-                let has_arch_incompat = report.findings.iter().any(|f| {
-                    f.category == CompatCategory::Architecture
-                        && f.severity == CompatSeverity::Incompatible
-                });
-                assert!(
-                    has_arch_incompat,
-                    "different architectures should produce Incompatible finding"
-                );
-                assert!(report.has_incompatible());
-            }
+            let has_arch_incompat = report.findings.iter().any(|f| {
+                f.category == CompatCategory::Architecture
+                    && f.severity == CompatSeverity::Incompatible
+            });
+            assert!(
+                has_arch_incompat,
+                "different architectures should produce Incompatible finding"
+            );
+            assert!(report.has_incompatible());
         }
     }
 }

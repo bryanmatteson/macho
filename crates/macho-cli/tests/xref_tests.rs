@@ -203,13 +203,13 @@ fn range_index_lookup_file_offset() {
         let index = SymbolRangeIndex::build(macho).expect("failed to build range index");
         let address_map = macho.address_map();
 
-        if let Some(first) = index.entries().first() {
-            if let Ok(offset) = address_map.va_to_thin_offset(first.start) {
-                let found = index.lookup_file_offset(offset, address_map);
-                assert!(found.is_some(), "file offset lookup should find the entry");
-                assert_eq!(found.unwrap().start, first.start);
-                return;
-            }
+        if let Some(first) = index.entries().first()
+            && let Ok(offset) = address_map.va_to_thin_offset(first.start)
+        {
+            let found = index.lookup_file_offset(offset, address_map);
+            assert!(found.is_some(), "file offset lookup should find the entry");
+            assert_eq!(found.unwrap().start, first.start);
+            return;
         }
     }
 }
@@ -291,10 +291,10 @@ fn xref_index_stubs_have_import_names() {
     for macho in container.macho_files() {
         let index = XrefIndex::build(macho).expect("failed to build xref index");
         for xref in index.all_refs() {
-            if xref.kind == XrefKind::Stub {
-                if let XrefTarget::Import { ref name, .. } = xref.target {
-                    assert!(!name.is_empty(), "stub import has empty name");
-                }
+            if xref.kind == XrefKind::Stub
+                && let XrefTarget::Import { ref name, .. } = xref.target
+            {
+                assert!(!name.is_empty(), "stub import has empty name");
             }
         }
     }

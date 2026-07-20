@@ -62,10 +62,10 @@ pub fn run(args: DepsArgs, output: OutputOptions, out: &mut dyn Write) -> Result
         MachoContainer::Fat(fat) => {
             for arch in fat.arches() {
                 let name = arch.spec().name();
-                if let Some(ref f) = args.selection.arch {
-                    if !name.eq_ignore_ascii_case(f) {
-                        continue;
-                    }
+                if let Some(ref f) = args.selection.arch
+                    && !name.eq_ignore_ascii_case(f)
+                {
+                    continue;
                 }
                 if !json && fat.arches().len() > 1 {
                     let _ = writeln!(out, "{}", style.title(&format!("=== {name} ===")));

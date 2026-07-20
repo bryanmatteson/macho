@@ -127,10 +127,11 @@ fn run_extract(
     let mut wrote = 0usize;
     for_each_selected_mach(&container, arch, |macho, arch_name, _| {
         for section in dwarf_sections(macho) {
-            if let Some(filter) = section_filter {
-                if section.section != filter && section.section.trim_start_matches('_') != filter {
-                    continue;
-                }
+            if let Some(filter) = section_filter
+                && section.section != filter
+                && section.section.trim_start_matches('_') != filter
+            {
+                continue;
             }
             let bytes =
                 macho.read_bytes_at(ThinFileOffset(section.offset), section.size as usize)?;

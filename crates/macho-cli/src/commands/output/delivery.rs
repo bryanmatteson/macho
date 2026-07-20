@@ -2,6 +2,7 @@ use std::io::Write;
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use termosaic::HumanText;
 
 use super::{Error, Format, Options, Result, json as json_output};
 
@@ -57,8 +58,8 @@ pub fn write_failure(
             &[Diagnostic::new(code, message)],
         )
     } else {
-        writeln!(out, "{} {message}", options.style().error("Error:"))?;
-        Ok(())
+        write!(out, "{} ", options.style().error("Error:"))?;
+        write_human_message(out, message)
     }
 }
 
@@ -76,16 +77,36 @@ pub fn write_diagnostics(
         write_envelope(out, command, true, Value::Null, diagnostics)
     } else {
         for diagnostic in diagnostics {
-            writeln!(
+            let code = HumanText::sanitize(&diagnostic.code);
+            write!(
                 out,
-                "{} [{}]: {}",
+                "{} [{}]: ",
                 options.style().warning("Warning"),
-                diagnostic.code,
-                diagnostic.message
+                code.as_str(),
             )?;
+            write_human_message(out, &diagnostic.message)?;
         }
         Ok(())
     }
+}
+
+fn write_human_message(out: &mut dyn Write, message: &str) -> Result<()> {
+    let mut remainder = message;
+    while let Some(newline) = remainder.find('\n') {
+        let line = remainder[..newline]
+            .strip_suffix('\r')
+            .unwrap_or(&remainder[..newline]);
+        out.write_all(HumanText::sanitize(line).as_str().as_bytes())?;
+        out.write_all(b"\n")?;
+        remainder = &remainder[newline + 1..];
+    }
+    if !remainder.is_empty() {
+        out.write_all(HumanText::sanitize(remainder).as_str().as_bytes())?;
+    }
+    if !message.ends_with('\n') {
+        out.write_all(b"\n")?;
+    }
+    Ok(())
 }
 
 fn write_envelope(
@@ -155,5 +176,38 @@ mod tests {
         )
         .expect("delivery succeeds");
         assert!(output.starts_with(b"\x1b[1;31mError:\x1b[0m bad input"));
+    }
+
+    #[test]
+    fn human_failure_preserves_structural_lines_while_sanitizing_content() {
+        let mut output = Vec::new();
+        write_failure(
+            &mut output,
+            Options::plain(Format::Text),
+            "info",
+            "parse.failed",
+            "bad\u{1b}\r\nUsage: macho <COMMAND>\n",
+        )
+        .expect("delivery succeeds");
+        assert_eq!(
+            String::from_utf8(output).expect("human output is UTF-8"),
+            "Error: bad�\nUsage: macho <COMMAND>\n"
+        );
+    }
+
+    #[test]
+    fn human_diagnostics_sanitize_terminal_controls() {
+        let mut output = Vec::new();
+        write_diagnostics(
+            &mut output,
+            Options::plain(Format::Text),
+            "info",
+            &[Diagnostic::new("parse\u{1b}[31m", "unsafe\u{202e}message")],
+        )
+        .expect("delivery succeeds");
+        assert_eq!(
+            String::from_utf8(output).expect("human output is UTF-8"),
+            "Warning [parse�[31m]: unsafe�message\n"
+        );
     }
 }

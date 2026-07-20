@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::io::Write;
 
 use self::output::{ColorChoice, Options as OutputOptions};
-use clap::{CommandFactory, Parser};
+use clap::{CommandFactory, FromArgMatches, Parser};
 
 pub use self::output::Format as OutputFormat;
 
@@ -476,7 +476,26 @@ where
         OutputOptions::resolve(requested_format, requested_color, io.stderr_is_terminal);
     let requested_command = pre_scan_command(&args).unwrap_or_else(|| "macho".to_owned());
 
-    match Cli::try_parse_from(args) {
+    // Help and usage text is rendered by Clap, so the same `--color` policy that
+    // governs reports is resolved up front and handed to Clap's own renderer.
+    // Without this Clap would apply its default palette on its own terminal
+    // heuristic, ignoring `--color` entirely.
+    let help_in_color =
+        OutputOptions::resolve(OutputFormat::Text, requested_color, io.stdout_is_terminal)
+            .style()
+            .enabled();
+    let command = Cli::command()
+        .color(if help_in_color {
+            clap::ColorChoice::Always
+        } else {
+            clap::ColorChoice::Never
+        })
+        .styles(output::clap_styles());
+
+    match command
+        .try_get_matches_from(args)
+        .and_then(|matches| Cli::from_arg_matches(&matches))
+    {
         Ok(cli) => {
             let command_name = cli.command.name();
             let format = cli.output.format;
@@ -595,15 +614,27 @@ where
         Err(err) => {
             let code = err.exit_code();
             if code == 0 {
-                let _ = write!(io.stdout, "{err}");
+                // Help and version reach stdout verbatim, so Clap's styling
+                // survives; the delivery layer never sanitizes this path.
+                // `Display` for Clap's styled text emits only its text parts, so
+                // the ANSI form has to be requested explicitly.
+                if help_in_color {
+                    let _ = write!(io.stdout, "{}", err.render().ansi());
+                } else {
+                    let _ = write!(io.stdout, "{err}");
+                }
                 ExitStatus::SUCCESS
             } else {
+                // Diagnostics are sanitized before delivery, which would turn
+                // Clap's escape sequences into replacement characters. Reduce
+                // the message to plain text and let the diagnostic renderer
+                // apply the theme instead.
                 let _ = output::write_failure(
                     io.stderr,
                     requested_diagnostics,
                     &requested_command,
                     INVALID_ARGUMENTS_CODE,
-                    &err.to_string(),
+                    &strip_ansi(&err.to_string()),
                 );
                 ExitStatus::USAGE_ERROR
             }
@@ -724,6 +755,28 @@ fn pre_scan_format(args: &[OsString]) -> OutputFormat {
         }
     }
     OutputFormat::Text
+}
+
+/// Remove SGR escape sequences from Clap-rendered text.
+///
+/// Clap bakes colour into its error strings when the command enables it, but the
+/// diagnostic path sanitizes what it writes, which would replace each escape
+/// with U+FFFD. Stripping first keeps the message readable and safe.
+fn strip_ansi(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\u{1b}' && characters.next_if_eq(&'[').is_some() {
+            for sequence_character in characters.by_ref() {
+                if sequence_character.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
 }
 
 fn pre_scan_color(args: &[OsString]) -> ColorChoice {

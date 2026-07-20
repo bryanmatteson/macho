@@ -2,7 +2,7 @@
 name = "macho-cli"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 license.workspace = true
 homepage.workspace = true
 repository.workspace = true
@@ -20,6 +20,7 @@ memmap2.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+termosaic.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

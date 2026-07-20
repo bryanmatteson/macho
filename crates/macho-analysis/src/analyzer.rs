@@ -87,7 +87,7 @@ pub enum DomainState<T> {
 pub struct ContainerIdentity {
     /// The format field.
     pub format: String,
-    /// The slice_count field.
+    /// Number of selected slices present in this snapshot document.
     pub slice_count: usize,
 }
 
@@ -312,14 +312,11 @@ impl Analyzer {
     ) -> Result<AnalysisDocument> {
         let resolved = resolve_domains(plan);
         let images: Vec<&MachoFile<'_>> = container.macho_files().collect();
-        let identity = ContainerIdentity {
-            format: match container {
-                MachoContainer::Thin(_) => "thin",
-                MachoContainer::Fat(_) => "fat",
-            }
-            .to_string(),
-            slice_count: images.len(),
-        };
+        let format = match container {
+            MachoContainer::Thin(_) => "thin",
+            MachoContainer::Fat(_) => "fat",
+        }
+        .to_string();
         let mut slices = Vec::new();
         let run_context = SliceRunContext {
             resolved: &resolved,
@@ -350,7 +347,12 @@ impl Analyzer {
         }
         let document = SnapshotDocument {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
-            container: identity,
+            container: ContainerIdentity {
+                format,
+                // Snapshot identity describes the emitted document, so an
+                // architecture filter reports only the selected slices.
+                slice_count: slices.len(),
+            },
             slices,
         };
         document.validate()?;

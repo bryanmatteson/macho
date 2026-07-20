@@ -17,6 +17,8 @@ The CLI uses one flat command grammar. Every command accepts `--format text` or
 `--format sarif`. JSON results use a versioned envelope, machine formats never
 contain ANSI escapes, and errors are written only to stderr. Human output uses
 color by default on interactive terminals and stays plain when redirected.
+Semantic roles and the compatibility color theme are resolved by the pinned
+Termosaic presentation library; reusable Mach-O crates remain output-neutral.
 
 ## Examples
 
@@ -26,8 +28,17 @@ macho info <binary> --arch arm64 --validate
 macho symbols <binary> --defined-only --demangle
 macho imports <binary> --format json
 macho objc <binary> --headers
+macho objc <binary> --kind class --presence defined --selector viewDidLoad
+macho swift <binary> --state metadata-defined --name MyModule
 macho disassemble <binary> --arch arm64e --symbol _main
 macho disassemble <binary> --address 0x100003f50 --count 8 --format json
+macho disassemble <binary> --address 0x100003f50 --end-address 0x100003f80
+macho disassemble <binary> --symbol _main --no-addresses --no-bytes
+macho disassemble <binary> --section __TEXT,__text --no-labels --no-targets
+macho strings <binary> --min-length 8 --offsets
+macho strings <binary> --search "secret" --exact
+macho xrefs <binary> --import malloc --kind stub
+macho ranges <binary> --name main --source nlist --demangle
 macho diff <old-binary> <new-binary> --ignore-codesign --fail-on breaking
 macho audit <binary> --min-severity warning --format sarif
 macho snapshot <binary> --format json

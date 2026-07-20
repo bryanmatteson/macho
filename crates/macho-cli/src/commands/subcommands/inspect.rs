@@ -102,10 +102,10 @@ pub(crate) fn run_scoped(
             for (i, arch) in fat.arches().iter().enumerate() {
                 let arch_name = arch.spec().name();
 
-                if let Some(ref filter) = args.selection.arch {
-                    if !arch_name.eq_ignore_ascii_case(filter) {
-                        continue;
-                    }
+                if let Some(ref filter) = args.selection.arch
+                    && !arch_name.eq_ignore_ascii_case(filter)
+                {
+                    continue;
                 }
 
                 matched = true;
@@ -126,15 +126,12 @@ pub(crate) fn run_scoped(
                 let _ = writeln!(out,);
             }
 
-            if !matched {
-                if let Some(ref filter) = args.selection.arch {
-                    let available: Vec<String> =
-                        fat.arches().iter().map(|a| a.spec().name()).collect();
-                    return Err(input_message(format!(
-                        "no architecture matching '{filter}' found (available: {})",
-                        available.join(", ")
-                    )));
-                }
+            if !matched && let Some(ref filter) = args.selection.arch {
+                let available: Vec<String> = fat.arches().iter().map(|a| a.spec().name()).collect();
+                return Err(input_message(format!(
+                    "no architecture matching '{filter}' found (available: {})",
+                    available.join(", ")
+                )));
             }
         }
     }
@@ -435,15 +432,15 @@ fn print_summary(macho: &MachoFile<'_>, style: Style, out: &mut dyn Write) {
             fixups.fixups.len()
         );
     }
-    if let Ok(exports) = crate::metadata::dyld::parse_exports(macho) {
-        if !exports.is_empty() {
-            let _ = writeln!(
-                out,
-                "{} {} exports",
-                style.heading("Exports Trie:"),
-                exports.len()
-            );
-        }
+    if let Ok(exports) = crate::metadata::dyld::parse_exports(macho)
+        && !exports.is_empty()
+    {
+        let _ = writeln!(
+            out,
+            "{} {} exports",
+            style.heading("Exports Trie:"),
+            exports.len()
+        );
     }
 }
 

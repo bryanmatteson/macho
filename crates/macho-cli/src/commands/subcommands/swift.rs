@@ -12,6 +12,9 @@ use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
 #[derive(clap::Args)]
+#[command(
+    after_help = "Examples:\n  macho swift app --kind class --state metadata-defined\n  macho swift app --name Module.Type --exact\n  macho swift app --kind struct --kind enum --format json"
+)]
 /// Evidence-accountable Swift metadata recovery.
 pub struct SwiftArgs {
     /// Path to Mach-O binary.
@@ -20,9 +23,38 @@ pub struct SwiftArgs {
     /// Filter to a specific architecture.
     #[command(flatten)]
     selection: ArchitectureArgs,
-    /// Filter by type kind.
+    /// Retain one or more type kinds (repeatable).
+    #[arg(long = "kind", value_name = "KIND", value_enum, action = clap::ArgAction::Append)]
+    kinds: Vec<SwiftTypeKindArg>,
+    /// Retain one or more recovery states (repeatable).
+    #[arg(long = "state", value_name = "STATE", value_enum, action = clap::ArgAction::Append)]
+    states: Vec<SwiftEntityStateArg>,
+    /// Retain entities whose qualified or raw linkage name contains this text.
     #[arg(long)]
-    kind: Option<String>,
+    name: Option<String>,
+    /// Match --name exactly instead of by substring.
+    #[arg(long, requires = "name")]
+    exact: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SwiftTypeKindArg {
+    Class,
+    Struct,
+    Enum,
+    Protocol,
+    TypeAlias,
+    Opaque,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum SwiftEntityStateArg {
+    MetadataDefined,
+    Referenced,
+    SymbolOnly,
+    Partial,
+    Unknown,
 }
 
 /// Runs Swift recovery.
@@ -34,8 +66,13 @@ pub fn run(args: SwiftArgs, output: OutputOptions, out: &mut dyn Write) -> Resul
     let container = macho::parse(&mmap)
         .with_context(|| format!("failed to parse {}", args.input.path.display()))?;
     let mut report = recover_swift_container(&container, args.selection.arch.as_deref())?;
-    let kind_filter = args.kind.as_deref().map(parse_kind_filter).transpose()?;
-    apply_filter(&mut report, kind_filter);
+    apply_filter(
+        &mut report,
+        &args.kinds,
+        &args.states,
+        args.name.as_deref(),
+        args.exact,
+    );
 
     match output.format() {
         OutputFormat::Json => crate::commands::output::json::write_pretty(out, &report)?,
@@ -45,29 +82,73 @@ pub fn run(args: SwiftArgs, output: OutputOptions, out: &mut dyn Write) -> Resul
     Ok(())
 }
 
-fn parse_kind_filter(kind: &str) -> Result<SwiftTypeKind> {
-    match kind {
-        "class" => Ok(SwiftTypeKind::Class),
-        "struct" => Ok(SwiftTypeKind::Struct),
-        "enum" => Ok(SwiftTypeKind::Enum),
-        "protocol" => Ok(SwiftTypeKind::Protocol),
-        "type-alias" => Ok(SwiftTypeKind::TypeAlias),
-        "opaque" => Ok(SwiftTypeKind::Opaque),
-        "unknown" => Ok(SwiftTypeKind::Unknown),
-        _ => Err(usage_message(format!(
-            "invalid kind '{kind}', expected one of: class, struct, enum, protocol, type-alias, opaque, unknown"
-        ))),
+impl SwiftTypeKindArg {
+    fn matches(self, kind: SwiftTypeKind) -> bool {
+        matches!(
+            (self, kind),
+            (Self::Class, SwiftTypeKind::Class)
+                | (Self::Struct, SwiftTypeKind::Struct)
+                | (Self::Enum, SwiftTypeKind::Enum)
+                | (Self::Protocol, SwiftTypeKind::Protocol)
+                | (Self::TypeAlias, SwiftTypeKind::TypeAlias)
+                | (Self::Opaque, SwiftTypeKind::Opaque)
+                | (Self::Unknown, SwiftTypeKind::Unknown)
+        )
     }
 }
 
-fn apply_filter(report: &mut SwiftReport, kind_filter: Option<SwiftTypeKind>) {
+impl SwiftEntityStateArg {
+    fn matches(self, state: SwiftEntityState) -> bool {
+        matches!(
+            (self, state),
+            (Self::MetadataDefined, SwiftEntityState::MetadataDefined)
+                | (Self::Referenced, SwiftEntityState::Referenced)
+                | (Self::SymbolOnly, SwiftEntityState::SymbolOnly)
+                | (Self::Partial, SwiftEntityState::Partial)
+                | (Self::Unknown, SwiftEntityState::Unknown)
+        )
+    }
+}
+
+fn apply_filter(
+    report: &mut SwiftReport,
+    kinds: &[SwiftTypeKindArg],
+    states: &[SwiftEntityStateArg],
+    name: Option<&str>,
+    exact: bool,
+) {
     for slice in report.slices.as_mut_slice() {
-        slice.selection.selected_entity_ids = slice
-            .entities
-            .iter()
-            .filter(|entity| kind_filter.is_none_or(|kind| entity_kind(entity) == kind))
-            .map(|entity| entity.id.clone())
-            .collect();
+        let entities = &slice.entities;
+        slice.selection.selected_entity_ids.retain(|id| {
+            entities
+                .iter()
+                .find(|entity| entity.id == *id)
+                .is_some_and(|entity| {
+                    (kinds.is_empty() || kinds.iter().any(|kind| kind.matches(entity_kind(entity))))
+                        && (states.is_empty()
+                            || states.iter().any(|state| state.matches(entity.state)))
+                        && name.is_none_or(|query| entity_matches_name(entity, query, exact))
+                })
+        });
+    }
+}
+
+fn entity_matches_name(entity: &SwiftEntity, query: &str, exact: bool) -> bool {
+    let matches = |candidate: &str| {
+        if exact {
+            candidate == query
+        } else {
+            candidate.contains(query)
+        }
+    };
+    known_swift(&entity.qualified_name).is_some_and(|name| matches(&name.path.as_slice().join(".")))
+        || entity.raw_linkages.iter().any(|name| matches(name))
+}
+
+fn known_swift<T>(value: &SwiftValue<T>) -> Option<&T> {
+    match value {
+        SwiftValue::Known { value, .. } => Some(value),
+        SwiftValue::Conflicted { .. } | SwiftValue::Unavailable { .. } => None,
     }
 }
 
@@ -212,7 +293,8 @@ mod tests {
 
     #[test]
     fn kind_filter_is_closed() {
-        assert_eq!(parse_kind_filter("class").unwrap(), SwiftTypeKind::Class);
-        assert!(parse_kind_filter("actorish").is_err());
+        assert!(SwiftTypeKindArg::Class.matches(SwiftTypeKind::Class));
+        assert!(!SwiftTypeKindArg::Class.matches(SwiftTypeKind::Protocol));
+        assert!(SwiftEntityStateArg::SymbolOnly.matches(SwiftEntityState::SymbolOnly));
     }
 }
