@@ -10,18 +10,30 @@
 
 [features]
     default = ["signing"]
-    signing = ["dep:apple-codesign", "dep:x509-certificate"]
+    external-signing = [
+        "dep:apple-codesign",
+        "dep:bytes",
+        "dep:sha2",
+        "dep:signature",
+        "dep:x509-certificate",
+        "dep:zeroize",
+    ]
+    signing = ["external-signing"]
 
 [dependencies]
     apple-codesign = { workspace = true, optional = true }
+    bytes = { workspace = true, optional = true }
     macho-core.workspace = true
     macho-insn.workspace = true
     macho-dyld.workspace = true
     macho-codesign.workspace = true
     serde.workspace = true
+    sha2 = { workspace = true, optional = true }
+    signature = { workspace = true, optional = true }
     zerocopy.workspace = true
     thiserror.workspace = true
     x509-certificate = { workspace = true, optional = true }
+    zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
     macho-test-support.workspace = true

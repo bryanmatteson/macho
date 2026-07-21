@@ -2237,15 +2237,19 @@ name = "macho-mutate"
 version = "0.2.0"
 dependencies = [
  "apple-codesign",
+ "bytes",
  "macho-codesign",
  "macho-core",
  "macho-dyld",
  "macho-insn",
  "macho-test-support",
  "serde",
+ "sha2",
+ "signature",
  "thiserror 2.0.18",
  "x509-certificate",
  "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

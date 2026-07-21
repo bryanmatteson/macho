@@ -26,7 +26,7 @@ pub mod preview;
 pub mod resign;
 /// Section-addition request types.
 pub mod section;
-#[cfg(feature = "signing")]
+#[cfg(feature = "external-signing")]
 pub mod sign;
 /// The transaction module.
 pub mod transaction;
@@ -38,9 +38,11 @@ pub use patch::{
 };
 pub use section::{AddSection, SectionContent};
 #[cfg(feature = "signing")]
+pub use sign::InProcessSignatureProvider;
+#[cfg(feature = "external-signing")]
 pub use sign::{
-    InProcessSignatureProvider, SignatureKind, SignatureProvider, SignatureProviderError,
-    SignatureRequest, verify_signed_binary,
+    AdHocSignatureProvider, ExternalDigestSigner, ExternalSignatureProvider, SignatureKind,
+    SignatureProvider, SignatureProviderError, SignatureRequest, verify_signed_binary,
 };
 pub use transaction::{PatchPlan, PatchTransaction, PreparedPatch};
 

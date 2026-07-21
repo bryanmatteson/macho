@@ -35,6 +35,7 @@
     bad64          = "0.12"
     base64         = "0.22"
     bitflags       = "2"
+    bytes          = "1"
     cargo_metadata = "0.22"
     clap           = { version = "4", features = ["derive"] }
     cpp_demangle   = "0.5.1"
@@ -48,6 +49,7 @@ swift-demangler = "0.1.1"
     serde          = { version = "1", features = ["derive"] }
     serde_json     = "1"
     sha2           = "0.10"
+    signature      = "2"
     syn            = { version = "2", features = ["full", "visit"] }
     tempfile       = "3"
     termosaic      = { version = "0.2.0", git = "https://github.com/bryanmatteson/termosaic.git", rev = "9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314", default-features = false }
@@ -60,4 +62,5 @@ swift-demangler = "0.1.1"
     trycmd         = "0.15"
     walkdir        = "2"
     x509-certificate = "0.24.0"
+    zeroize        = "1"
     zerocopy       = { version = "0.8", features = ["derive"] }
