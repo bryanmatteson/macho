@@ -37,7 +37,12 @@ pub mod resolve;
 /// The types module.
 pub mod types;
 
-pub use imp::{ObjCMethodImp, ObjCMethodKind, fold_method_imps, fold_method_imps_from_source};
+pub use imp::{
+    ObjCMethodImp, ObjCMethodKind, ObjCMethodRecord, ObjCMethodRecordEncoding,
+    ObjCMethodRecordProvenance, fold_method_imps, fold_method_imps_from_source,
+    fold_method_records, fold_method_records_from_source,
+};
+pub use resolve::ObjCPointerProvenance;
 pub use types::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol};
 
 use crate::model::ext::MachoExt;
@@ -130,7 +135,7 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
             "ObjC metadata parsing is only supported for 64-bit binaries",
         ));
     }
-    let resolver = ObjCResolver::new(macho);
+    let resolver = ObjCResolver::new(macho)?;
     let mut observations = Vec::new();
     let mut classes = Vec::new();
     let mut categories = Vec::new();

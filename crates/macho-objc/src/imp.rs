@@ -6,7 +6,7 @@ use macho_core::model::macho_file::MachoFile;
 use macho_core::model::section::Section;
 
 use crate::error::{Error, Result};
-use crate::resolve::ObjCResolver;
+use crate::resolve::{ObjCPointerProvenance, ObjCResolver};
 use crate::types::{METHOD_LIST_ENTSIZE_MASK, METHOD_LIST_USES_RELATIVE_OFFSETS};
 
 /// Objective-C method dispatch kind.
@@ -16,6 +16,66 @@ pub enum ObjCMethodKind {
     Instance,
     /// Class method (`+`).
     Class,
+}
+
+/// Storage and decoding provenance for one Objective-C method-list entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjCMethodRecordProvenance {
+    /// Exact thin-file offset containing the method record.
+    pub record_file_offset: ThinFileOffset,
+    /// Runtime address corresponding to the first byte of the record.
+    pub record_va: Va,
+    /// Encoded record size selected by the method-list header.
+    pub record_size: u64,
+    /// Absolute-pointer or relative-field decoding details.
+    pub encoding: ObjCMethodRecordEncoding,
+}
+
+/// Pointer or relative-field representation used by one method record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjCMethodRecordEncoding {
+    /// Three pointer-sized fields, each retaining its fixup provenance.
+    Absolute {
+        /// Selector-name pointer provenance.
+        selector_pointer: ObjCPointerProvenance,
+        /// Type-encoding pointer provenance.
+        type_encoding_pointer: ObjCPointerProvenance,
+        /// Implementation pointer provenance.
+        implementation_pointer: ObjCPointerProvenance,
+    },
+    /// Three signed 32-bit offsets relative to their own field addresses.
+    Relative {
+        /// Runtime address used as the selector-offset basis.
+        selector_field_va: Va,
+        /// Runtime address used as the type-encoding-offset basis.
+        type_encoding_field_va: Va,
+        /// Runtime address used as the implementation-offset basis.
+        implementation_field_va: Va,
+        /// File offset reached by the selector relative offset. This may be a
+        /// selector-reference pointer or the selector string itself.
+        selector_reference_file_offset: ThinFileOffset,
+        /// Provenance of a selector-reference pointer at that offset.
+        selector_reference_pointer: ObjCPointerProvenance,
+    },
+}
+
+/// One parsed Objective-C method record with exact storage provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjCMethodRecord {
+    /// Owning class name.
+    pub class_name: String,
+    /// Owning category name, when the method comes from a category.
+    pub category_name: Option<String>,
+    /// Selector spelling.
+    pub method_name: String,
+    /// Raw Objective-C type encoding.
+    pub type_encoding: String,
+    /// Instance or class dispatch kind.
+    pub kind: ObjCMethodKind,
+    /// Resolved implementation virtual address.
+    pub imp: Va,
+    /// Exact record storage and pointer/relative decoding provenance.
+    pub provenance: ObjCMethodRecordProvenance,
 }
 
 /// One parsed Objective-C implementation entry.
@@ -42,15 +102,35 @@ pub struct ObjCMethodImp {
 /// accumulator and returns only the typed parse error.
 pub fn fold_method_imps<State>(
     macho: &MachoFile<'_>,
-    mut state: State,
+    state: State,
     mut folder: impl FnMut(&mut State, ObjCMethodImp) -> Result<()>,
+) -> Result<State> {
+    fold_method_records(macho, state, |state, record| {
+        folder(
+            state,
+            ObjCMethodImp {
+                class_name: record.class_name,
+                category_name: record.category_name,
+                method_name: record.method_name,
+                kind: record.kind,
+                imp: record.imp,
+            },
+        )
+    })
+}
+
+/// Fold strict method records with exact storage and decoding provenance.
+pub fn fold_method_records<State>(
+    macho: &MachoFile<'_>,
+    mut state: State,
+    mut folder: impl FnMut(&mut State, ObjCMethodRecord) -> Result<()>,
 ) -> Result<State> {
     if !macho.is_64bit() {
         return Err(Error::unsupported(
             "ObjC method implementation parsing is only supported for 64-bit binaries",
         ));
     }
-    let resolver = ObjCResolver::new(macho);
+    let resolver = ObjCResolver::new(macho)?;
     let (class_list, category_list) = runtime_lists(macho);
     if let Some(section) = class_list {
         fold_pointer_list(macho, &resolver, section, |class_va| {
@@ -80,6 +160,19 @@ where
 {
     let macho = crate::parse_source(source)?;
     fold_method_imps(&macho, state, folder)
+}
+
+/// Fold strict method records from one borrowed thin Mach-O byte source.
+pub fn fold_method_records_from_source<S, State>(
+    source: &S,
+    state: State,
+    folder: impl FnMut(&mut State, ObjCMethodRecord) -> Result<()>,
+) -> Result<State>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    let macho = crate::parse_source(source)?;
+    fold_method_records(&macho, state, folder)
 }
 
 fn runtime_lists<'macho>(
@@ -139,7 +232,7 @@ fn fold_class<State>(
     resolver: &ObjCResolver<'_>,
     class_va: Va,
     state: &mut State,
-    folder: &mut impl FnMut(&mut State, ObjCMethodImp) -> Result<()>,
+    folder: &mut impl FnMut(&mut State, ObjCMethodRecord) -> Result<()>,
 ) -> Result<()> {
     let class_offset = resolver.va_to_offset(class_va)?.0;
     let data_va = required_pointer(
@@ -190,7 +283,7 @@ fn fold_category<State>(
     resolver: &ObjCResolver<'_>,
     category_va: Va,
     state: &mut State,
-    folder: &mut impl FnMut(&mut State, ObjCMethodImp) -> Result<()>,
+    folder: &mut impl FnMut(&mut State, ObjCMethodRecord) -> Result<()>,
 ) -> Result<()> {
     let offset = resolver.va_to_offset(category_va)?.0;
     let category_name = required_cstring_pointer(resolver, offset, "category name")?;
@@ -224,7 +317,7 @@ fn fold_optional_method_list<State>(
     category_name: Option<&str>,
     kind: ObjCMethodKind,
     state: &mut State,
-    folder: &mut impl FnMut(&mut State, ObjCMethodImp) -> Result<()>,
+    folder: &mut impl FnMut(&mut State, ObjCMethodRecord) -> Result<()>,
 ) -> Result<()> {
     let Some(list_va) = resolver.read_pointer_at_offset(pointer_offset)? else {
         return Ok(());
@@ -232,24 +325,33 @@ fn fold_optional_method_list<State>(
     if list_va.0 == 0 {
         return Ok(());
     }
-    fold_method_list(resolver, list_va, |method_name, imp| {
+    fold_method_list(resolver, list_va, |record| {
         folder(
             state,
-            ObjCMethodImp {
+            ObjCMethodRecord {
                 class_name: class_name.to_owned(),
                 category_name: category_name.map(str::to_owned),
-                method_name,
+                method_name: record.method_name,
+                type_encoding: record.type_encoding,
                 kind,
-                imp,
+                imp: record.imp,
+                provenance: record.provenance,
             },
         )
     })
 }
 
+struct ParsedMethodRecord {
+    method_name: String,
+    type_encoding: String,
+    imp: Va,
+    provenance: ObjCMethodRecordProvenance,
+}
+
 fn fold_method_list(
     resolver: &ObjCResolver<'_>,
     list_va: Va,
-    mut visitor: impl FnMut(String, Va) -> Result<()>,
+    mut visitor: impl FnMut(ParsedMethodRecord) -> Result<()>,
 ) -> Result<()> {
     let offset = resolver.va_to_offset(list_va)?.as_usize();
     let data = resolver.macho().bytes();
@@ -293,21 +395,26 @@ fn fold_method_list(
 
     for ordinal in 0..count {
         let entry_offset = entries_start + ordinal * entry_size;
-        let (name, imp) = if relative {
-            parse_relative_method(resolver, entry_offset)?
+        let record = if relative {
+            parse_relative_method(resolver, entry_offset, entry_size)?
         } else {
-            parse_absolute_method(resolver, entry_offset)?
+            parse_absolute_method(resolver, entry_offset, entry_size)?
         };
-        visitor(name, imp)?;
+        visitor(record)?;
     }
     Ok(())
 }
 
-fn parse_relative_method(resolver: &ObjCResolver<'_>, entry_offset: usize) -> Result<(String, Va)> {
+fn parse_relative_method(
+    resolver: &ObjCResolver<'_>,
+    entry_offset: usize,
+    entry_size: usize,
+) -> Result<ParsedMethodRecord> {
     let data = resolver.macho().bytes();
     let endian = resolver.endian();
     let raw: RawRelativeMethodT = pod::read_pod(data, entry_offset)?;
     let name_relative = endian.interpret_i32(raw.name_offset) as isize;
+    let types_relative = endian.interpret_i32(raw.types_offset) as isize;
     let imp_relative = endian.interpret_i32(raw.imp_offset) as i64;
     let selector_offset = entry_offset
         .checked_add_signed(name_relative)
@@ -316,6 +423,13 @@ fn parse_relative_method(resolver: &ObjCResolver<'_>, entry_offset: usize) -> Re
         Some(string_va) => resolver.read_cstring(string_va)?.to_owned(),
         None => read_cstring_at_file_offset(data, selector_offset)?.to_owned(),
     };
+    let types_field_offset = entry_offset
+        .checked_add(4)
+        .ok_or_else(|| Error::address("relative method type-encoding field overflows"))?;
+    let types_offset = types_field_offset
+        .checked_add_signed(types_relative)
+        .ok_or_else(|| Error::address("relative method type-encoding offset overflows"))?;
+    let type_encoding = read_cstring_at_file_offset(data, types_offset)?.to_owned();
     let imp_field_offset = entry_offset
         .checked_add(8)
         .ok_or_else(|| Error::address("relative method IMP field overflows"))?;
@@ -329,20 +443,62 @@ fn parse_relative_method(resolver: &ObjCResolver<'_>, entry_offset: usize) -> Re
         .filter(|value| *value != 0)
         .map(Va)
         .ok_or_else(|| Error::address("relative method IMP address is invalid"))?;
-    Ok((name, imp))
+    let address_map = resolver.macho().address_map();
+    let record_file_offset = ThinFileOffset(entry_offset as u64);
+    let record_va = address_map.thin_offset_to_va(record_file_offset)?;
+    Ok(ParsedMethodRecord {
+        method_name: name,
+        type_encoding,
+        imp,
+        provenance: ObjCMethodRecordProvenance {
+            record_file_offset,
+            record_va,
+            record_size: entry_size as u64,
+            encoding: ObjCMethodRecordEncoding::Relative {
+                selector_field_va: record_va,
+                type_encoding_field_va: address_map
+                    .thin_offset_to_va(ThinFileOffset(types_field_offset as u64))?,
+                implementation_field_va: imp_field_va,
+                selector_reference_file_offset: ThinFileOffset(selector_offset as u64),
+                selector_reference_pointer: resolver
+                    .pointer_provenance_at_offset(selector_offset as u64),
+            },
+        },
+    })
 }
 
-fn parse_absolute_method(resolver: &ObjCResolver<'_>, entry_offset: usize) -> Result<(String, Va)> {
+fn parse_absolute_method(
+    resolver: &ObjCResolver<'_>,
+    entry_offset: usize,
+    entry_size: usize,
+) -> Result<ParsedMethodRecord> {
     let name = required_cstring_pointer(resolver, entry_offset as u64, "method name")?;
-    let imp = required_pointer(
-        resolver,
-        checked_field_offset(entry_offset as u64, 16, "method IMP")?,
-        "method IMP",
-    )?;
+    let types_offset = checked_field_offset(entry_offset as u64, 8, "method type encoding")?;
+    let type_encoding = required_cstring_pointer(resolver, types_offset, "method type encoding")?;
+    let imp_offset = checked_field_offset(entry_offset as u64, 16, "method IMP")?;
+    let imp = required_pointer(resolver, imp_offset, "method IMP")?;
     if imp.0 == 0 {
         return Err(Error::address("method IMP is null"));
     }
-    Ok((name, imp))
+    let record_file_offset = ThinFileOffset(entry_offset as u64);
+    Ok(ParsedMethodRecord {
+        method_name: name,
+        type_encoding,
+        imp,
+        provenance: ObjCMethodRecordProvenance {
+            record_file_offset,
+            record_va: resolver
+                .macho()
+                .address_map()
+                .thin_offset_to_va(record_file_offset)?,
+            record_size: entry_size as u64,
+            encoding: ObjCMethodRecordEncoding::Absolute {
+                selector_pointer: resolver.pointer_provenance_at_offset(entry_offset as u64),
+                type_encoding_pointer: resolver.pointer_provenance_at_offset(types_offset),
+                implementation_pointer: resolver.pointer_provenance_at_offset(imp_offset),
+            },
+        },
+    })
 }
 
 fn strict_class_ref_name(resolver: &ObjCResolver<'_>, pointer_offset: u64) -> Result<String> {
@@ -429,6 +585,27 @@ mod tests {
             }),
             "{class_imps:?}"
         );
+        let class_records = fold_method_records(thin(&class_bytes), Vec::new(), |items, item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+        let class_method = class_records
+            .iter()
+            .find(|item| item.method_name == "next")
+            .unwrap();
+        assert_eq!(class_method.type_encoding, "v@:");
+        assert_eq!(class_method.provenance.record_file_offset.0, 0x2c8);
+        assert_eq!(class_method.provenance.record_va.0, 0x1_0000_02c8);
+        assert_eq!(class_method.provenance.record_size, 24);
+        assert_eq!(
+            class_method.provenance.encoding,
+            ObjCMethodRecordEncoding::Absolute {
+                selector_pointer: ObjCPointerProvenance::Direct,
+                type_encoding_pointer: ObjCPointerProvenance::Direct,
+                implementation_pointer: ObjCPointerProvenance::Direct,
+            }
+        );
 
         let category_bytes = macho_test_support::disassembly_objc_category_labels();
         let category_imps = fold_method_imps(thin(&category_bytes), Vec::new(), |items, item| {
@@ -448,6 +625,74 @@ mod tests {
                 .any(|item| item.category_name.as_deref() == Some("Fixture")
                     && item.kind == ObjCMethodKind::Class)
         );
+    }
+
+    #[test]
+    fn relative_method_records_retain_each_field_basis_and_selector_reference() {
+        let mut bytes = macho_test_support::disassembly_objc_boundary();
+        const IMAGE_BASE: u64 = 0x1_0000_0000;
+        const ENTRY: usize = 0x2c8;
+        const SELECTOR_REFERENCE: usize = 0x2f8;
+        bytes[0x2c0..0x2c4].copy_from_slice(&0x8000_000cu32.to_le_bytes());
+        bytes[ENTRY..ENTRY + 4].copy_from_slice(
+            &i32::try_from(SELECTOR_REFERENCE - ENTRY)
+                .unwrap()
+                .to_le_bytes(),
+        );
+        bytes[ENTRY + 4..ENTRY + 8]
+            .copy_from_slice(&i32::try_from(0x2f0 - (ENTRY + 4)).unwrap().to_le_bytes());
+        bytes[ENTRY + 8..ENTRY + 12].copy_from_slice(&(-0xcci32).to_le_bytes());
+        bytes[SELECTOR_REFERENCE..SELECTOR_REFERENCE + 8]
+            .copy_from_slice(&(IMAGE_BASE + 0x2e8).to_le_bytes());
+
+        let records = fold_method_records(thin(&bytes), Vec::new(), |items, item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+        let record = records
+            .iter()
+            .find(|item| item.method_name == "next")
+            .unwrap();
+        assert_eq!(record.type_encoding, "v@:");
+        assert_eq!(record.imp.0, IMAGE_BASE + 0x204);
+        assert_eq!(record.provenance.record_file_offset.0, ENTRY as u64);
+        assert_eq!(record.provenance.record_size, 12);
+        assert_eq!(
+            record.provenance.encoding,
+            ObjCMethodRecordEncoding::Relative {
+                selector_field_va: Va(IMAGE_BASE + ENTRY as u64),
+                type_encoding_field_va: Va(IMAGE_BASE + ENTRY as u64 + 4),
+                implementation_field_va: Va(IMAGE_BASE + ENTRY as u64 + 8),
+                selector_reference_file_offset: ThinFileOffset(SELECTOR_REFERENCE as u64),
+                selector_reference_pointer: ObjCPointerProvenance::Direct,
+            }
+        );
+    }
+
+    #[test]
+    fn damaged_chained_fixups_reject_instead_of_falling_back_to_legacy_metadata() {
+        let mut bytes = macho_test_support::disassembly_objc_boundary();
+        const HEADER_SIZE: usize = 32;
+        const SEGMENT_COMMAND_SIZE: usize = 72 + 2 * 80;
+        const SYMTAB_COMMAND_SIZE: usize = 24;
+        const CHAINED_COMMAND_SIZE: usize = 16;
+        const COMMAND_OFFSET: usize = HEADER_SIZE + SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE;
+
+        bytes[16..20].copy_from_slice(&3u32.to_le_bytes());
+        bytes[20..24].copy_from_slice(
+            &((SEGMENT_COMMAND_SIZE + SYMTAB_COMMAND_SIZE + CHAINED_COMMAND_SIZE) as u32)
+                .to_le_bytes(),
+        );
+        bytes[COMMAND_OFFSET..COMMAND_OFFSET + 4].copy_from_slice(&0x8000_0034u32.to_le_bytes());
+        bytes[COMMAND_OFFSET + 4..COMMAND_OFFSET + 8]
+            .copy_from_slice(&(CHAINED_COMMAND_SIZE as u32).to_le_bytes());
+        bytes[COMMAND_OFFSET + 8..COMMAND_OFFSET + 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[COMMAND_OFFSET + 12..COMMAND_OFFSET + 16].copy_from_slice(&28u32.to_le_bytes());
+
+        let error = fold_method_records(thin(&bytes), (), |_, _| Ok(()))
+            .expect_err("damaged chained-fixup payload must reject");
+        assert!(error.to_string().contains("offset"), "{error}");
     }
 
     #[test]
