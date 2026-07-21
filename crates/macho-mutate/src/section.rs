@@ -308,7 +308,7 @@ pub(crate) fn place_section<'data>(
             let declared_end = segment_file_start
                 .checked_add(target.file_size)
                 .ok_or_else(|| Error::invalid("segment file range overflow"))?;
-            let later_file_segment = segments
+            let next_file_segment = segments
                 .iter()
                 .enumerate()
                 .filter(|(index, segment)| {
@@ -318,15 +318,12 @@ pub(crate) fn place_section<'data>(
                 })
                 .map(|(_, segment)| segment.original.file_offset().0)
                 .min();
-            if let Some(next_start) = later_file_segment {
-                return Err(Error::invalid(format!(
-                    "cannot extend segment {}: a later file-backed segment starts at {next_start:#x}",
-                    request.segment_name()
-                )));
-            }
             let input_len =
                 u64::try_from(input_len).map_err(|_| Error::invalid("input length exceeds u64"))?;
-            if target.file_size == target.original.file_size() && declared_end != input_len {
+            if next_file_segment.is_none()
+                && target.file_size == target.original.file_size()
+                && declared_end != input_len
+            {
                 return Err(Error::invalid(format!(
                     "cannot extend segment {}: its declared file range ends at {declared_end:#x}, but the input ends at {input_len:#x}",
                     request.segment_name()
@@ -349,6 +346,14 @@ pub(crate) fn place_section<'data>(
             let file_end = file_offset
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| Error::invalid("new section file range overflow"))?;
+            if let Some(next_start) = next_file_segment
+                && file_end > next_start
+            {
+                return Err(Error::invalid(format!(
+                    "cannot extend segment {} through {file_end:#x}: the next file-backed segment starts at {next_start:#x}",
+                    request.segment_name()
+                )));
+            }
             let relative = file_offset
                 .checked_sub(segment_file_start)
                 .ok_or_else(|| Error::invalid("new section file offset precedes its segment"))?;

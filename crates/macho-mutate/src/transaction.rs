@@ -418,6 +418,30 @@ mod tests {
     }
 
     #[test]
+    fn add_section_consumes_bounded_gap_before_later_segment() {
+        let input = macho_test_support::signable_thin64_x86_64_with_data_gap(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let macho = container.first_macho().expect("thin Mach-O");
+        let mut transaction = PatchTransaction::new(macho);
+        transaction.add_section(
+            AddSection::new("__DATA", "__payload", &[1, 2, 3, 4]).expect("valid section request"),
+        );
+
+        let output = transaction.commit().expect("gap-backed insertion succeeds");
+        let reparsed = macho_core::parse(&output).expect("output reparses");
+        let macho = reparsed.first_macho().expect("thin Mach-O");
+        let section = macho
+            .section("__DATA", "__payload")
+            .expect("new section is present");
+        assert_eq!(section.offset().0, 0x1100);
+        assert_eq!(
+            macho.section_bytes("__DATA", "__payload").unwrap(),
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(&output[0x1200..0x1210], &input[0x1200..0x1210]);
+    }
+
+    #[test]
     fn add_sections_reject_load_command_payload_relocation() {
         let input = macho_test_support::signable_thin64_arm64(2);
         let original = input.clone();
