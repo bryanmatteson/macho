@@ -108,6 +108,29 @@ impl From<ParseError> for ObjcError {
     }
 }
 
+impl From<macho_dyld::DyldError> for ObjcError {
+    fn from(source: macho_dyld::DyldError) -> Self {
+        let message = source.message().to_owned();
+        let kind = match source.kind {
+            macho_dyld::DyldErrorKind::InvalidFormat => ObjcErrorKind::InvalidFormat,
+            macho_dyld::DyldErrorKind::OutOfBounds => ObjcErrorKind::OutOfBounds,
+            macho_dyld::DyldErrorKind::InvalidAddress => ObjcErrorKind::InvalidAddress,
+            macho_dyld::DyldErrorKind::Unsupported => ObjcErrorKind::Unsupported,
+            macho_dyld::DyldErrorKind::Core => ObjcErrorKind::Core,
+            _ => ObjcErrorKind::Core,
+        };
+        let mut context = source.context;
+        context.push(ContextFrame::Operation { name: "objc" });
+        Self {
+            kind,
+            location: source.location,
+            context,
+            message,
+            source: source.source,
+        }
+    }
+}
+
 impl fmt::Display for ObjcError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.code(), self.message)
