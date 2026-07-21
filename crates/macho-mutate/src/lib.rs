@@ -24,6 +24,8 @@ pub mod patch;
 pub mod preview;
 /// The resign module.
 pub mod resign;
+/// Section-addition request types.
+pub mod section;
 pub mod sign;
 /// The transaction module.
 pub mod transaction;
@@ -33,6 +35,7 @@ pub use patch::{
     PatchArch, PatchOp, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable,
     TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
 };
+pub use section::{AddSection, SectionContent};
 pub use sign::{
     InProcessSignatureProvider, SignatureKind, SignatureProvider, SignatureProviderError,
     SignatureRequest, verify_signed_binary,
@@ -41,7 +44,6 @@ pub use transaction::{PatchPlan, PatchTransaction, PreparedPatch};
 
 use crate::model::load_command::*;
 use crate::model::macho_file::MachoFile;
-use crate::model::segment::Segment;
 
 /// A structural editor for Mach-O binaries.
 ///
@@ -50,7 +52,7 @@ use crate::model::segment::Segment;
 pub struct MachoEditor<'data> {
     original: &'data MachoFile<'data>,
     commands: Vec<LoadCommand>,
-    segments: Vec<Segment>,
+    segments: Vec<section::EditableSegment>,
 }
 
 impl<'data> MachoEditor<'data> {
@@ -61,7 +63,12 @@ impl<'data> MachoEditor<'data> {
             .iter()
             .map(|lc| lc.kind().clone())
             .collect();
-        let segments = macho.segments().to_vec();
+        let segments = macho
+            .segments()
+            .iter()
+            .cloned()
+            .map(section::EditableSegment::from)
+            .collect();
         Self {
             original: macho,
             commands,
@@ -140,6 +147,15 @@ impl<'data> MachoEditor<'data> {
             .retain(|cmd| !matches!(cmd, LoadCommand::CodeSignature(_)));
     }
 
+    /// Add a section to an existing segment.
+    ///
+    /// Placement consumes only free file and virtual-address space. The edit
+    /// fails rather than relocating a later segment or overwriting unrelated
+    /// bytes.
+    pub fn add_section(&mut self, request: AddSection) -> Result<()> {
+        section::place_section(&mut self.segments, self.original.bytes().len(), request)
+    }
+
     /// Build the modified binary, returning the new bytes.
     ///
     /// This encodes all commands, adjusts offsets, and produces a complete
@@ -152,12 +168,13 @@ impl<'data> MachoEditor<'data> {
             .commands
             .iter()
             .map(|cmd| {
-                let bytes = layout::encode_load_command(cmd, &self.segments, endian, bitness)?;
+                let bytes =
+                    layout::encode_edited_load_command(cmd, &self.segments, endian, bitness)?;
                 Ok((cmd.clone(), bytes))
             })
             .collect::<Result<_>>()?;
 
-        layout::build_binary(self.original, &encoded, &self.segments)
+        layout::build_edited_binary(self.original, &encoded, &self.segments)
     }
 }
 
@@ -195,9 +212,9 @@ pub mod mutate {
     pub use crate::resign;
     pub use crate::transaction;
     pub use crate::{
-        FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding,
+        AddSection, FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding,
         LoadCommandEditExt, MachoEditor, MachoPatcher, PatchArch, PatchOp, PatchSectionInfo,
-        PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable, TrampolinePlan, nop_bytes_for_arch,
-        vtable_mangled_prefix,
+        PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable, SectionContent, TrampolinePlan,
+        nop_bytes_for_arch, vtable_mangled_prefix,
     };
 }

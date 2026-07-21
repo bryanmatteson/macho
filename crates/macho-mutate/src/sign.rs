@@ -22,13 +22,17 @@ pub struct SignatureRequest {
     pub entitlements_xml: Option<String>,
 }
 
-/// The kind of signature produced by an in-process provider.
+/// The kind of signature produced by a signing provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignatureKind {
     /// A digest-only ad-hoc signature without a CMS signature.
     AdHoc,
     /// A certificate-backed signature containing CMS data.
     Certificate,
+    /// A signature whose mechanism is intentionally hidden by an external
+    /// provider.
+    Opaque,
 }
 
 impl std::fmt::Display for SignatureKind {
@@ -36,6 +40,7 @@ impl std::fmt::Display for SignatureKind {
         formatter.write_str(match self {
             Self::AdHoc => "ad-hoc",
             Self::Certificate => "certificate",
+            Self::Opaque => "opaque",
         })
     }
 }
@@ -59,6 +64,11 @@ pub enum SignatureProviderError {
 }
 
 /// Injectable signing provider. Implementations never choose output paths.
+///
+/// External services, hardware tokens, and other adapters may omit
+/// [`kind`](Self::kind); they are reported as producing an opaque signature.
+/// Implementations remain responsible for returning bytes whose signature has
+/// passed their own integrity checks.
 pub trait SignatureProvider: Send + Sync {
     /// Return a signed replacement buffer without modifying the input.
     fn sign(
@@ -68,7 +78,9 @@ pub trait SignatureProvider: Send + Sync {
     ) -> std::result::Result<Vec<u8>, SignatureProviderError>;
 
     /// Describe the signature produced by this provider.
-    fn kind(&self) -> SignatureKind;
+    fn kind(&self) -> SignatureKind {
+        SignatureKind::Opaque
+    }
 }
 
 struct CertificateIdentity {
@@ -206,11 +218,12 @@ pub fn verify_signed_binary(
     bytes: &[u8],
     kind: SignatureKind,
 ) -> std::result::Result<(), SignatureProviderError> {
-    let empty_adhoc_cms = kind == SignatureKind::AdHoc && all_cms_slots_are_empty(bytes);
+    let permits_absent_cms = matches!(kind, SignatureKind::AdHoc | SignatureKind::Opaque);
+    let empty_adhoc_cms = permits_absent_cms && all_cms_slots_are_empty(bytes);
     let problems = verify_macho_data(bytes)
         .into_iter()
         .filter(|problem| {
-            let expected_absent_cms = kind == SignatureKind::AdHoc
+            let expected_absent_cms = permits_absent_cms
                 && matches!(
                     &problem.problem,
                     VerificationProblemType::NoCryptographicSignature

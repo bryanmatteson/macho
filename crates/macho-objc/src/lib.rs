@@ -1,5 +1,9 @@
 #![deny(missing_docs)]
 //! Objective-C runtime metadata parsing.
+//!
+//! Depend on this crate directly for ObjC metadata without the `macho` façade:
+//! parse a [`macho_core::MachoFile`] with [`parse_objc_metadata`] or
+//! [`scan_objc_metadata`].
 
 extern crate self as objc;
 

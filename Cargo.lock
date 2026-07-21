@@ -2146,6 +2146,7 @@ name = "macho-codesign"
 version = "0.2.0"
 dependencies = [
  "macho-core",
+ "macho-test-support",
  "thiserror 2.0.18",
 ]
 
@@ -2164,10 +2165,10 @@ name = "macho-cpp"
 version = "0.2.0"
 dependencies = [
  "macho-core",
- "macho-dwarf",
  "macho-dyld",
  "macho-insn",
  "macho-symbols",
+ "macho-test-support",
  "serde",
  "thiserror 2.0.18",
 ]
@@ -2253,7 +2254,6 @@ version = "0.2.0"
 dependencies = [
  "macho-core",
  "macho-dyld",
- "macho-header-syntax",
  "macho-test-support",
  "thiserror 2.0.18",
 ]
@@ -2265,6 +2265,7 @@ dependencies = [
  "macho-core",
  "macho-objc",
  "macho-symbols",
+ "macho-test-support",
  "serde",
  "thiserror 2.0.18",
 ]

@@ -7,7 +7,11 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Mach-O code-signature parsing"
+readme = "README.md"
 
 [dependencies]
 macho-core.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+macho-test-support.workspace = true

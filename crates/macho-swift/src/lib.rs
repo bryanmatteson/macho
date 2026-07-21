@@ -1,5 +1,8 @@
 #![deny(missing_docs)]
 //! Swift metadata indexing with injectable demangling.
+//!
+//! Depend on this crate directly for Swift type indexes without the `macho`
+//! façade: build a [`SwiftTypeIndex`] from a [`macho_core::MachoFile`].
 
 pub use macho_core::{ext, model};
 pub use macho_objc as objc;

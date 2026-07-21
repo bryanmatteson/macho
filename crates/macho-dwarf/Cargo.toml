@@ -7,6 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "DWARF indexes for Mach-O images"
+readme = "README.md"
 
 [dependencies]
 macho-core.workspace = true

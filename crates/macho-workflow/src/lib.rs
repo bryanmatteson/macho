@@ -172,6 +172,7 @@ pub fn execute(
             SignatureKind::Certificate => {
                 macho_mutate::preview::SignatureOutcome::SignedCertificate
             }
+            _ => macho_mutate::preview::SignatureOutcome::SignedOpaque,
         };
         structural.resign_plan = None;
     }
@@ -212,10 +213,6 @@ mod tests {
         ) -> Result<Vec<u8>, SignatureProviderError> {
             Ok(bytes.to_vec())
         }
-
-        fn kind(&self) -> SignatureKind {
-            SignatureKind::AdHoc
-        }
     }
 
     struct InvalidSigner;
@@ -227,10 +224,6 @@ mod tests {
             _request: &SignatureRequest,
         ) -> Result<Vec<u8>, SignatureProviderError> {
             Ok(vec![0, 0, 0, 0])
-        }
-
-        fn kind(&self) -> SignatureKind {
-            SignatureKind::AdHoc
         }
     }
 
@@ -260,7 +253,7 @@ mod tests {
         assert!(result.preview.semantic.findings.is_empty());
         assert_eq!(
             result.preview.structural.signature_outcome,
-            macho_mutate::preview::SignatureOutcome::SignedAdHoc
+            macho_mutate::preview::SignatureOutcome::SignedOpaque
         );
         assert!(result.preview.structural.resign_plan.is_none());
     }

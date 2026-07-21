@@ -352,6 +352,7 @@ fn signing_report(signing: Option<&SigningConfig>) -> serde_json::Value {
             "mode": match config.kind() {
                 SignatureKind::AdHoc => "ad_hoc",
                 SignatureKind::Certificate => "certificate",
+                _ => "opaque",
             },
             "verified": true,
         }),
@@ -576,6 +577,9 @@ fn format_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) -> String {
             }
             SignatureOutcome::SignedCertificate => {
                 output.push_str("\nCode signature: verified certificate signature applied.\n");
+            }
+            SignatureOutcome::SignedOpaque => {
+                output.push_str("\nCode signature: opaque provider signature applied.\n");
             }
             _ => output.push_str("\nWarning: signature outcome is unknown.\n"),
         }

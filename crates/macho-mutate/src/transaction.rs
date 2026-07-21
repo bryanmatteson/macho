@@ -5,6 +5,7 @@ use crate::mutate::MachoEditor;
 pub use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::build_structural_preview;
 pub use crate::mutate::preview::{SignatureOutcome, StructuralPatchPreview};
+use crate::section::AddSection;
 use crate::{Error, Result};
 
 /// Validated, owned structural patch plan.
@@ -144,6 +145,11 @@ impl<'data> PatchTransaction<'data> {
         self.ops.push(PatchOp::ReplaceCommand(index, cmd));
     }
 
+    /// Stage a section addition to an existing segment.
+    pub fn add_section(&mut self, section: AddSection) {
+        self.ops.push(PatchOp::AddSection(section));
+    }
+
     /// Performs remove_code_signature.
     pub fn remove_code_signature(&mut self) {
         self.ops.push(PatchOp::RemoveCodeSignature);
@@ -227,6 +233,7 @@ fn apply_ops(editor: &mut MachoEditor<'_>, ops: &[PatchOp]) -> Result<()> {
             PatchOp::ReplaceCommand(idx, cmd) => {
                 editor.replace_command(*idx, cmd.clone())?;
             }
+            PatchOp::AddSection(section) => editor.add_section(section.clone())?,
             PatchOp::PatchBytes { .. } => {
                 // Byte patches are applied after build, not through MachoEditor
             }
@@ -259,7 +266,7 @@ fn apply_byte_patches(output: &mut [u8], ops: &[PatchOp]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{MutationErrorKind, MutationOperation};
+    use crate::{AddSection, MutationErrorKind, MutationOperation};
 
     #[test]
     fn plan_rejects_overlap_without_mutating_input() {
@@ -301,5 +308,80 @@ mod tests {
         let error = transaction.prepare().expect_err("invalid magic must fail");
         assert_eq!(error.kind, MutationErrorKind::Parse);
         assert_eq!(input, original);
+    }
+
+    #[test]
+    fn add_file_backed_section_commits_payload_and_metadata() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        let section = AddSection::new("__LINKEDIT", "__macho", [1, 2, 3, 4, 5])
+            .expect("valid section")
+            .with_alignment(3)
+            .expect("valid alignment");
+        transaction.add_section(section);
+
+        let committed = transaction.commit().expect("section addition commits");
+        let reparsed = macho_core::parse(&committed).expect("candidate reparses");
+        let macho = reparsed.first_macho().unwrap();
+        let section = macho
+            .section("__LINKEDIT", "__macho")
+            .expect("section is present");
+        assert_eq!(section.align(), 3);
+        assert_eq!(section.offset().0 % 8, 0);
+        assert_eq!(section.size(), 5);
+        assert_eq!(
+            macho
+                .section_bytes("__LINKEDIT", "__macho")
+                .expect("file-backed payload"),
+            &[1, 2, 3, 4, 5]
+        );
+    }
+
+    #[test]
+    fn add_zero_fill_section_has_no_file_payload() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let original = container.first_macho().unwrap();
+        let original_len = input.len();
+        let mut transaction = PatchTransaction::new(original);
+        transaction.add_section(
+            AddSection::zero_fill("__LINKEDIT", "__scratch", 0x20)
+                .expect("valid section")
+                .with_alignment(4)
+                .expect("valid alignment"),
+        );
+
+        let committed = transaction.commit().expect("section addition commits");
+        assert_eq!(committed.len(), original_len);
+        let reparsed = macho_core::parse(&committed).expect("candidate reparses");
+        let macho = reparsed.first_macho().unwrap();
+        let section = macho
+            .section("__LINKEDIT", "__scratch")
+            .expect("section is present");
+        assert!(section.section_type().is_zerofill());
+        assert_eq!(section.size(), 0x20);
+        assert!(macho.section_bytes("__LINKEDIT", "__scratch").is_err());
+    }
+
+    #[test]
+    fn add_section_rejects_duplicate_and_segment_relocation() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let original = container.first_macho().unwrap();
+
+        let mut duplicate = PatchTransaction::new(original);
+        duplicate
+            .add_section(AddSection::new("__TEXT", "__text", [0]).expect("valid request syntax"));
+        assert!(duplicate.prepare().is_err());
+
+        let mut no_space = PatchTransaction::new(original);
+        no_space
+            .add_section(AddSection::new("__TEXT", "__extra", [0]).expect("valid request syntax"));
+        let error = no_space
+            .prepare()
+            .expect_err("later segment must not be relocated");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+        assert_eq!(input, original.bytes());
     }
 }

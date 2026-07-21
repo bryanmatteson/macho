@@ -6,6 +6,7 @@ use std::fmt;
 use std::ops::Range;
 
 use crate::model::load_command::LoadCommand;
+use crate::section::AddSection;
 
 #[derive(Debug, Clone)]
 /// The PatchOp type.
@@ -32,6 +33,8 @@ pub enum PatchOp {
     RemoveCommand(usize),
     /// The ReplaceCommand variant.
     ReplaceCommand(usize, LoadCommand),
+    /// Add one section to an existing segment.
+    AddSection(AddSection),
     /// The PatchBytes variant.
     PatchBytes {
         /// The u64 field.
@@ -53,6 +56,13 @@ impl fmt::Display for PatchOp {
             Self::ReplaceCommand(index, cmd) => {
                 write!(f, "replace command at index {index} with {}", cmd.name())
             }
+            Self::AddSection(section) => write!(
+                f,
+                "add section: {},{} ({} bytes)",
+                section.segment_name(),
+                section.section_name(),
+                section.content().size()
+            ),
             Self::PatchBytes { offset, bytes } => {
                 write!(f, "patch {} bytes at offset {offset:#x}", bytes.len())
             }

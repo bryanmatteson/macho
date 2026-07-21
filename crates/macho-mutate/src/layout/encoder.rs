@@ -4,6 +4,7 @@ use crate::model::header::Bitness;
 use crate::model::load_command::*;
 use crate::model::section::SectionType;
 use crate::model::segment::Segment;
+use crate::section::{EditableSegment, PlacedSection};
 use crate::{Error, Result};
 
 /// Encode a load command to bytes. The encoded bytes include cmd + cmdsize
@@ -11,6 +12,20 @@ use crate::{Error, Result};
 pub fn encode_load_command(
     lc: &LoadCommand,
     segments: &[Segment],
+    endian: Endian,
+    bitness: Bitness,
+) -> Result<Vec<u8>> {
+    let segments = segments
+        .iter()
+        .cloned()
+        .map(EditableSegment::from)
+        .collect::<Vec<_>>();
+    encode_edited_load_command(lc, &segments, endian, bitness)
+}
+
+pub(crate) fn encode_edited_load_command(
+    lc: &LoadCommand,
+    segments: &[EditableSegment],
     endian: Endian,
     bitness: Bitness,
 ) -> Result<Vec<u8>> {
@@ -117,30 +132,36 @@ fn push_i32(buf: &mut Vec<u8>, endian: Endian, val: i32) {
 
 fn encode_segment_64(
     d: &SegmentCommandData,
-    segments: &[Segment],
+    segments: &[EditableSegment],
     endian: Endian,
 ) -> Result<Vec<u8>> {
     let seg = segments
         .get(d.segment_index)
         .ok_or_else(|| Error::invalid(format!("segment index {} out of range", d.segment_index)))?;
 
-    let nsects = seg.sections().len() as u32;
+    let nsects = seg
+        .original
+        .sections()
+        .len()
+        .checked_add(seg.added_sections.len())
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| Error::invalid("section count exceeds u32"))?;
     let cmdsize = 72 + nsects as usize * 80;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT_64);
     push_u32(&mut buf, endian, cmdsize as u32);
-    buf.extend_from_slice(seg.name().as_bytes());
-    push_u64(&mut buf, endian, seg.vm_addr().0);
-    push_u64(&mut buf, endian, seg.vm_size());
-    push_u64(&mut buf, endian, seg.file_offset().0);
-    push_u64(&mut buf, endian, seg.file_size());
-    push_i32(&mut buf, endian, seg.max_prot().bits());
-    push_i32(&mut buf, endian, seg.init_prot().bits());
+    buf.extend_from_slice(seg.original.name().as_bytes());
+    push_u64(&mut buf, endian, seg.original.vm_addr().0);
+    push_u64(&mut buf, endian, seg.vm_size);
+    push_u64(&mut buf, endian, seg.original.file_offset().0);
+    push_u64(&mut buf, endian, seg.file_size);
+    push_i32(&mut buf, endian, seg.original.max_prot().bits());
+    push_i32(&mut buf, endian, seg.original.init_prot().bits());
     push_u32(&mut buf, endian, nsects);
-    push_u32(&mut buf, endian, seg.flags().bits());
+    push_u32(&mut buf, endian, seg.original.flags().bits());
 
-    for sect in seg.sections() {
+    for sect in seg.original.sections() {
         buf.extend_from_slice(sect.section_name().as_bytes());
         buf.extend_from_slice(sect.segment_name().as_bytes());
         push_u64(&mut buf, endian, sect.addr().0);
@@ -155,36 +176,53 @@ fn encode_segment_64(
         push_u32(&mut buf, endian, sect.reserved2());
         push_u32(&mut buf, endian, sect.reserved3());
     }
+    for section in &seg.added_sections {
+        encode_added_section_64(&mut buf, endian, section)?;
+    }
 
     Ok(buf)
 }
 
 fn encode_segment_32(
     d: &SegmentCommandData,
-    segments: &[Segment],
+    segments: &[EditableSegment],
     endian: Endian,
 ) -> Result<Vec<u8>> {
     let seg = segments
         .get(d.segment_index)
         .ok_or_else(|| Error::invalid(format!("segment index {} out of range", d.segment_index)))?;
 
-    let nsects = seg.sections().len() as u32;
+    let nsects = seg
+        .original
+        .sections()
+        .len()
+        .checked_add(seg.added_sections.len())
+        .and_then(|count| u32::try_from(count).ok())
+        .ok_or_else(|| Error::invalid("section count exceeds u32"))?;
     let cmdsize = 56 + nsects as usize * 68;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT);
     push_u32(&mut buf, endian, cmdsize as u32);
-    buf.extend_from_slice(seg.name().as_bytes());
-    push_u32(&mut buf, endian, seg.vm_addr().0 as u32);
-    push_u32(&mut buf, endian, seg.vm_size() as u32);
-    push_u32(&mut buf, endian, seg.file_offset().0 as u32);
-    push_u32(&mut buf, endian, seg.file_size() as u32);
-    push_i32(&mut buf, endian, seg.max_prot().bits());
-    push_i32(&mut buf, endian, seg.init_prot().bits());
+    let vm_addr = u32::try_from(seg.original.vm_addr().0)
+        .map_err(|_| Error::invalid("32-bit segment VM address exceeds u32"))?;
+    let vm_size = u32::try_from(seg.vm_size)
+        .map_err(|_| Error::invalid("32-bit segment VM size exceeds u32"))?;
+    let file_offset = u32::try_from(seg.original.file_offset().0)
+        .map_err(|_| Error::invalid("32-bit segment file offset exceeds u32"))?;
+    let file_size = u32::try_from(seg.file_size)
+        .map_err(|_| Error::invalid("32-bit segment file size exceeds u32"))?;
+    buf.extend_from_slice(seg.original.name().as_bytes());
+    push_u32(&mut buf, endian, vm_addr);
+    push_u32(&mut buf, endian, vm_size);
+    push_u32(&mut buf, endian, file_offset);
+    push_u32(&mut buf, endian, file_size);
+    push_i32(&mut buf, endian, seg.original.max_prot().bits());
+    push_i32(&mut buf, endian, seg.original.init_prot().bits());
     push_u32(&mut buf, endian, nsects);
-    push_u32(&mut buf, endian, seg.flags().bits());
+    push_u32(&mut buf, endian, seg.original.flags().bits());
 
-    for sect in seg.sections() {
+    for sect in seg.original.sections() {
         buf.extend_from_slice(sect.section_name().as_bytes());
         buf.extend_from_slice(sect.segment_name().as_bytes());
         push_u32(&mut buf, endian, sect.addr().0 as u32);
@@ -198,8 +236,70 @@ fn encode_segment_32(
         push_u32(&mut buf, endian, sect.reserved1());
         push_u32(&mut buf, endian, sect.reserved2());
     }
+    for section in &seg.added_sections {
+        encode_added_section_32(&mut buf, endian, section)?;
+    }
 
     Ok(buf)
+}
+
+fn encode_added_section_64(
+    buf: &mut Vec<u8>,
+    endian: Endian,
+    section: &PlacedSection,
+) -> Result<()> {
+    let file_offset = u32::try_from(section.file_offset)
+        .map_err(|_| Error::invalid("section file offset exceeds Mach-O's u32 field"))?;
+    push_fixed_name(buf, section.request.section_name());
+    push_fixed_name(buf, section.request.segment_name());
+    push_u64(buf, endian, section.address);
+    push_u64(buf, endian, section.request.content().size());
+    push_u32(buf, endian, file_offset);
+    push_u32(buf, endian, section.request.alignment());
+    push_u32(buf, endian, 0);
+    push_u32(buf, endian, 0);
+    let flags = (section_type_to_u8(&section.request.section_type()) as u32)
+        | section.request.attributes().bits();
+    push_u32(buf, endian, flags);
+    let (reserved1, reserved2, reserved3) = section.request.reserved();
+    push_u32(buf, endian, reserved1);
+    push_u32(buf, endian, reserved2);
+    push_u32(buf, endian, reserved3);
+    Ok(())
+}
+
+fn encode_added_section_32(
+    buf: &mut Vec<u8>,
+    endian: Endian,
+    section: &PlacedSection,
+) -> Result<()> {
+    let address = u32::try_from(section.address)
+        .map_err(|_| Error::invalid("32-bit section VM address exceeds u32"))?;
+    let size = u32::try_from(section.request.content().size())
+        .map_err(|_| Error::invalid("32-bit section size exceeds u32"))?;
+    let file_offset = u32::try_from(section.file_offset)
+        .map_err(|_| Error::invalid("32-bit section file offset exceeds u32"))?;
+    push_fixed_name(buf, section.request.section_name());
+    push_fixed_name(buf, section.request.segment_name());
+    push_u32(buf, endian, address);
+    push_u32(buf, endian, size);
+    push_u32(buf, endian, file_offset);
+    push_u32(buf, endian, section.request.alignment());
+    push_u32(buf, endian, 0);
+    push_u32(buf, endian, 0);
+    let flags = (section_type_to_u8(&section.request.section_type()) as u32)
+        | section.request.attributes().bits();
+    push_u32(buf, endian, flags);
+    let (reserved1, reserved2, _) = section.request.reserved();
+    push_u32(buf, endian, reserved1);
+    push_u32(buf, endian, reserved2);
+    Ok(())
+}
+
+fn push_fixed_name(buf: &mut Vec<u8>, name: &str) {
+    let mut fixed = [0u8; 16];
+    fixed[..name.len()].copy_from_slice(name.as_bytes());
+    buf.extend_from_slice(&fixed);
 }
 
 fn encode_symtab(d: &SymtabData, endian: Endian) -> Vec<u8> {

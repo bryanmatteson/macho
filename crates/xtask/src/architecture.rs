@@ -236,23 +236,14 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("macho-symbols", &["macho-core", "macho-dyld"]),
         ("macho-codesign", &["macho-core"]),
         ("macho-dwarf", &["macho-core"]),
-        (
-            "macho-objc",
-            &["macho-core", "macho-dyld", "macho-header-syntax"],
-        ),
+        ("macho-objc", &["macho-core", "macho-dyld"]),
         (
             "macho-swift",
             &["macho-core", "macho-symbols", "macho-objc"],
         ),
         (
             "macho-cpp",
-            &[
-                "macho-core",
-                "macho-insn",
-                "macho-symbols",
-                "macho-dyld",
-                "macho-dwarf",
-            ],
+            &["macho-core", "macho-insn", "macho-symbols", "macho-dyld"],
         ),
         (
             "macho-analysis",

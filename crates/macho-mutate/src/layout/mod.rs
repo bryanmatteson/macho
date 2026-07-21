@@ -5,14 +5,29 @@ use crate::format::io::Endian;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
+use crate::section::{EditableSegment, SectionContent};
 
-pub(crate) use encoder::encode_load_command;
+pub(crate) use encoder::encode_edited_load_command;
+pub use encoder::encode_load_command;
 
 /// Build the final binary bytes from the editor's state.
 pub fn build_binary(
     original: &MachoFile<'_>,
     commands: &[(LoadCommand, Vec<u8>)],
-    _segments: &[Segment],
+    segments: &[Segment],
+) -> Result<Vec<u8>> {
+    let segments = segments
+        .iter()
+        .cloned()
+        .map(EditableSegment::from)
+        .collect::<Vec<_>>();
+    build_edited_binary(original, commands, &segments)
+}
+
+pub(crate) fn build_edited_binary(
+    original: &MachoFile<'_>,
+    commands: &[(LoadCommand, Vec<u8>)],
+    segments: &[EditableSegment],
 ) -> Result<Vec<u8>> {
     let endian = original.endian();
     let bitness = original.bitness();
@@ -64,7 +79,29 @@ pub fn build_binary(
         output.extend_from_slice(&original.bytes()[original_data_start..]);
     }
 
+    for section in segments.iter().flat_map(|segment| &segment.added_sections) {
+        let SectionContent::FileBacked(bytes) = section.request.content() else {
+            continue;
+        };
+        let adjusted_offset = add_signed(section.file_offset, delta)?;
+        let start = usize::try_from(adjusted_offset).map_err(|_| {
+            crate::Error::invalid("new section offset cannot be represented on this host")
+        })?;
+        let end = start
+            .checked_add(bytes.len())
+            .ok_or_else(|| crate::Error::invalid("new section payload range overflow"))?;
+        if output.len() < end {
+            output.resize(end, 0);
+        }
+        output[start..end].copy_from_slice(bytes);
+    }
+
     Ok(output)
+}
+
+fn add_signed(value: u64, delta: i64) -> Result<u64> {
+    let adjusted = i128::from(value) + i128::from(delta);
+    u64::try_from(adjusted).map_err(|_| crate::Error::invalid("adjusted section offset overflow"))
 }
 
 fn find_first_data_offset(macho: &MachoFile<'_>) -> usize {

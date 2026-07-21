@@ -1,5 +1,9 @@
 #![deny(missing_docs)]
 //! Code-directory, superblob, entitlement, and signature parsing.
+//!
+//! Depend on this crate directly for signature inspection without the `macho`
+//! façade: [`parse_code_signature`] on a [`macho_core::MachoFile`], or
+//! [`superblob::parse_super_blob`] on raw blob bytes.
 
 extern crate self as codesign;
 

@@ -1,5 +1,8 @@
 #![deny(missing_docs)]
 //! DWARF section loading and typed indexes.
+//!
+//! Depend on this crate directly for DWARF indexes without the `macho` façade:
+//! [`has_dwarf_sections`] / [`load_dwarf`] on a [`MachoFile`].
 
 pub use macho_core::MachoFile;
 pub use macho_core::model;

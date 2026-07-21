@@ -1,5 +1,9 @@
 #![deny(missing_docs)]
 //! C++ RTTI, vtable, and architecture-aware ABI inference.
+//!
+//! Depend on this crate directly for C++ structure recovery without the `macho`
+//! façade: build a [`VtableIndex`] or [`build_typeinfo_index`] from a
+//! [`macho_core::MachoFile`].
 
 pub use macho_core::{format, model};
 pub use macho_dyld as dyld;

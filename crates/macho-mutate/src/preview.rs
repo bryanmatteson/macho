@@ -40,6 +40,9 @@ pub enum SignatureOutcome {
     SignedAdHoc,
     /// The candidate carries a verified certificate-backed signature.
     SignedCertificate,
+    /// The candidate was signed by a provider that intentionally hides its
+    /// signing mechanism.
+    SignedOpaque,
 }
 
 /// Performs build_structural_preview.
@@ -75,6 +78,7 @@ pub fn build_structural_preview(
     let original_signed = has_code_signature(original_mach);
     let candidate_signed = has_code_signature(candidate_mach);
     let signature_changed = candidate_commands != original_commands
+        || ops.iter().any(|op| matches!(op, PatchOp::AddSection(_)))
         || byte_patches_changed(original_mach.bytes(), candidate_bytes, ops);
     let signature_outcome = if original_signed && !candidate_signed {
         SignatureOutcome::Removed

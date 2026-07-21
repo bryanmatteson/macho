@@ -1,6 +1,9 @@
 #![deny(missing_docs)]
 //! Architecture-aware instruction decoding, encoding, and relocation.
 //!
+//! Depend on this crate directly for byte-level instruction work. It has no
+//! Mach-O dependency and does not require the `macho` façade or `macho-core`.
+//!
 //! Wraps [`iced_x86`] and [`bad64`] behind a unified API for the instruction-level
 //! operations that Mach-O patching, xref analysis, and binary diffing need:
 //!
