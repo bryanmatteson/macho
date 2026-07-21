@@ -62,8 +62,18 @@ pub fn parse_method_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<ObjC
             let types_file_offset = (types_field_addr as i64 + types_rel) as usize;
             let type_encoding = read_cstring_at_file_offset(data, types_file_offset).unwrap_or("");
 
-            // IMP is a relative offset to the function
-            let imp_addr = (imp_field_addr as i64 + imp_rel) as u64;
+            // Relative IMP offsets use the runtime address of their own field
+            // as the basis, not the field's file offset.
+            let imp_field_va = resolver
+                .macho()
+                .address_map()
+                .thin_offset_to_va(crate::model::addr::ThinFileOffset(
+                    imp_field_addr as u64,
+                ))?;
+            let imp_addr = imp_field_va
+                .0
+                .checked_add_signed(imp_rel)
+                .ok_or_else(|| crate::error::Error::address("relative method IMP overflows"))?;
 
             methods.push(ObjCMethod {
                 name: name.to_string(),
