@@ -15,11 +15,44 @@ use x509_certificate::CapturedX509Certificate;
 /// Signing key material belongs to the provider so requests remain safe to
 /// inspect, clone, and include in workflow diagnostics.
 #[derive(Debug, Clone, Default)]
+#[non_exhaustive]
 pub struct SignatureRequest {
     /// Optional bundle identifier override.
-    pub identifier: Option<String>,
+    identifier: Option<String>,
     /// Optional XML property-list entitlements override.
-    pub entitlements_xml: Option<String>,
+    entitlements_xml: Option<String>,
+}
+
+impl SignatureRequest {
+    /// Construct an empty signing request.
+    pub const fn new() -> Self {
+        Self {
+            identifier: None,
+            entitlements_xml: None,
+        }
+    }
+
+    /// Set the bundle identifier override.
+    pub fn with_identifier(mut self, identifier: impl Into<String>) -> Self {
+        self.identifier = Some(identifier.into());
+        self
+    }
+
+    /// Set the XML property-list entitlements override.
+    pub fn with_entitlements_xml(mut self, entitlements_xml: impl Into<String>) -> Self {
+        self.entitlements_xml = Some(entitlements_xml.into());
+        self
+    }
+
+    /// Return the requested bundle identifier override.
+    pub fn identifier(&self) -> Option<&str> {
+        self.identifier.as_deref()
+    }
+
+    /// Return the requested XML entitlements override.
+    pub fn entitlements_xml(&self) -> Option<&str> {
+        self.entitlements_xml.as_deref()
+    }
 }
 
 /// The kind of signature produced by a signing provider.
@@ -126,7 +159,7 @@ impl InProcessSignatureProvider {
         &self,
         request: &SignatureRequest,
     ) -> std::result::Result<(), SignatureProviderError> {
-        if let Some(entitlements_xml) = &request.entitlements_xml {
+        if let Some(entitlements_xml) = request.entitlements_xml() {
             SigningSettings::default()
                 .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
                 .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
@@ -148,10 +181,10 @@ impl InProcessSignatureProvider {
             settings.set_team_id_from_signing_certificate();
         }
 
-        if let Some(identifier) = &request.identifier {
+        if let Some(identifier) = request.identifier() {
             settings.set_binary_identifier(SettingsScope::Main, identifier);
         }
-        if let Some(entitlements_xml) = &request.entitlements_xml {
+        if let Some(entitlements_xml) = request.entitlements_xml() {
             settings
                 .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
                 .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
@@ -212,13 +245,19 @@ impl SignatureProvider for InProcessSignatureProvider {
 /// Verify a signed Mach-O using the same digest and CMS model as the signing
 /// backend.
 ///
-/// An ad-hoc signature is expected to lack CMS data. Every other verification
-/// problem is rejected for both signing modes.
+/// Ad-hoc signatures may lack CMS data. Opaque signatures cannot be verified
+/// by this generic verifier and must be checked by the provider that produced
+/// them.
 pub fn verify_signed_binary(
     bytes: &[u8],
     kind: SignatureKind,
 ) -> std::result::Result<(), SignatureProviderError> {
-    let permits_absent_cms = matches!(kind, SignatureKind::AdHoc | SignatureKind::Opaque);
+    if kind == SignatureKind::Opaque {
+        return Err(SignatureProviderError::Unavailable(
+            "opaque signatures must be verified by their signing provider".to_string(),
+        ));
+    }
+    let permits_absent_cms = kind == SignatureKind::AdHoc;
     let empty_adhoc_cms = permits_absent_cms && all_cms_slots_are_empty(bytes);
     let problems = verify_macho_data(bytes)
         .into_iter()
@@ -331,6 +370,14 @@ mod tests {
     }
 
     #[test]
+    fn generic_verifier_rejects_opaque_signature_kinds() {
+        let signed = signed_fixture();
+        let error = verify_signed_binary(&signed, SignatureKind::Opaque)
+            .expect_err("opaque verification belongs to the provider");
+        assert!(matches!(error, SignatureProviderError::Unavailable(_)));
+    }
+
+    #[test]
     fn covered_byte_tampering_is_rejected() {
         let mut signed = signed_fixture();
         let parsed = macho_core::parse(&signed).expect("parse signed output");
@@ -357,10 +404,9 @@ mod tests {
         let first = provider
             .sign(
                 &macho_test_support::signable_thin64_x86_64(2),
-                &SignatureRequest {
-                    identifier: Some("dev.matteson.macho.fixture".into()),
-                    entitlements_xml: Some(ENTITLEMENTS.into()),
-                },
+                &SignatureRequest::new()
+                    .with_identifier("dev.matteson.macho.fixture")
+                    .with_entitlements_xml(ENTITLEMENTS),
             )
             .expect("initial signing succeeds");
         let resigned = provider
@@ -386,19 +432,15 @@ mod tests {
         let first = provider
             .sign(
                 &macho_test_support::signable_thin64_x86_64(2),
-                &SignatureRequest {
-                    identifier: Some("dev.matteson.macho.original".into()),
-                    entitlements_xml: None,
-                },
+                &SignatureRequest::new().with_identifier("dev.matteson.macho.original"),
             )
             .expect("initial signing succeeds");
         let resigned = provider
             .sign(
                 &first,
-                &SignatureRequest {
-                    identifier: Some("dev.matteson.macho.override".into()),
-                    entitlements_xml: Some(ENTITLEMENTS.into()),
-                },
+                &SignatureRequest::new()
+                    .with_identifier("dev.matteson.macho.override")
+                    .with_entitlements_xml(ENTITLEMENTS),
             )
             .expect("re-signing with overrides succeeds");
         let parsed = macho_core::parse(&resigned).expect("parse re-signed output");
@@ -452,10 +494,7 @@ mod tests {
         let signed = provider
             .sign(
                 &macho_test_support::signable_thin64_x86_64(2),
-                &SignatureRequest {
-                    identifier: Some("dev.matteson.macho.certificate-fixture".into()),
-                    entitlements_xml: None,
-                },
+                &SignatureRequest::new().with_identifier("dev.matteson.macho.certificate-fixture"),
             )
             .expect("certificate signing succeeds");
         verify_signed_binary(&signed, SignatureKind::Certificate)
@@ -482,10 +521,7 @@ mod tests {
         let signed = provider
             .sign(
                 &macho_test_support::signable_thin64_x86_64(2),
-                &SignatureRequest {
-                    identifier: Some("dev.matteson.macho.corrupt-cms".into()),
-                    entitlements_xml: None,
-                },
+                &SignatureRequest::new().with_identifier("dev.matteson.macho.corrupt-cms"),
             )
             .expect("certificate signing succeeds");
 

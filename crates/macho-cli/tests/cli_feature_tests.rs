@@ -1,21 +1,11 @@
 mod support;
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use macho::metadata::swift::SwiftTypeIndex;
 use macho::model::container::MachoContainer;
 use support::{copy_macho_fixture, run_cli, temp_file_path};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-
-fn unique_marker(prefix: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time went backwards")
-        .as_nanos();
-    format!("{prefix}-{nanos}")
-}
 
 fn has_rpath(macho: &macho::model::macho_file::MachoFile<'_>, needle: &str) -> bool {
     macho
@@ -206,7 +196,7 @@ fn fat_patch_add_rpath_selected_arch_only() {
 
     let selected_arch = fat.arches()[0].spec().name();
     let untouched_arch = fat.arches()[1].spec().name();
-    let rpath = format!("/tmp/{}", unique_marker("macho-fat-selected"));
+    let rpath = "/tmp/macho-fs".to_string();
     let output_path = temp_file_path("fat-selected-rpath");
 
     let output = run_cli([
@@ -258,21 +248,32 @@ fn fat_patch_add_rpath_selected_arch_only() {
 
 #[test]
 fn fat_patch_add_rpath_all_arches_by_default() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "fat-all-true");
-    let fixture_path = fixture.path().to_str().expect("utf8 path");
-    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let fixture_path = temp_file_path("fat-all-input");
+    let data = macho_test_support::fat32(&[
+        (
+            macho_test_support::CPU_TYPE_X86_64,
+            3,
+            macho_test_support::signable_thin64_x86_64(2),
+        ),
+        (
+            macho_test_support::CPU_TYPE_ARM64,
+            0,
+            macho_test_support::signable_thin64_arm64(2),
+        ),
+    ]);
+    std::fs::write(&fixture_path, &data).expect("write synthetic fat fixture");
     let container = macho::parse(&data).expect("parse fixture");
     let fat = match &container {
         MachoContainer::Fat(fat) => fat,
         _ => return,
     };
 
-    let rpath = format!("/tmp/{}", unique_marker("macho-fat-all"));
+    let rpath = "/tmp/macho-fa".to_string();
     let output_path = temp_file_path("fat-all-rpath");
 
     let output = run_cli([
         "patch",
-        fixture_path,
+        fixture_path.to_str().expect("utf8 path"),
         "--add-rpath",
         &rpath,
         "--output",
@@ -301,6 +302,7 @@ fn fat_patch_add_rpath_all_arches_by_default() {
         );
     }
 
+    let _ = std::fs::remove_file(&fixture_path);
     let _ = std::fs::remove_file(&output_path);
 }
 
@@ -731,9 +733,10 @@ fn patch_preserves_execute_bit() {
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
-    if !matches!(container, MachoContainer::Fat(_)) {
-        return;
-    }
+    let selected_arch = match &container {
+        MachoContainer::Fat(fat) => fat.arches()[0].spec().name(),
+        MachoContainer::Thin(_) => return,
+    };
 
     let input_mode = std::fs::metadata(fixture.path())
         .expect("metadata for fixture")
@@ -747,7 +750,9 @@ fn patch_preserves_execute_bit() {
         "patch",
         fixture_path,
         "--add-rpath",
-        "/tmp/macho-preserve-mode",
+        "/tmp/macho-pm",
+        "--arch",
+        &selected_arch,
         "--output",
         output_path.to_str().expect("utf8 path"),
     ]);

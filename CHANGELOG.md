@@ -5,6 +5,18 @@
 - Split structural parsing, metadata, analysis, mutation, workflow, façade, and
   CLI ownership into an enforced acyclic workspace.
 - Added strict and forensic parsing with limits and structured diagnostics.
+- Added borrowed `AsRef<[u8]>` source entry points to `macho-objc`,
+  `macho-swift`, and `macho-cpp`, supporting raw slices, vectors, and
+  caller-owned read-only mappings without copying input bytes.
+- Added the stable `macho-mutate::AddSection` transaction API for file-backed
+  and zero-fill sections. Placement is alignment-aware, extends file data only
+  at a final segment's exact EOF, preserves all existing payload offsets, and
+  fails closed on insufficient command slack or file/VM overlap. File-backed
+  requests borrow raw slices, vectors, or caller-owned read-only mappings
+  without copying or internally allocating.
+- Made injected external signing providers opaque by default while preserving
+  explicit ad-hoc and certificate outcomes for the in-process provider. Opaque
+  providers retain responsibility for verifying their own output.
 - Added explicit instruction decode errors and lossy gap reporting.
 - Added `macho disassemble`: streaming, line-oriented instruction disassembly
   with constant output memory — pretty text by default, or newline-delimited

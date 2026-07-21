@@ -88,7 +88,7 @@ pub struct WorkflowSigning<'a> {
 /// Execute the complete in-memory semantic patch workflow.
 pub fn execute(
     original: &[u8],
-    patch_plan: &PatchPlan,
+    patch_plan: &PatchPlan<'_>,
     analysis_plan: &AnalysisPlan,
     signing: Option<WorkflowSigning<'_>>,
 ) -> Result<WorkflowResult, WorkflowError> {
@@ -227,7 +227,7 @@ mod tests {
         }
     }
 
-    fn no_op_plan() -> PatchPlan {
+    fn no_op_plan() -> PatchPlan<'static> {
         PatchPlan::new(vec![PatchOp::PatchBytes {
             offset: 0,
             bytes: Vec::new(),

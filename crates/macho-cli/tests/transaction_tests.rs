@@ -1,8 +1,6 @@
 mod support;
 
 use macho::model::container::MachoContainer;
-use macho::model::load_command::LoadCommand;
-use macho::model::macho_file::MachoFile;
 use macho::mutate::transaction::{PatchOp, PatchTransaction, SignatureOutcome};
 use std::path::Path;
 
@@ -14,49 +12,6 @@ fn with_thin_mach(f: impl FnOnce(&macho::model::macho_file::MachoFile<'_>)) {
         MachoContainer::Fat(fat) => f(fat.arches()[0].macho()),
         MachoContainer::Thin(macho) => f(macho),
     }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
-}
-
-fn infer_page_size(macho: &MachoFile<'_>) -> usize {
-    for seg in macho.segments() {
-        if seg.file_size() > 0 && seg.file_offset().0 > 0 {
-            let offset = seg.file_offset().0 as usize;
-            if offset.is_multiple_of(0x4000) {
-                return 0x4000;
-            }
-            if offset.is_multiple_of(0x1000) {
-                return 0x1000;
-            }
-        }
-    }
-    0x1000
-}
-
-fn expected_data_shift(original: &MachoFile<'_>, rebuilt: &MachoFile<'_>) -> usize {
-    let header_size = original.bitness().header_size();
-    let page_size = infer_page_size(original);
-    let old_start = align_up(
-        header_size + original.header().load_commands_size() as usize,
-        page_size,
-    );
-    let new_start = align_up(
-        header_size + rebuilt.header().load_commands_size() as usize,
-        page_size,
-    );
-    new_start - old_start
-}
-
-fn main_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
-    macho.load_commands().iter().find_map(|lc| {
-        if let LoadCommand::Main(entry) = lc.kind() {
-            Some(entry.entry_offset)
-        } else {
-            None
-        }
-    })
 }
 
 #[test]
@@ -224,22 +179,18 @@ fn patch_op_display() {
 }
 
 #[test]
-fn transaction_build_unchecked_preserves_shifted_entrypoint() {
+fn transaction_build_unchecked_rejects_payload_relocation() {
     with_thin_mach(|macho| {
-        let original_entry = main_entry_offset(macho).expect("expected LC_MAIN");
         let mut txn = PatchTransaction::new(macho);
         txn.add_rpath(format!("/{}", "c".repeat(0x5000)));
 
-        let bytes = txn.build_unchecked().expect("build_unchecked");
-        let reparsed = macho::parse(&bytes).expect("reparse");
-        let rebuilt = reparsed
-            .first_macho()
-            .expect("test container contains a Mach-O image");
-
-        let delta = expected_data_shift(macho, rebuilt);
-        assert!(delta > 0, "test must force a data-region shift");
-
-        let rebuilt_entry = main_entry_offset(rebuilt).expect("expected LC_MAIN after rebuild");
-        assert_eq!(rebuilt_entry, original_entry + delta as u64);
+        let error = txn
+            .build_unchecked()
+            .expect_err("unchecked build must still preserve layout safety");
+        assert!(
+            error
+                .to_string()
+                .contains("insufficient load-command slack")
+        );
     });
 }

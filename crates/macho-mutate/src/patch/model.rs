@@ -11,7 +11,7 @@ use crate::section::AddSection;
 #[derive(Debug, Clone)]
 /// The PatchOp type.
 #[non_exhaustive]
-pub enum PatchOp {
+pub enum PatchOp<'section> {
     /// The AddRpath variant.
     AddRpath(String),
     /// The RemoveRpath variant.
@@ -34,7 +34,7 @@ pub enum PatchOp {
     /// The ReplaceCommand variant.
     ReplaceCommand(usize, LoadCommand),
     /// Add one section to an existing segment.
-    AddSection(AddSection),
+    AddSection(AddSection<'section>),
     /// The PatchBytes variant.
     PatchBytes {
         /// The u64 field.
@@ -44,7 +44,7 @@ pub enum PatchOp {
     },
 }
 
-impl fmt::Display for PatchOp {
+impl fmt::Display for PatchOp<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AddRpath(path) => write!(f, "add rpath: {path}"),

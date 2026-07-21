@@ -143,7 +143,7 @@ fn run_patch(
     input: &Path,
     arch_filter: Option<&str>,
     opts: &OutputOpts,
-    ops: Vec<PatchOp>,
+    ops: Vec<PatchOp<'static>>,
     signing: Option<&SigningConfig>,
     format: OutputFormat,
     out: &mut dyn Write,
@@ -383,10 +383,13 @@ fn load_signing_config(opts: &SigningOpts) -> Result<Option<SigningConfig>> {
                 .with_context(|| format!("failed to read entitlements {}", path.display()))
         })
         .transpose()?;
-    let request = SignatureRequest {
-        identifier: opts.identifier.clone(),
-        entitlements_xml,
-    };
+    let mut request = SignatureRequest::new();
+    if let Some(identifier) = &opts.identifier {
+        request = request.with_identifier(identifier);
+    }
+    if let Some(entitlements_xml) = entitlements_xml {
+        request = request.with_entitlements_xml(entitlements_xml);
+    }
 
     let provider = if let Some(path) = &opts.sign_p12 {
         let pkcs12 = std::fs::read(path)
@@ -496,7 +499,7 @@ fn temp_path_for(path: &Path) -> PathBuf {
 
 fn prepare_patch(
     macho: &MachoFile<'_>,
-    ops: &[PatchOp],
+    ops: &[PatchOp<'_>],
     signing: Option<&SigningConfig>,
 ) -> Result<PreparedPatch> {
     let analysis = AnalysisPlan::new([
@@ -588,7 +591,7 @@ fn format_preview(items: &[(&str, &PreparedPatch)], dry_run: bool) -> String {
     output
 }
 
-fn has_raw_byte_patch(ops: &[PatchOp]) -> bool {
+fn has_raw_byte_patch(ops: &[PatchOp<'_>]) -> bool {
     ops.iter()
         .any(|op| matches!(op, PatchOp::PatchBytes { .. }))
 }

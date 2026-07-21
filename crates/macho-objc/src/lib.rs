@@ -2,8 +2,8 @@
 //! Objective-C runtime metadata parsing.
 //!
 //! Depend on this crate directly for ObjC metadata without the `macho` façade:
-//! parse a [`macho_core::MachoFile`] with [`parse_objc_metadata`] or
-//! [`scan_objc_metadata`].
+//! parse a [`macho_core::MachoFile`] with [`parse_objc_metadata`] or borrow a
+//! raw byte source with [`parse_objc_metadata_from_source`].
 
 extern crate self as objc;
 
@@ -37,7 +37,7 @@ pub mod resolve;
 /// The types module.
 pub mod types;
 
-pub use imp::{ObjCMethodImp, ObjCMethodKind, fold_method_imps};
+pub use imp::{ObjCMethodImp, ObjCMethodKind, fold_method_imps, fold_method_imps_from_source};
 pub use types::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol};
 
 use crate::model::ext::MachoExt;
@@ -107,6 +107,20 @@ impl<'data> MachoExt<'data> for ObjCMetadata {
 /// Performs parse_objc_metadata.
 pub fn parse_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadata> {
     Ok(scan_objc_metadata(macho)?.metadata)
+}
+
+/// Parse Objective-C metadata from one borrowed thin Mach-O byte source.
+///
+/// The source is not copied and may be a byte slice, vector, or caller-owned
+/// read-only memory map. Universal binaries are rejected because selecting an
+/// architecture is a caller decision; parse those with [`macho_core::parse`]
+/// and pass the selected image to [`parse_objc_metadata`].
+pub fn parse_objc_metadata_from_source<S>(source: &S) -> Result<ObjCMetadata>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    let macho = parse_source(source)?;
+    parse_objc_metadata(&macho)
 }
 
 /// Scans Objective-C runtime lists without silently dropping malformed records.
@@ -230,6 +244,31 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
         },
         observations,
     })
+}
+
+/// Scan Objective-C metadata from one borrowed thin Mach-O byte source.
+///
+/// This is the lossless-observation counterpart to
+/// [`parse_objc_metadata_from_source`] and has the same borrowing and universal
+/// binary behavior.
+pub fn scan_objc_metadata_from_source<S>(source: &S) -> Result<ObjCMetadataScan>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    let macho = parse_source(source)?;
+    scan_objc_metadata(&macho)
+}
+
+fn parse_source<'data, S>(source: &'data S) -> Result<MachoFile<'data>>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    match macho_core::parse(source.as_ref())? {
+        macho_core::model::container::MachoContainer::Thin(macho) => Ok(macho),
+        macho_core::model::container::MachoContainer::Fat(_) => Err(Error::unsupported(
+            "borrowed source contains a universal Mach-O; select an architecture explicitly",
+        )),
+    }
 }
 
 /// Find a section by name across all segments and return file offsets

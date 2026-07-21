@@ -4,8 +4,8 @@
 fn insn_leaf_decodes_and_encodes_without_macho_crates() {
     // ARM64 `ret`
     let ret = [0xc0, 0x03, 0x5f, 0xd6];
-    let insn = macho_insn::decode_one(&ret, 0x1000, macho_insn::Arch::Arm64)
-        .expect("decode known ret");
+    let insn =
+        macho_insn::decode_one(&ret, 0x1000, macho_insn::Arch::Arm64).expect("decode known ret");
     assert_eq!(insn.len, 4);
 
     let text = macho_insn::disassemble_one(&ret, 0x1000, macho_insn::Arch::Arm64)

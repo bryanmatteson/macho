@@ -11,4 +11,33 @@ fn swift_leaf_operates_directly_on_core_models_without_the_facade() {
     assert!(index.parents.is_empty());
     assert!(index.conformances.is_empty());
     assert!(index.associated_types.is_empty());
+
+    let index_from_vec =
+        macho_swift::SwiftTypeIndex::build_from_source(&bytes).expect("borrowed vector parses");
+    assert!(index_from_vec.types.is_empty());
+
+    let raw: &[u8] = &bytes;
+    let index_from_slice =
+        macho_swift::SwiftTypeIndex::build_from_source(raw).expect("borrowed slice parses");
+    assert!(index_from_slice.types.is_empty());
+}
+
+#[test]
+fn swift_source_requires_explicit_fat_architecture_selection() {
+    let bytes = macho_test_support::fat32(&[
+        (
+            macho_test_support::CPU_TYPE_ARM64,
+            0,
+            macho_test_support::thin64_arm64(0),
+        ),
+        (
+            macho_test_support::CPU_TYPE_X86_64,
+            3,
+            macho_test_support::thin64_x86_64(0),
+        ),
+    ]);
+
+    let error = macho_swift::SwiftTypeIndex::build_from_source(&bytes)
+        .expect_err("fat source must require architecture selection");
+    assert_eq!(error.kind, macho_swift::SwiftErrorKind::Unsupported);
 }

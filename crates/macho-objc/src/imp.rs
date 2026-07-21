@@ -65,6 +65,23 @@ pub fn fold_method_imps<State>(
     Ok(state)
 }
 
+/// Fold method implementations from one borrowed thin Mach-O byte source.
+///
+/// The source is not copied and may be a byte slice, vector, or caller-owned
+/// read-only memory map. Universal binaries require explicit architecture
+/// selection through [`macho_core::parse`] and [`fold_method_imps`].
+pub fn fold_method_imps_from_source<S, State>(
+    source: &S,
+    state: State,
+    folder: impl FnMut(&mut State, ObjCMethodImp) -> Result<()>,
+) -> Result<State>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    let macho = crate::parse_source(source)?;
+    fold_method_imps(&macho, state, folder)
+}
+
 fn runtime_lists<'macho>(
     macho: &'macho MachoFile<'_>,
 ) -> (Option<&'macho Section>, Option<&'macho Section>) {

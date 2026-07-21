@@ -1,63 +1,9 @@
 use macho::model::load_command::LoadCommand;
-use macho::model::macho_file::MachoFile;
 use macho::mutate::MachoEditor;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
     unsafe { memmap2::Mmap::map(&file).expect("failed to mmap") }
-}
-
-fn align_up(value: usize, align: usize) -> usize {
-    (value + align - 1) & !(align - 1)
-}
-
-fn infer_page_size(macho: &MachoFile<'_>) -> usize {
-    for seg in macho.segments() {
-        if seg.file_size() > 0 && seg.file_offset().0 > 0 {
-            let offset = seg.file_offset().0 as usize;
-            if offset.is_multiple_of(0x4000) {
-                return 0x4000;
-            }
-            if offset.is_multiple_of(0x1000) {
-                return 0x1000;
-            }
-        }
-    }
-    0x1000
-}
-
-fn expected_data_shift(original: &MachoFile<'_>, rebuilt: &MachoFile<'_>) -> usize {
-    let header_size = original.bitness().header_size();
-    let page_size = infer_page_size(original);
-    let old_start = align_up(
-        header_size + original.header().load_commands_size() as usize,
-        page_size,
-    );
-    let new_start = align_up(
-        header_size + rebuilt.header().load_commands_size() as usize,
-        page_size,
-    );
-    new_start - old_start
-}
-
-fn main_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
-    macho.load_commands().iter().find_map(|lc| {
-        if let LoadCommand::Main(entry) = lc.kind() {
-            Some(entry.entry_offset)
-        } else {
-            None
-        }
-    })
-}
-
-fn fileset_entry_offset(macho: &MachoFile<'_>) -> Option<u64> {
-    macho.load_commands().iter().find_map(|lc| {
-        if let LoadCommand::FilesetEntry(entry) = lc.kind() {
-            Some(entry.file_offset)
-        } else {
-            None
-        }
-    })
 }
 
 #[test]
@@ -165,7 +111,6 @@ fn segments_still_valid_after_add() {
 
     let mut editor = MachoEditor::new(macho);
     editor.add_rpath("/test/path");
-    editor.add_rpath("/another/path");
 
     let rebuilt = editor.build().expect("build failed");
     let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
@@ -199,7 +144,6 @@ fn add_load_dylib() {
     let macho = container
         .first_macho()
         .expect("test container contains a Mach-O image");
-
     let mut editor = MachoEditor::new(macho);
     editor.add_load_dylib("/usr/lib/libfoo.dylib", 0x10000, 0x10000);
 
@@ -244,53 +188,46 @@ fn remove_code_signature() {
 }
 
 #[test]
-fn lc_main_entry_offset_tracks_shifted_text_data() {
+fn load_command_growth_rejects_text_payload_relocation() {
     let mmap = load_true();
     let container = macho::parse(&mmap).expect("failed to parse");
     let macho = container
         .first_macho()
         .expect("test container contains a Mach-O image");
-    let original_entry = main_entry_offset(macho).expect("expected LC_MAIN");
-
+    let original = macho.bytes().to_vec();
     let mut editor = MachoEditor::new(macho);
     let large_rpath = format!("/{}", "a".repeat(0x5000));
     editor.add_rpath(&large_rpath);
 
-    let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
-    let rm = reparsed
-        .first_macho()
-        .expect("test container contains a Mach-O image");
-
-    let delta = expected_data_shift(macho, rm);
-    assert!(delta > 0, "test must force a data-region shift");
-
-    let rebuilt_entry = main_entry_offset(rm).expect("expected LC_MAIN after rebuild");
-    assert_eq!(rebuilt_entry, original_entry + delta as u64);
+    let error = editor
+        .build()
+        .expect_err("existing text payload must never be relocated");
+    assert!(
+        error
+            .to_string()
+            .contains("insufficient load-command slack")
+    );
+    assert_eq!(macho.bytes(), original.as_slice());
 }
 
 #[test]
-fn fileset_entry_offset_tracks_shifted_payload_data() {
+fn load_command_growth_rejects_fileset_payload_relocation() {
     let data = macho_test_support::fileset64_arm64();
     let container = macho::parse(&data).expect("failed to parse synthetic fileset");
     let macho = container
         .first_macho()
         .expect("test container contains a Mach-O image");
-    let original_offset = fileset_entry_offset(macho).expect("expected LC_FILESET_ENTRY");
-
     let mut editor = MachoEditor::new(macho);
     let large_rpath = format!("/{}", "b".repeat(0x1400));
     editor.add_rpath(&large_rpath);
 
-    let rebuilt = editor.build().expect("build failed");
-    let reparsed = macho::parse(&rebuilt).expect("re-parse failed");
-    let rm = reparsed
-        .first_macho()
-        .expect("test container contains a Mach-O image");
-
-    let delta = expected_data_shift(macho, rm);
-    assert!(delta > 0, "test must force a data-region shift");
-
-    let rebuilt_offset = fileset_entry_offset(rm).expect("expected LC_FILESET_ENTRY after rebuild");
-    assert_eq!(rebuilt_offset, original_offset + delta as u64);
+    let error = editor
+        .build()
+        .expect_err("existing fileset payload must never be relocated");
+    assert!(
+        error
+            .to_string()
+            .contains("insufficient load-command slack")
+    );
+    assert_eq!(macho.bytes(), data.as_slice());
 }

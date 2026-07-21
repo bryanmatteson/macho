@@ -103,6 +103,38 @@ println!("{}", image.header().file_type.name());
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+Mutation plans borrow added-section payloads and validate concrete placement
+before rebuilding:
+
+```rust
+let bytes = std::fs::read("MyApp")?;
+let container = macho::parse(&bytes)?;
+let image = container.first_macho().ok_or("container has no image")?;
+let section = macho::mutate::AddSection::new("__LINKEDIT", "__meta", b"payload")?
+    .with_alignment(3)?;
+let mut transaction = macho::mutate::PatchTransaction::new(image);
+transaction.add_section(section);
+let rebuilt = transaction.commit()?;
+std::fs::write("MyApp.patched", rebuilt)?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+File-backed additions extend only the final file-backed segment when its
+declared range ends exactly at the slice boundary. Load commands may grow only
+through existing zero-filled header slack; mutation never relocates existing
+payload, symbols, or fixups. Zero-fill additions extend virtual storage only.
+`AddSection::new` accepts any borrowed `AsRef<[u8]>`, including a raw byte slice,
+`Vec<u8>`, or caller-owned read-only `memmap2::Mmap`. It stores the payload as a
+slice, copies only the two fixed-width Mach-O names into inline storage, and
+performs no internal heap allocation. For a file, retain the mapping until the
+transaction has committed; a bare `File` cannot expose borrowed bytes.
+
+Injected `SignatureProvider` implementations may return a known ad-hoc or
+certificate kind. External providers can omit `kind()` and are represented as
+opaque without exposing credentials or provider-specific signing mechanics.
+Opaque providers own signature verification; the generic verifier intentionally
+accepts only the ad-hoc and certificate mechanisms it understands.
+
 For selective analysis, build an `AnalysisPlan` before execution. Snapshot
 documents use schema version 3 and preserve `not_requested`, `complete`,
 `unsupported`, and `failed` as distinct states.

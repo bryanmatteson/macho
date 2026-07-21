@@ -70,6 +70,19 @@ pub fn build_typeinfo_index(macho: &MachoFile<'_>) -> Result<BTreeMap<String, Cp
     Ok(out)
 }
 
+/// Build a C++ typeinfo index from one borrowed thin Mach-O byte source.
+///
+/// The source is not copied and may be a byte slice, vector, or caller-owned
+/// read-only memory map. Universal binaries are rejected so the caller can
+/// explicitly select an architecture.
+pub fn build_typeinfo_index_from_source<S>(source: &S) -> Result<BTreeMap<String, CppTypeInfoNode>>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    let macho = crate::parse_source(source)?;
+    build_typeinfo_index(&macho)
+}
+
 fn is_typeinfo_symbol(name: &str) -> bool {
     name.starts_with("__ZTI") || name.starts_with("_ZTI")
 }

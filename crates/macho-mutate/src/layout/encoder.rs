@@ -25,7 +25,7 @@ pub fn encode_load_command(
 
 pub(crate) fn encode_edited_load_command(
     lc: &LoadCommand,
-    segments: &[EditableSegment],
+    segments: &[EditableSegment<'_>],
     endian: Endian,
     bitness: Bitness,
 ) -> Result<Vec<u8>> {
@@ -36,26 +36,26 @@ pub(crate) fn encode_edited_load_command(
         LoadCommand::Symtab(d) => encode_symtab(d, endian),
         LoadCommand::Dysymtab(d) => encode_dysymtab(d, endian),
         LoadCommand::Uuid(d) => encode_uuid(d, endian),
-        LoadCommand::BuildVersion(d) => encode_build_version(d, endian),
+        LoadCommand::BuildVersion(d) => encode_build_version(d, endian)?,
         LoadCommand::SourceVersion(d) => encode_source_version(d, endian),
         LoadCommand::Main(d) => encode_main(d, endian),
         LoadCommand::DyldInfo(d) => encode_dyld_info(d, endian, LC_DYLD_INFO),
         LoadCommand::DyldInfoOnly(d) => encode_dyld_info(d, endian, LC_DYLD_INFO_ONLY),
-        LoadCommand::LoadDylib(d) => encode_dylib(d, endian, LC_LOAD_DYLIB),
-        LoadCommand::IdDylib(d) => encode_dylib(d, endian, LC_ID_DYLIB),
-        LoadCommand::LoadWeakDylib(d) => encode_dylib(d, endian, LC_LOAD_WEAK_DYLIB),
-        LoadCommand::ReexportDylib(d) => encode_dylib(d, endian, LC_REEXPORT_DYLIB),
-        LoadCommand::LazyLoadDylib(d) => encode_dylib(d, endian, LC_LAZY_LOAD_DYLIB),
-        LoadCommand::LoadUpwardDylib(d) => encode_dylib(d, endian, LC_LOAD_UPWARD_DYLIB),
-        LoadCommand::Rpath(d) => encode_string_cmd(d, endian, LC_RPATH),
-        LoadCommand::TargetTriple(d) => encode_string_cmd(d, endian, LC_TARGET_TRIPLE),
-        LoadCommand::LoadDylinker(d) => encode_string_cmd(d, endian, LC_LOAD_DYLINKER),
-        LoadCommand::IdDylinker(d) => encode_string_cmd(d, endian, LC_ID_DYLINKER),
-        LoadCommand::DyldEnvironment(d) => encode_string_cmd(d, endian, LC_DYLD_ENVIRONMENT),
-        LoadCommand::SubFramework(d) => encode_string_cmd(d, endian, LC_SUB_FRAMEWORK),
-        LoadCommand::SubUmbrella(d) => encode_string_cmd(d, endian, LC_SUB_UMBRELLA),
-        LoadCommand::SubClient(d) => encode_string_cmd(d, endian, LC_SUB_CLIENT),
-        LoadCommand::SubLibrary(d) => encode_string_cmd(d, endian, LC_SUB_LIBRARY),
+        LoadCommand::LoadDylib(d) => encode_dylib(d, endian, LC_LOAD_DYLIB)?,
+        LoadCommand::IdDylib(d) => encode_dylib(d, endian, LC_ID_DYLIB)?,
+        LoadCommand::LoadWeakDylib(d) => encode_dylib(d, endian, LC_LOAD_WEAK_DYLIB)?,
+        LoadCommand::ReexportDylib(d) => encode_dylib(d, endian, LC_REEXPORT_DYLIB)?,
+        LoadCommand::LazyLoadDylib(d) => encode_dylib(d, endian, LC_LAZY_LOAD_DYLIB)?,
+        LoadCommand::LoadUpwardDylib(d) => encode_dylib(d, endian, LC_LOAD_UPWARD_DYLIB)?,
+        LoadCommand::Rpath(d) => encode_string_cmd(d, endian, LC_RPATH)?,
+        LoadCommand::TargetTriple(d) => encode_string_cmd(d, endian, LC_TARGET_TRIPLE)?,
+        LoadCommand::LoadDylinker(d) => encode_string_cmd(d, endian, LC_LOAD_DYLINKER)?,
+        LoadCommand::IdDylinker(d) => encode_string_cmd(d, endian, LC_ID_DYLINKER)?,
+        LoadCommand::DyldEnvironment(d) => encode_string_cmd(d, endian, LC_DYLD_ENVIRONMENT)?,
+        LoadCommand::SubFramework(d) => encode_string_cmd(d, endian, LC_SUB_FRAMEWORK)?,
+        LoadCommand::SubUmbrella(d) => encode_string_cmd(d, endian, LC_SUB_UMBRELLA)?,
+        LoadCommand::SubClient(d) => encode_string_cmd(d, endian, LC_SUB_CLIENT)?,
+        LoadCommand::SubLibrary(d) => encode_string_cmd(d, endian, LC_SUB_LIBRARY)?,
         LoadCommand::CodeSignature(d) => encode_linkedit(d, endian, LC_CODE_SIGNATURE),
         LoadCommand::SegmentSplitInfo(d) => encode_linkedit(d, endian, LC_SEGMENT_SPLIT_INFO),
         LoadCommand::FunctionStarts(d) => encode_linkedit(d, endian, LC_FUNCTION_STARTS),
@@ -83,7 +83,7 @@ pub(crate) fn encode_edited_load_command(
             } else {
                 LC_UNIXTHREAD
             };
-            encode_raw_data(d, endian, cmd)
+            encode_raw_data(d, endian, cmd)?
         }
         LoadCommand::PreboundDylib(d) | LoadCommand::Ident(d) => {
             let cmd = if matches!(lc, LoadCommand::PreboundDylib(_)) {
@@ -91,16 +91,16 @@ pub(crate) fn encode_edited_load_command(
             } else {
                 LC_IDENT
             };
-            encode_raw_data(d, endian, cmd)
+            encode_raw_data(d, endian, cmd)?
         }
-        LoadCommand::LinkerOption(d) => encode_linker_option(d, endian),
-        LoadCommand::Note(d) => encode_note(d, endian),
-        LoadCommand::FilesetEntry(d) => encode_fileset_entry(d, endian),
+        LoadCommand::LinkerOption(d) => encode_linker_option(d, endian)?,
+        LoadCommand::Note(d) => encode_note(d, endian)?,
+        LoadCommand::FilesetEntry(d) => encode_fileset_entry(d, endian)?,
         LoadCommand::PrebindCksum(d) => encode_prebind_cksum(d, endian),
         LoadCommand::TwolevelHints(d) => encode_twolevel_hints(d, endian),
-        LoadCommand::Routines(d) => encode_routines(d, endian, LC_ROUTINES),
+        LoadCommand::Routines(d) => encode_routines(d, endian, LC_ROUTINES)?,
         LoadCommand::Routines64(d) => encode_routines_64(d, endian),
-        LoadCommand::Unknown(d) => encode_unknown(d, endian),
+        LoadCommand::Unknown(d) => encode_unknown(d, endian)?,
     };
 
     // Pad to alignment
@@ -110,7 +110,9 @@ pub(crate) fn encode_edited_load_command(
 
     // Update cmdsize field (always at offset 4) to match actual size
     if bytes.len() >= 8 {
-        let final_size = endian.encode_u32(bytes.len() as u32).to_ne_bytes();
+        let final_size = u32::try_from(bytes.len())
+            .map_err(|_| Error::invalid("encoded load command exceeds Mach-O's u32 size field"))?;
+        let final_size = endian.encode_u32(final_size).to_ne_bytes();
         bytes[4..8].copy_from_slice(&final_size);
     }
 
@@ -130,9 +132,36 @@ fn push_i32(buf: &mut Vec<u8>, endian: Endian, val: i32) {
     buf.extend_from_slice(&endian.encode_i32(val).to_ne_bytes());
 }
 
+fn checked_padded_size(
+    base: usize,
+    payload: usize,
+    terminator: usize,
+    alignment: usize,
+    label: &str,
+) -> Result<usize> {
+    let unaligned = base
+        .checked_add(payload)
+        .and_then(|size| size.checked_add(terminator))
+        .ok_or_else(|| Error::invalid(format!("{label} command size overflow")))?;
+    let size = unaligned
+        .checked_add(alignment - 1)
+        .map(|size| size & !(alignment - 1))
+        .ok_or_else(|| Error::invalid(format!("{label} command alignment overflow")))?;
+    u32::try_from(size)
+        .map_err(|_| Error::invalid(format!("{label} command exceeds Mach-O's u32 size field")))?;
+    Ok(size)
+}
+
+fn reject_nul(value: &str, label: &str) -> Result<()> {
+    if value.as_bytes().contains(&0) {
+        return Err(Error::invalid(format!("{label} must not contain NUL")));
+    }
+    Ok(())
+}
+
 fn encode_segment_64(
     d: &SegmentCommandData,
-    segments: &[EditableSegment],
+    segments: &[EditableSegment<'_>],
     endian: Endian,
 ) -> Result<Vec<u8>> {
     let seg = segments
@@ -146,11 +175,17 @@ fn encode_segment_64(
         .checked_add(seg.added_sections.len())
         .and_then(|count| u32::try_from(count).ok())
         .ok_or_else(|| Error::invalid("section count exceeds u32"))?;
-    let cmdsize = 72 + nsects as usize * 80;
+    let cmdsize = usize::try_from(nsects)
+        .ok()
+        .and_then(|count| count.checked_mul(80))
+        .and_then(|sections_size| 72usize.checked_add(sections_size))
+        .ok_or_else(|| Error::invalid("64-bit segment command size overflow"))?;
+    let cmdsize_u32 = u32::try_from(cmdsize)
+        .map_err(|_| Error::invalid("64-bit segment command exceeds Mach-O's u32 size field"))?;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT_64);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(&mut buf, endian, cmdsize_u32);
     buf.extend_from_slice(seg.original.name().as_bytes());
     push_u64(&mut buf, endian, seg.original.vm_addr().0);
     push_u64(&mut buf, endian, seg.vm_size);
@@ -166,9 +201,13 @@ fn encode_segment_64(
         buf.extend_from_slice(sect.segment_name().as_bytes());
         push_u64(&mut buf, endian, sect.addr().0);
         push_u64(&mut buf, endian, sect.size());
-        push_u32(&mut buf, endian, sect.offset().0 as u32);
+        let offset = u32::try_from(sect.offset().0)
+            .map_err(|_| Error::invalid("section file offset exceeds Mach-O's u32 field"))?;
+        let relocation_offset = u32::try_from(sect.relocation_offset().0)
+            .map_err(|_| Error::invalid("section relocation offset exceeds u32"))?;
+        push_u32(&mut buf, endian, offset);
         push_u32(&mut buf, endian, sect.align());
-        push_u32(&mut buf, endian, sect.relocation_offset().0 as u32);
+        push_u32(&mut buf, endian, relocation_offset);
         push_u32(&mut buf, endian, sect.relocation_count());
         let flags = (section_type_to_u8(&sect.section_type()) as u32) | sect.attributes().bits();
         push_u32(&mut buf, endian, flags);
@@ -185,7 +224,7 @@ fn encode_segment_64(
 
 fn encode_segment_32(
     d: &SegmentCommandData,
-    segments: &[EditableSegment],
+    segments: &[EditableSegment<'_>],
     endian: Endian,
 ) -> Result<Vec<u8>> {
     let seg = segments
@@ -199,11 +238,17 @@ fn encode_segment_32(
         .checked_add(seg.added_sections.len())
         .and_then(|count| u32::try_from(count).ok())
         .ok_or_else(|| Error::invalid("section count exceeds u32"))?;
-    let cmdsize = 56 + nsects as usize * 68;
+    let cmdsize = usize::try_from(nsects)
+        .ok()
+        .and_then(|count| count.checked_mul(68))
+        .and_then(|sections_size| 56usize.checked_add(sections_size))
+        .ok_or_else(|| Error::invalid("32-bit segment command size overflow"))?;
+    let cmdsize_u32 = u32::try_from(cmdsize)
+        .map_err(|_| Error::invalid("32-bit segment command exceeds Mach-O's u32 size field"))?;
     let mut buf = Vec::with_capacity(cmdsize);
 
     push_u32(&mut buf, endian, LC_SEGMENT);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(&mut buf, endian, cmdsize_u32);
     let vm_addr = u32::try_from(seg.original.vm_addr().0)
         .map_err(|_| Error::invalid("32-bit segment VM address exceeds u32"))?;
     let vm_size = u32::try_from(seg.vm_size)
@@ -223,13 +268,21 @@ fn encode_segment_32(
     push_u32(&mut buf, endian, seg.original.flags().bits());
 
     for sect in seg.original.sections() {
+        let address = u32::try_from(sect.addr().0)
+            .map_err(|_| Error::invalid("32-bit section VM address exceeds u32"))?;
+        let size = u32::try_from(sect.size())
+            .map_err(|_| Error::invalid("32-bit section size exceeds u32"))?;
+        let offset = u32::try_from(sect.offset().0)
+            .map_err(|_| Error::invalid("32-bit section file offset exceeds u32"))?;
+        let relocation_offset = u32::try_from(sect.relocation_offset().0)
+            .map_err(|_| Error::invalid("32-bit section relocation offset exceeds u32"))?;
         buf.extend_from_slice(sect.section_name().as_bytes());
         buf.extend_from_slice(sect.segment_name().as_bytes());
-        push_u32(&mut buf, endian, sect.addr().0 as u32);
-        push_u32(&mut buf, endian, sect.size() as u32);
-        push_u32(&mut buf, endian, sect.offset().0 as u32);
+        push_u32(&mut buf, endian, address);
+        push_u32(&mut buf, endian, size);
+        push_u32(&mut buf, endian, offset);
         push_u32(&mut buf, endian, sect.align());
-        push_u32(&mut buf, endian, sect.relocation_offset().0 as u32);
+        push_u32(&mut buf, endian, relocation_offset);
         push_u32(&mut buf, endian, sect.relocation_count());
         let flags = (section_type_to_u8(&sect.section_type()) as u32) | sect.attributes().bits();
         push_u32(&mut buf, endian, flags);
@@ -246,7 +299,7 @@ fn encode_segment_32(
 fn encode_added_section_64(
     buf: &mut Vec<u8>,
     endian: Endian,
-    section: &PlacedSection,
+    section: &PlacedSection<'_>,
 ) -> Result<()> {
     let file_offset = u32::try_from(section.file_offset)
         .map_err(|_| Error::invalid("section file offset exceeds Mach-O's u32 field"))?;
@@ -271,7 +324,7 @@ fn encode_added_section_64(
 fn encode_added_section_32(
     buf: &mut Vec<u8>,
     endian: Endian,
-    section: &PlacedSection,
+    section: &PlacedSection<'_>,
 ) -> Result<()> {
     let address = u32::try_from(section.address)
         .map_err(|_| Error::invalid("32-bit section VM address exceeds u32"))?;
@@ -346,12 +399,20 @@ fn encode_uuid(d: &UuidData, endian: Endian) -> Vec<u8> {
     buf
 }
 
-fn encode_build_version(d: &BuildVersionData, endian: Endian) -> Vec<u8> {
-    let ntools = d.tools.len() as u32;
-    let cmdsize = 24 + ntools as usize * 8;
+fn encode_build_version(d: &BuildVersionData, endian: Endian) -> Result<Vec<u8>> {
+    let ntools = u32::try_from(d.tools.len())
+        .map_err(|_| Error::invalid("build-version tool count exceeds u32"))?;
+    let cmdsize = d
+        .tools
+        .len()
+        .checked_mul(8)
+        .and_then(|size| size.checked_add(24))
+        .ok_or_else(|| Error::invalid("build-version command size overflow"))?;
+    let cmdsize_u32 = u32::try_from(cmdsize)
+        .map_err(|_| Error::invalid("build-version command exceeds Mach-O's u32 size field"))?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, LC_BUILD_VERSION);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(&mut buf, endian, cmdsize_u32);
     push_u32(&mut buf, endian, d.platform.0);
     push_u32(&mut buf, endian, d.minos.0);
     push_u32(&mut buf, endian, d.sdk.0);
@@ -360,7 +421,7 @@ fn encode_build_version(d: &BuildVersionData, endian: Endian) -> Vec<u8> {
         push_u32(&mut buf, endian, tool.tool.0);
         push_u32(&mut buf, endian, tool.version.0);
     }
-    buf
+    Ok(buf)
 }
 
 fn encode_source_version(d: &SourceVersionData, endian: Endian) -> Vec<u8> {
@@ -397,13 +458,18 @@ fn encode_dyld_info(d: &DyldInfoData, endian: Endian, cmd: u32) -> Vec<u8> {
     buf
 }
 
-fn encode_dylib(d: &DylibData, endian: Endian, cmd: u32) -> Vec<u8> {
+fn encode_dylib(d: &DylibData, endian: Endian, cmd: u32) -> Result<Vec<u8>> {
+    reject_nul(&d.name, "dylib name")?;
     let name_bytes = d.name.as_bytes();
     let str_offset = 24u32; // cmd + cmdsize + name_offset + timestamp + versions = 24
-    let cmdsize = (str_offset as usize + name_bytes.len() + 1 + 3) & !3; // null + pad to 4
+    let cmdsize = checked_padded_size(24, name_bytes.len(), 1, 4, "dylib")?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, cmd);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(
+        &mut buf,
+        endian,
+        u32::try_from(cmdsize).map_err(|_| Error::invalid("dylib command size exceeds u32"))?,
+    );
     push_u32(&mut buf, endian, str_offset);
     push_u32(&mut buf, endian, d.timestamp);
     push_u32(&mut buf, endian, d.current_version.0);
@@ -413,23 +479,28 @@ fn encode_dylib(d: &DylibData, endian: Endian, cmd: u32) -> Vec<u8> {
     while buf.len() < cmdsize {
         buf.push(0);
     }
-    buf
+    Ok(buf)
 }
 
-fn encode_string_cmd(d: &StringData, endian: Endian, cmd: u32) -> Vec<u8> {
+fn encode_string_cmd(d: &StringData, endian: Endian, cmd: u32) -> Result<Vec<u8>> {
+    reject_nul(&d.value, "load-command string")?;
     let str_bytes = d.value.as_bytes();
     let str_offset = 12u32; // cmd + cmdsize + string_offset
-    let cmdsize = (str_offset as usize + str_bytes.len() + 1 + 3) & !3;
+    let cmdsize = checked_padded_size(12, str_bytes.len(), 1, 4, "string")?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, cmd);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(
+        &mut buf,
+        endian,
+        u32::try_from(cmdsize).map_err(|_| Error::invalid("string command size exceeds u32"))?,
+    );
     push_u32(&mut buf, endian, str_offset);
     buf.extend_from_slice(str_bytes);
     buf.push(0);
     while buf.len() < cmdsize {
         buf.push(0);
     }
-    buf
+    Ok(buf)
 }
 
 fn encode_linkedit(d: &LinkeditData, endian: Endian, cmd: u32) -> Vec<u8> {
@@ -471,53 +542,79 @@ fn encode_encryption_info_64(d: &EncryptionInfoData, endian: Endian) -> Vec<u8> 
     buf
 }
 
-fn encode_raw_data(d: &RawData, endian: Endian, cmd: u32) -> Vec<u8> {
-    let cmdsize = 8 + d.data.len();
+fn encode_raw_data(d: &RawData, endian: Endian, cmd: u32) -> Result<Vec<u8>> {
+    let cmdsize = 8usize
+        .checked_add(d.data.len())
+        .ok_or_else(|| Error::invalid("raw load-command size overflow"))?;
+    let cmdsize_u32 = u32::try_from(cmdsize)
+        .map_err(|_| Error::invalid("raw load command exceeds Mach-O's u32 size field"))?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, cmd);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(&mut buf, endian, cmdsize_u32);
     buf.extend_from_slice(&d.data);
-    buf
+    Ok(buf)
 }
 
-fn encode_linker_option(d: &LinkerOptionData, endian: Endian) -> Vec<u8> {
-    let mut payload = Vec::new();
+fn encode_linker_option(d: &LinkerOptionData, endian: Endian) -> Result<Vec<u8>> {
+    let count = u32::try_from(d.strings.len())
+        .map_err(|_| Error::invalid("linker-option string count exceeds u32"))?;
+    let payload_size = d.strings.iter().try_fold(0usize, |size, string| {
+        reject_nul(string, "linker option")?;
+        size.checked_add(string.len())
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| Error::invalid("linker-option payload size overflow"))
+    })?;
+    let mut payload = Vec::with_capacity(payload_size);
     for s in &d.strings {
         payload.extend_from_slice(s.as_bytes());
         payload.push(0);
     }
-    let cmdsize = (12 + payload.len() + 3) & !3;
+    let cmdsize = checked_padded_size(12, payload.len(), 0, 4, "linker-option")?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, LC_LINKER_OPTION);
-    push_u32(&mut buf, endian, cmdsize as u32);
-    push_u32(&mut buf, endian, d.strings.len() as u32);
+    push_u32(
+        &mut buf,
+        endian,
+        u32::try_from(cmdsize)
+            .map_err(|_| Error::invalid("linker-option command size exceeds u32"))?,
+    );
+    push_u32(&mut buf, endian, count);
     buf.extend_from_slice(&payload);
     while buf.len() < cmdsize {
         buf.push(0);
     }
-    buf
+    Ok(buf)
 }
 
-fn encode_note(d: &NoteData, endian: Endian) -> Vec<u8> {
+fn encode_note(d: &NoteData, endian: Endian) -> Result<Vec<u8>> {
+    reject_nul(&d.data_owner, "note owner")?;
+    if d.data_owner.len() > 16 {
+        return Err(Error::invalid("note owner exceeds Mach-O's 16-byte field"));
+    }
     let mut buf = Vec::with_capacity(40);
     push_u32(&mut buf, endian, LC_NOTE);
     push_u32(&mut buf, endian, 40);
     let mut owner = [0u8; 16];
     let bytes = d.data_owner.as_bytes();
-    let len = bytes.len().min(16);
-    owner[..len].copy_from_slice(&bytes[..len]);
+    owner[..bytes.len()].copy_from_slice(bytes);
     buf.extend_from_slice(&owner);
     push_u64(&mut buf, endian, d.offset);
     push_u64(&mut buf, endian, d.size);
-    buf
+    Ok(buf)
 }
 
-fn encode_fileset_entry(d: &FilesetEntryData, endian: Endian) -> Vec<u8> {
+fn encode_fileset_entry(d: &FilesetEntryData, endian: Endian) -> Result<Vec<u8>> {
+    reject_nul(&d.entry_id, "fileset entry identifier")?;
     let str_offset = 32u32;
-    let cmdsize = (str_offset as usize + d.entry_id.len() + 1 + 7) & !7;
+    let cmdsize = checked_padded_size(32, d.entry_id.len(), 1, 8, "fileset-entry")?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, LC_FILESET_ENTRY);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(
+        &mut buf,
+        endian,
+        u32::try_from(cmdsize)
+            .map_err(|_| Error::invalid("fileset-entry command size exceeds u32"))?,
+    );
     push_u64(&mut buf, endian, d.vm_addr);
     push_u64(&mut buf, endian, d.file_offset);
     push_u32(&mut buf, endian, str_offset);
@@ -527,7 +624,7 @@ fn encode_fileset_entry(d: &FilesetEntryData, endian: Endian) -> Vec<u8> {
     while buf.len() < cmdsize {
         buf.push(0);
     }
-    buf
+    Ok(buf)
 }
 
 fn encode_prebind_cksum(d: &PrebindCksumData, endian: Endian) -> Vec<u8> {
@@ -547,16 +644,20 @@ fn encode_twolevel_hints(d: &TwolevelHintsData, endian: Endian) -> Vec<u8> {
     buf
 }
 
-fn encode_routines(d: &RoutinesData, endian: Endian, cmd: u32) -> Vec<u8> {
+fn encode_routines(d: &RoutinesData, endian: Endian, cmd: u32) -> Result<Vec<u8>> {
+    let init_address = u32::try_from(d.init_address)
+        .map_err(|_| Error::invalid("32-bit routine address exceeds u32"))?;
+    let init_module = u32::try_from(d.init_module)
+        .map_err(|_| Error::invalid("32-bit routine module exceeds u32"))?;
     let mut buf = Vec::with_capacity(40);
     push_u32(&mut buf, endian, cmd);
     push_u32(&mut buf, endian, 40);
-    push_u32(&mut buf, endian, d.init_address as u32);
-    push_u32(&mut buf, endian, d.init_module as u32);
+    push_u32(&mut buf, endian, init_address);
+    push_u32(&mut buf, endian, init_module);
     for _ in 0..6 {
         push_u32(&mut buf, endian, 0);
     }
-    buf
+    Ok(buf)
 }
 
 fn encode_routines_64(d: &RoutinesData, endian: Endian) -> Vec<u8> {
@@ -571,13 +672,17 @@ fn encode_routines_64(d: &RoutinesData, endian: Endian) -> Vec<u8> {
     buf
 }
 
-fn encode_unknown(d: &UnknownLoadCommand, endian: Endian) -> Vec<u8> {
-    let cmdsize = 8 + d.data.len();
+fn encode_unknown(d: &UnknownLoadCommand, endian: Endian) -> Result<Vec<u8>> {
+    let cmdsize = 8usize
+        .checked_add(d.data.len())
+        .ok_or_else(|| Error::invalid("unknown load-command size overflow"))?;
+    let cmdsize_u32 = u32::try_from(cmdsize)
+        .map_err(|_| Error::invalid("unknown load command exceeds Mach-O's u32 size field"))?;
     let mut buf = Vec::with_capacity(cmdsize);
     push_u32(&mut buf, endian, d.cmd);
-    push_u32(&mut buf, endian, cmdsize as u32);
+    push_u32(&mut buf, endian, cmdsize_u32);
     buf.extend_from_slice(&d.data);
-    buf
+    Ok(buf)
 }
 
 /// Encode a section type + attributes back to flags u32.

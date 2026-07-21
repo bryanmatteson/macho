@@ -3,7 +3,7 @@
 //!
 //! Depend on this crate directly for C++ structure recovery without the `macho`
 //! façade: build a [`VtableIndex`] or [`build_typeinfo_index`] from a
-//! [`macho_core::MachoFile`].
+//! [`macho_core::MachoFile`] or a borrowed byte source.
 
 pub use macho_core::{format, model};
 pub use macho_dyld as dyld;
@@ -25,8 +25,22 @@ pub mod types;
 pub mod vtable;
 
 pub use abi_types::{ArgumentTypeHint, CppBodyAnalysis, CppBodyKind, CppReturnChannel};
-pub use typeinfo::build_typeinfo_index;
+pub use typeinfo::{build_typeinfo_index, build_typeinfo_index_from_source};
 pub use types::{
     CppBaseClass, CppConfidence, CppEvidence, CppEvidenceKind, CppTypeInfoKind, CppTypeInfoNode,
 };
 pub use vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};
+
+use crate::model::macho_file::MachoFile;
+
+fn parse_source<'data, S>(source: &'data S) -> Result<MachoFile<'data>>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    match macho_core::parse(source.as_ref())? {
+        macho_core::model::container::MachoContainer::Thin(macho) => Ok(macho),
+        macho_core::model::container::MachoContainer::Fat(_) => Err(Error::unsupported(
+            "borrowed source contains a universal Mach-O; select an architecture explicitly",
+        )),
+    }
+}

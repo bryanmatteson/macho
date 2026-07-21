@@ -8,17 +8,17 @@ pub use crate::mutate::preview::{SignatureOutcome, StructuralPatchPreview};
 use crate::section::AddSection;
 use crate::{Error, Result};
 
-/// Validated, owned structural patch plan.
+/// Validated structural patch plan.
 #[derive(Debug, Clone, Default)]
-pub struct PatchPlan {
-    ops: Vec<PatchOp>,
+pub struct PatchPlan<'section> {
+    ops: Vec<PatchOp<'section>>,
     expected: Vec<(u64, Vec<u8>)>,
 }
 
-impl PatchPlan {
+impl<'section> PatchPlan<'section> {
     /// Create a plan from operations. Validation occurs against concrete input
     /// bytes before any candidate buffer is changed.
-    pub fn new(ops: Vec<PatchOp>) -> Self {
+    pub fn new(ops: Vec<PatchOp<'section>>) -> Self {
         Self {
             ops,
             expected: Vec::new(),
@@ -32,7 +32,7 @@ impl PatchPlan {
     }
 
     /// Borrow the ordered operations.
-    pub fn operations(&self) -> &[PatchOp] {
+    pub fn operations(&self) -> &[PatchOp<'section>] {
         &self.ops
     }
 
@@ -92,14 +92,14 @@ pub struct PreparedPatch {
 }
 
 /// The PatchTransaction type.
-pub struct PatchTransaction<'data> {
-    macho: &'data MachoFile<'data>,
-    ops: Vec<PatchOp>,
+pub struct PatchTransaction<'image, 'section> {
+    macho: &'image MachoFile<'image>,
+    ops: Vec<PatchOp<'section>>,
 }
 
-impl<'data> PatchTransaction<'data> {
+impl<'image, 'section> PatchTransaction<'image, 'section> {
     /// Performs new.
-    pub fn new(macho: &'data MachoFile<'data>) -> Self {
+    pub fn new(macho: &'image MachoFile<'image>) -> Self {
         Self {
             macho,
             ops: Vec::new(),
@@ -107,7 +107,7 @@ impl<'data> PatchTransaction<'data> {
     }
 
     /// Performs add_op.
-    pub fn add_op(&mut self, op: PatchOp) {
+    pub fn add_op(&mut self, op: PatchOp<'section>) {
         self.ops.push(op);
     }
 
@@ -146,7 +146,7 @@ impl<'data> PatchTransaction<'data> {
     }
 
     /// Stage a section addition to an existing segment.
-    pub fn add_section(&mut self, section: AddSection) {
+    pub fn add_section(&mut self, section: AddSection<'section>) {
         self.ops.push(PatchOp::AddSection(section));
     }
 
@@ -156,7 +156,7 @@ impl<'data> PatchTransaction<'data> {
     }
 
     /// Performs ops.
-    pub fn ops(&self) -> &[PatchOp] {
+    pub fn ops(&self) -> &[PatchOp<'section>] {
         &self.ops
     }
 
@@ -215,7 +215,10 @@ impl<'data> PatchTransaction<'data> {
     }
 }
 
-fn apply_ops(editor: &mut MachoEditor<'_>, ops: &[PatchOp]) -> Result<()> {
+fn apply_ops<'section>(
+    editor: &mut MachoEditor<'_, 'section>,
+    ops: &[PatchOp<'section>],
+) -> Result<()> {
     for op in ops {
         match op {
             PatchOp::AddRpath(path) => editor.add_rpath(path),
@@ -242,7 +245,7 @@ fn apply_ops(editor: &mut MachoEditor<'_>, ops: &[PatchOp]) -> Result<()> {
     Ok(())
 }
 
-fn apply_byte_patches(output: &mut [u8], ops: &[PatchOp]) -> Result<()> {
+fn apply_byte_patches(output: &mut [u8], ops: &[PatchOp<'_>]) -> Result<()> {
     for op in ops {
         if let PatchOp::PatchBytes { offset, bytes } = op {
             let start = usize::try_from(*offset)
@@ -313,9 +316,10 @@ mod tests {
     #[test]
     fn add_file_backed_section_commits_payload_and_metadata() {
         let input = macho_test_support::signable_thin64_arm64(2);
+        let original_text = input[0x400..0x404].to_vec();
         let container = macho_core::parse(&input).expect("fixture parses");
         let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
-        let section = AddSection::new("__LINKEDIT", "__macho", [1, 2, 3, 4, 5])
+        let section = AddSection::new("__LINKEDIT", "__macho", &[1, 2, 3, 4, 5])
             .expect("valid section")
             .with_alignment(3)
             .expect("valid alignment");
@@ -335,6 +339,34 @@ mod tests {
                 .section_bytes("__LINKEDIT", "__macho")
                 .expect("file-backed payload"),
             &[1, 2, 3, 4, 5]
+        );
+        assert_eq!(
+            &committed[0x400..0x404],
+            original_text.as_slice(),
+            "existing __TEXT payload must remain at its original offset"
+        );
+    }
+
+    #[test]
+    fn add_section_and_byte_patch_share_stable_original_offsets() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction.add_section(
+            AddSection::new("__LINKEDIT", "__payload", &[1, 2, 3, 4]).expect("valid section"),
+        );
+        transaction.patch_bytes(0x400, vec![0xAA, 0xBB, 0xCC, 0xDD]);
+
+        let committed = transaction.commit().expect("mixed edit commits");
+        assert_eq!(&committed[0x400..0x404], &[0xAA, 0xBB, 0xCC, 0xDD]);
+        let reparsed = macho_core::parse(&committed).expect("candidate reparses");
+        assert_eq!(
+            reparsed
+                .first_macho()
+                .unwrap()
+                .section_bytes("__LINKEDIT", "__payload")
+                .expect("added payload"),
+            &[1, 2, 3, 4]
         );
     }
 
@@ -372,16 +404,178 @@ mod tests {
 
         let mut duplicate = PatchTransaction::new(original);
         duplicate
-            .add_section(AddSection::new("__TEXT", "__text", [0]).expect("valid request syntax"));
+            .add_section(AddSection::new("__TEXT", "__text", &[0]).expect("valid request syntax"));
         assert!(duplicate.prepare().is_err());
 
         let mut no_space = PatchTransaction::new(original);
         no_space
-            .add_section(AddSection::new("__TEXT", "__extra", [0]).expect("valid request syntax"));
+            .add_section(AddSection::new("__TEXT", "__extra", &[0]).expect("valid request syntax"));
         let error = no_space
             .prepare()
             .expect_err("later segment must not be relocated");
         assert_eq!(error.kind, MutationErrorKind::InvalidInput);
         assert_eq!(input, original.bytes());
+    }
+
+    #[test]
+    fn add_sections_reject_load_command_payload_relocation() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let original = input.clone();
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        let payloads = (0..50).map(|index| [index as u8]).collect::<Vec<_>>();
+        for (index, payload) in payloads.iter().enumerate() {
+            transaction.add_section(
+                AddSection::new("__LINKEDIT", format!("__macho{index:02}"), payload)
+                    .expect("valid section"),
+            );
+        }
+
+        let error = transaction
+            .commit()
+            .expect_err("existing payload relocation must fail closed");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("insufficient load-command slack")
+        );
+        assert_eq!(input, original);
+    }
+
+    #[test]
+    fn add_file_backed_section_rejects_existing_zero_fill_overlap() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction.add_section(
+            AddSection::zero_fill("__LINKEDIT", "__scratch", 0x20)
+                .expect("valid zero-fill section"),
+        );
+        transaction.add_section(
+            AddSection::new("__LINKEDIT", "__payload", &[1, 2, 3, 4])
+                .expect("valid file-backed section"),
+        );
+        let error = transaction
+            .prepare()
+            .expect_err("overlapping VM ranges must fail");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn add_file_backed_section_rejects_unowned_trailing_bytes() {
+        let mut input = macho_test_support::signable_thin64_arm64(2);
+        input.push(0xAA);
+        let container = macho_core::parse(&input).expect("fixture with trailing data parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction
+            .add_section(AddSection::new("__LINKEDIT", "__payload", &[1]).expect("valid section"));
+        let error = transaction
+            .prepare()
+            .expect_err("unowned trailing data must not be absorbed into a segment");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+        assert!(error.to_string().contains("declared file range ends"));
+    }
+
+    #[test]
+    fn load_command_strings_reject_nul_without_truncation() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let container = macho_core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction.add_rpath("/bad\0hidden");
+        let error = transaction
+            .prepare()
+            .expect_err("interior NUL must not change encoded meaning");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+    }
+
+    fn thin32_with_linkedit(big_endian: bool) -> Vec<u8> {
+        fn push_u32(bytes: &mut Vec<u8>, value: u32, big_endian: bool) {
+            let encoded = if big_endian {
+                value.to_be_bytes()
+            } else {
+                value.to_le_bytes()
+            };
+            bytes.extend_from_slice(&encoded);
+        }
+        fn push_name(bytes: &mut Vec<u8>, name: &str) {
+            let mut encoded = [0u8; 16];
+            encoded[..name.len()].copy_from_slice(name.as_bytes());
+            bytes.extend_from_slice(&encoded);
+        }
+        fn push_segment(bytes: &mut Vec<u8>, name: &str, fields: [u32; 5], big_endian: bool) {
+            let [vmaddr, vmsize, fileoff, filesize, nsects] = fields;
+            push_u32(bytes, 1, big_endian);
+            push_u32(bytes, 56 + nsects * 68, big_endian);
+            push_name(bytes, name);
+            for value in [vmaddr, vmsize, fileoff, filesize, 5, 5, nsects, 0] {
+                push_u32(bytes, value, big_endian);
+            }
+        }
+
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, 0xfeed_face, big_endian);
+        for value in [7, 3, 2, 2, 124 + 56, 0] {
+            push_u32(&mut bytes, value, big_endian);
+        }
+        push_segment(
+            &mut bytes,
+            "__TEXT",
+            [0x1000, 0x1000, 0, 0x1000, 1],
+            big_endian,
+        );
+        push_name(&mut bytes, "__text");
+        push_name(&mut bytes, "__TEXT");
+        for value in [0x1400, 4, 0x400, 2, 0, 0, 0, 0, 0] {
+            push_u32(&mut bytes, value, big_endian);
+        }
+        push_segment(
+            &mut bytes,
+            "__LINKEDIT",
+            [0x2000, 0x1000, 0x1000, 0x10, 0],
+            big_endian,
+        );
+        bytes.resize(0x1010, 0);
+        bytes[0x400..0x404].copy_from_slice(&[1, 2, 3, 4]);
+        bytes
+    }
+
+    #[test]
+    fn add_section_encodes_32_bit_little_and_big_endian() {
+        for big_endian in [false, true] {
+            let input = thin32_with_linkedit(big_endian);
+            let container = macho_core::parse(&input).expect("32-bit fixture parses");
+            let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+            transaction.add_section(
+                AddSection::new("__LINKEDIT", "__meta", &[9, 8, 7, 6]).expect("valid section"),
+            );
+            let committed = transaction.commit().expect("32-bit section commits");
+            let reparsed = macho_core::parse(&committed).expect("candidate reparses");
+            assert_eq!(
+                reparsed
+                    .first_macho()
+                    .unwrap()
+                    .section_bytes("__LINKEDIT", "__meta")
+                    .expect("added payload"),
+                &[9, 8, 7, 6]
+            );
+            assert_eq!(&committed[0x400..0x404], &[1, 2, 3, 4]);
+        }
+    }
+
+    #[test]
+    fn add_section_rejects_64_bit_only_reserved_word_on_32_bit() {
+        let input = thin32_with_linkedit(false);
+        let container = macho_core::parse(&input).expect("32-bit fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction.add_section(
+            AddSection::new("__LINKEDIT", "__meta", &[1])
+                .expect("valid section")
+                .with_reserved(0, 0, 1),
+        );
+        let error = transaction
+            .prepare()
+            .expect_err("reserved3 must not be silently discarded");
+        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
     }
 }

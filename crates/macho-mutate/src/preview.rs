@@ -50,7 +50,7 @@ pub fn build_structural_preview(
     original_mach: &MachoFile<'_>,
     candidate_bytes: &[u8],
     candidate_mach: &MachoFile<'_>,
-    ops: &[PatchOp],
+    ops: &[PatchOp<'_>],
 ) -> Result<StructuralPatchPreview> {
     let original_commands: Vec<LoadCommand> = original_mach
         .load_commands()
@@ -115,7 +115,7 @@ fn has_code_signature(macho: &MachoFile<'_>) -> bool {
         .any(|lc| matches!(lc.kind(), LoadCommand::CodeSignature(_)))
 }
 
-fn byte_patches_changed(original: &[u8], candidate: &[u8], ops: &[PatchOp]) -> bool {
+fn byte_patches_changed(original: &[u8], candidate: &[u8], ops: &[PatchOp<'_>]) -> bool {
     for op in ops {
         if let PatchOp::PatchBytes { offset, bytes } = op {
             let Ok(start) = usize::try_from(*offset) else {

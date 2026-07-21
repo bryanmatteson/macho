@@ -3,9 +3,10 @@
 //! The decoder hands the delivery layer one already-rendered instruction string
 //! per record (Intel syntax for x86-64, ARM syntax for AArch64). This module
 //! performs the first two stages of the presentation pipeline — lex the string
-//! into lexical runs, then assign each run a Termosaic [`TokenId`] — and emits
-//! the result as a [`Span`] stream. Resolving those tokens against the theme is
-//! [`Style`](super::Style)'s job, so classification stays independent of colour.
+//! into lexical runs, then assign each run a Termosaic [`termosaic::TokenId`] —
+//! and emits the result as a [`termosaic::Span`] stream. Resolving those tokens
+//! against the theme is [`Style`](crate::commands::output::Style)'s job, so
+//! classification stays independent of colour.
 //!
 //! Tokenization never alters a character: concatenating the span texts always
 //! reproduces the input exactly, which is what keeps plain output and

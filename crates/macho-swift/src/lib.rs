@@ -2,7 +2,8 @@
 //! Swift metadata indexing with injectable demangling.
 //!
 //! Depend on this crate directly for Swift type indexes without the `macho`
-//! façade: build a [`SwiftTypeIndex`] from a [`macho_core::MachoFile`].
+//! façade: build a [`SwiftTypeIndex`] from a [`macho_core::MachoFile`] or a
+//! borrowed byte source.
 
 pub use macho_core::{ext, model};
 pub use macho_objc as objc;
@@ -60,6 +61,19 @@ impl SwiftTypeIndex {
             conformances: Vec::new(),
             associated_types: Vec::new(),
         })
+    }
+
+    /// Build an index from one borrowed thin Mach-O byte source.
+    ///
+    /// The source is not copied and may be a byte slice, vector, or
+    /// caller-owned read-only memory map. Universal binaries are rejected so
+    /// callers select an architecture explicitly through [`macho_core::parse`].
+    pub fn build_from_source<S>(source: &S) -> Result<Self>
+    where
+        S: AsRef<[u8]> + ?Sized,
+    {
+        let macho = parse_source(source)?;
+        Ok(Self::build(&macho))
     }
 
     /// Build the index with an injected demangler and retain typed failures.
@@ -154,6 +168,33 @@ impl SwiftTypeIndex {
             conformances,
             associated_types,
         })
+    }
+
+    /// Build from one borrowed thin Mach-O source with an injected demangler.
+    ///
+    /// This has the same zero-copy source and universal-binary behavior as
+    /// [`Self::build_from_source`].
+    pub fn build_from_source_with_demangler<S>(
+        source: &S,
+        demangler: &dyn SwiftDemangler,
+    ) -> Result<Self>
+    where
+        S: AsRef<[u8]> + ?Sized,
+    {
+        let macho = parse_source(source)?;
+        Self::build_with_demangler(&macho, demangler)
+    }
+}
+
+fn parse_source<'data, S>(source: &'data S) -> Result<MachoFile<'data>>
+where
+    S: AsRef<[u8]> + ?Sized,
+{
+    match macho_core::parse(source.as_ref())? {
+        macho_core::model::container::MachoContainer::Thin(macho) => Ok(macho),
+        macho_core::model::container::MachoContainer::Fat(_) => Err(SwiftError::unsupported(
+            "borrowed source contains a universal Mach-O; select an architecture explicitly",
+        )),
     }
 }
 

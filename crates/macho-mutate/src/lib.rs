@@ -48,16 +48,17 @@ use crate::model::macho_file::MachoFile;
 /// A structural editor for Mach-O binaries.
 ///
 /// Allows adding, removing, and replacing load commands, then rebuilding
-/// the binary with updated offsets. Segment data is copied verbatim.
-pub struct MachoEditor<'data> {
-    original: &'data MachoFile<'data>,
+/// the binary without relocating existing payload. Segment data is copied
+/// verbatim, and command growth fails if existing header slack is insufficient.
+pub struct MachoEditor<'image, 'section> {
+    original: &'image MachoFile<'image>,
     commands: Vec<LoadCommand>,
-    segments: Vec<section::EditableSegment>,
+    segments: Vec<section::EditableSegment<'section>>,
 }
 
-impl<'data> MachoEditor<'data> {
+impl<'image, 'section> MachoEditor<'image, 'section> {
     /// Performs new.
-    pub fn new(macho: &'data MachoFile<'data>) -> Self {
+    pub fn new(macho: &'image MachoFile<'image>) -> Self {
         let commands: Vec<LoadCommand> = macho
             .load_commands()
             .iter()
@@ -152,14 +153,20 @@ impl<'data> MachoEditor<'data> {
     /// Placement consumes only free file and virtual-address space. The edit
     /// fails rather than relocating a later segment or overwriting unrelated
     /// bytes.
-    pub fn add_section(&mut self, request: AddSection) -> Result<()> {
-        section::place_section(&mut self.segments, self.original.bytes().len(), request)
+    pub fn add_section(&mut self, request: AddSection<'section>) -> Result<()> {
+        section::place_section(
+            &mut self.segments,
+            self.original.bytes().len(),
+            self.original.bitness(),
+            request,
+        )
     }
 
     /// Build the modified binary, returning the new bytes.
     ///
-    /// This encodes all commands, adjusts offsets, and produces a complete
-    /// Mach-O binary. The result can be written to a file.
+    /// This encodes all commands and produces a complete Mach-O binary. Load
+    /// commands may grow only into existing command slack; existing payload is
+    /// never relocated. The result can be written to a file.
     pub fn build(&self) -> Result<Vec<u8>> {
         let endian = self.original.endian();
         let bitness = self.original.bitness();

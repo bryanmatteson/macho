@@ -112,6 +112,18 @@ impl VtableIndex {
         Self::build_limited(macho, usize::MAX)
     }
 
+    /// Build from one borrowed thin Mach-O byte source.
+    ///
+    /// The source is not copied and may be a byte slice, vector, or
+    /// caller-owned read-only memory map. Universal binaries are rejected so
+    /// callers select an architecture explicitly.
+    pub fn build_from_source<S>(source: &S) -> Result<Self>
+    where
+        S: AsRef<[u8]> + ?Sized,
+    {
+        Self::build_limited_from_source(source, usize::MAX)
+    }
+
     /// Builds at most `max_vtables` decoded vtables.
     ///
     /// The search stops once the output limit is reached. Use
@@ -218,6 +230,18 @@ impl VtableIndex {
         }
 
         Ok(Self { vtables, truncated })
+    }
+
+    /// Build at most `max_vtables` entries from a borrowed thin Mach-O source.
+    ///
+    /// This has the same zero-copy source and universal-binary behavior as
+    /// [`Self::build_from_source`].
+    pub fn build_limited_from_source<S>(source: &S, max_vtables: usize) -> Result<Self>
+    where
+        S: AsRef<[u8]> + ?Sized,
+    {
+        let macho = crate::parse_source(source)?;
+        Self::build_limited(&macho, max_vtables)
     }
 
     /// Performs find_by_class.

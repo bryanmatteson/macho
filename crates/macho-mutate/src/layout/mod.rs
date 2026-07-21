@@ -1,11 +1,11 @@
 mod encoder;
 
-use crate::Result;
 use crate::format::io::Endian;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::model::segment::Segment;
 use crate::section::{EditableSegment, SectionContent};
+use crate::{Error, Result};
 
 pub(crate) use encoder::encode_edited_load_command;
 pub use encoder::encode_load_command;
@@ -27,69 +27,59 @@ pub fn build_binary(
 pub(crate) fn build_edited_binary(
     original: &MachoFile<'_>,
     commands: &[(LoadCommand, Vec<u8>)],
-    segments: &[EditableSegment],
+    segments: &[EditableSegment<'_>],
 ) -> Result<Vec<u8>> {
     let endian = original.endian();
-    let bitness = original.bitness();
-    let header_size = bitness.header_size();
+    let header_size = original.bitness().header_size();
+    let original_header_end = header_size
+        .checked_add(original.header().load_commands_size() as usize)
+        .ok_or_else(|| Error::invalid("original load-command range overflow"))?;
+    if original_header_end > original.bytes().len() {
+        return Err(Error::invalid(
+            "original load-command range exceeds the input",
+        ));
+    }
 
-    // Compute new sizeofcmds
-    let new_sizeofcmds: usize = commands.iter().map(|(_, bytes)| bytes.len()).sum();
+    let new_sizeofcmds = commands.iter().try_fold(0usize, |total, (_, bytes)| {
+        total
+            .checked_add(bytes.len())
+            .ok_or_else(|| Error::invalid("encoded load-command size overflow"))
+    })?;
+    let new_sizeofcmds_u32 = u32::try_from(new_sizeofcmds)
+        .map_err(|_| Error::invalid("encoded load commands exceed Mach-O's u32 size field"))?;
+    let new_header_end = header_size
+        .checked_add(new_sizeofcmds)
+        .ok_or_else(|| Error::invalid("new load-command range overflow"))?;
+    let payload_start = first_occupied_offset(original, original_header_end);
+    if new_header_end > payload_start {
+        return Err(Error::invalid(format!(
+            "insufficient load-command slack: commands end at {new_header_end:#x}, but existing payload begins at {payload_start:#x}; relocating existing payload is unsupported"
+        )));
+    }
 
-    // Find the original first segment data offset
-    let original_data_start = find_first_data_offset(original);
-    let page_size = infer_page_size(original);
-
-    // New data start: header + commands, aligned to page boundary
-    let new_data_start = align_up(header_size + new_sizeofcmds, page_size);
-
-    // Delta: how much segment data shifts
-    let delta = new_data_start as i64 - original_data_start as i64;
-
-    // Build the header
-    let mut output = Vec::with_capacity(
-        original
-            .bytes()
-            .len()
-            .saturating_add(delta.unsigned_abs() as usize),
-    );
-
-    // Write header
+    let ncmds = u32::try_from(commands.len())
+        .map_err(|_| Error::invalid("load-command count exceeds Mach-O's u32 field"))?;
     let mut header_bytes = original.bytes()[..header_size].to_vec();
-    // Update ncmds
-    let ncmds = commands.len() as u32;
-    write_u32_at(&mut header_bytes, endian, 16, ncmds); // ncmds at offset 16
-    write_u32_at(&mut header_bytes, endian, 20, new_sizeofcmds as u32); // sizeofcmds at offset 20
+    write_u32_at(&mut header_bytes, endian, 16, ncmds);
+    write_u32_at(&mut header_bytes, endian, 20, new_sizeofcmds_u32);
+
+    let mut output = Vec::with_capacity(original.bytes().len());
     output.extend_from_slice(&header_bytes);
-
-    // Write all encoded commands (with delta-adjusted offsets)
-    for (lc, encoded) in commands {
-        let mut adjusted = encoded.clone();
-        apply_delta_to_command(lc, &mut adjusted, endian, delta)?;
-        output.extend_from_slice(&adjusted);
+    for (_, encoded) in commands {
+        output.extend_from_slice(encoded);
     }
-
-    // Pad to new_data_start
-    while output.len() < new_data_start {
-        output.push(0);
-    }
-
-    // Copy original segment data (everything after the original command region)
-    if original_data_start < original.bytes().len() {
-        output.extend_from_slice(&original.bytes()[original_data_start..]);
-    }
+    output.resize(payload_start, 0);
+    output.extend_from_slice(&original.bytes()[payload_start..]);
 
     for section in segments.iter().flat_map(|segment| &segment.added_sections) {
         let SectionContent::FileBacked(bytes) = section.request.content() else {
             continue;
         };
-        let adjusted_offset = add_signed(section.file_offset, delta)?;
-        let start = usize::try_from(adjusted_offset).map_err(|_| {
-            crate::Error::invalid("new section offset cannot be represented on this host")
-        })?;
+        let start = usize::try_from(section.file_offset)
+            .map_err(|_| Error::invalid("new section offset cannot be represented on this host"))?;
         let end = start
             .checked_add(bytes.len())
-            .ok_or_else(|| crate::Error::invalid("new section payload range overflow"))?;
+            .ok_or_else(|| Error::invalid("new section payload range overflow"))?;
         if output.len() < end {
             output.resize(end, 0);
         }
@@ -99,182 +89,182 @@ pub(crate) fn build_edited_binary(
     Ok(output)
 }
 
-fn add_signed(value: u64, delta: i64) -> Result<u64> {
-    let adjusted = i128::from(value) + i128::from(delta);
-    u64::try_from(adjusted).map_err(|_| crate::Error::invalid("adjusted section offset overflow"))
-}
-
-fn find_first_data_offset(macho: &MachoFile<'_>) -> usize {
-    // Find the smallest non-zero file offset among segments with file data.
-    // This is where segment content begins in the file. For executables,
-    // __TEXT starts at offset 0 (overlapping header+commands), so the actual
-    // content beyond the header starts at the page-aligned offset after commands.
-    // For __DATA_CONST at e.g. 0x4000, that's the first distinct data region.
-    //
-    // The key insight: we want the offset where the header+commands region ENDS
-    // and segment data that we need to preserve BEGINS. For __TEXT at offset 0,
-    // the header and commands are already part of __TEXT, so we need to find
-    // where the content AFTER the commands starts. That's the page-aligned
-    // boundary after header + sizeofcmds.
-    let header_end = macho.bitness().header_size() + macho.header().load_commands_size() as usize;
-    let page_size = infer_page_size(macho);
-    align_up(header_end, page_size)
-}
-
-fn infer_page_size(macho: &MachoFile<'_>) -> usize {
-    for seg in macho.segments() {
-        if seg.file_size() > 0 && seg.file_offset().0 > 0 {
-            let off = seg.file_offset().0 as usize;
-            if off % 0x4000 == 0 {
-                return 0x4000;
-            }
-            if off % 0x1000 == 0 {
-                return 0x1000;
-            }
+/// Return the first byte that is known to be payload rather than command slack.
+///
+/// Mach-O has no explicit load-command capacity field. We therefore combine
+/// modeled file-offset metadata with the first non-zero padding byte and only
+/// permit command growth before the earliest result. Existing payload is never
+/// shifted: doing so would also require rewriting symbol values, fixups, and
+/// other address-bearing data that this crate does not yet model.
+fn first_occupied_offset(macho: &MachoFile<'_>, header_end: usize) -> usize {
+    fn consider(first: &mut usize, input_len: usize, header_end: usize, offset: u64, size: u64) {
+        if size == 0 || offset < header_end as u64 {
+            return;
+        }
+        if let Ok(offset) = usize::try_from(offset) {
+            *first = (*first).min(offset.min(input_len));
         }
     }
-    0x1000 // default
-}
 
-fn align_up(val: usize, align: usize) -> usize {
-    (val + align - 1) & !(align - 1)
+    let input_len = macho.bytes().len();
+    let mut first = input_len;
+
+    for segment in macho.segments() {
+        let mut has_file_section = false;
+        for section in segment.sections() {
+            if !section.section_type().is_zerofill() && section.size() > 0 {
+                has_file_section = true;
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    section.offset().0,
+                    section.size(),
+                );
+            }
+            if section.relocation_count() > 0 {
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    section.relocation_offset().0,
+                    u64::from(section.relocation_count()),
+                );
+            }
+        }
+        if segment.file_offset().0 > 0 {
+            consider(
+                &mut first,
+                input_len,
+                header_end,
+                segment.file_offset().0,
+                segment.file_size(),
+            );
+        } else if segment.file_size() > header_end as u64 && !has_file_section {
+            // A file-backed segment without sections gives us no proof that any
+            // byte following the commands is padding.
+            first = first.min(header_end);
+        }
+    }
+
+    for command in macho.load_commands() {
+        match command.kind() {
+            LoadCommand::Symtab(data) => {
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    data.sym_offset.into(),
+                    data.nsyms.into(),
+                );
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    data.str_offset.into(),
+                    data.str_size.into(),
+                );
+            }
+            LoadCommand::Dysymtab(data) => {
+                for (offset, count) in [
+                    (data.tocoff, data.ntoc),
+                    (data.modtaboff, data.nmodtab),
+                    (data.extrefsymoff, data.nextrefsyms),
+                    (data.indirectsymoff, data.nindirectsyms),
+                    (data.extreloff, data.nextrel),
+                    (data.locreloff, data.nlocrel),
+                ] {
+                    consider(
+                        &mut first,
+                        input_len,
+                        header_end,
+                        offset.into(),
+                        count.into(),
+                    );
+                }
+            }
+            LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => {
+                for (offset, size) in [
+                    (data.rebase_off, data.rebase_size),
+                    (data.bind_off, data.bind_size),
+                    (data.weak_bind_off, data.weak_bind_size),
+                    (data.lazy_bind_off, data.lazy_bind_size),
+                    (data.export_off, data.export_size),
+                ] {
+                    consider(
+                        &mut first,
+                        input_len,
+                        header_end,
+                        offset.into(),
+                        size.into(),
+                    );
+                }
+            }
+            LoadCommand::CodeSignature(data)
+            | LoadCommand::SegmentSplitInfo(data)
+            | LoadCommand::FunctionStarts(data)
+            | LoadCommand::DataInCode(data)
+            | LoadCommand::DylibCodeSignDrs(data)
+            | LoadCommand::LinkerOptimizationHint(data)
+            | LoadCommand::DyldExportsTrie(data)
+            | LoadCommand::DyldChainedFixups(data)
+            | LoadCommand::AtomInfo(data)
+            | LoadCommand::FunctionVariants(data)
+            | LoadCommand::FunctionVariantFixups(data) => {
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    data.data_offset.into(),
+                    data.data_size.into(),
+                );
+            }
+            LoadCommand::EncryptionInfo(data) | LoadCommand::EncryptionInfo64(data) => {
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    data.crypt_offset.into(),
+                    data.crypt_size.into(),
+                );
+            }
+            LoadCommand::TwolevelHints(data) => {
+                consider(
+                    &mut first,
+                    input_len,
+                    header_end,
+                    data.offset.into(),
+                    data.nhints.into(),
+                );
+            }
+            LoadCommand::Note(data) => {
+                consider(&mut first, input_len, header_end, data.offset, data.size)
+            }
+            LoadCommand::FilesetEntry(data) => {
+                consider(&mut first, input_len, header_end, data.file_offset, 1)
+            }
+            LoadCommand::Main(data) => {
+                consider(&mut first, input_len, header_end, data.entry_offset, 1)
+            }
+            LoadCommand::Unknown(_) => {
+                // An unknown command may carry file offsets we cannot identify
+                // or rewrite, so none of the existing slack is proven safe.
+                first = first.min(header_end);
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(relative) = macho.bytes()[header_end..first]
+        .iter()
+        .position(|byte| *byte != 0)
+    {
+        first = header_end + relative;
+    }
+    first
 }
 
 fn write_u32_at(buf: &mut [u8], endian: Endian, offset: usize, val: u32) {
     let encoded = endian.encode_u32(val).to_ne_bytes();
     buf[offset..offset + 4].copy_from_slice(&encoded);
-}
-
-/// Adjust file offset fields within an encoded command by a delta.
-fn apply_delta_to_command(
-    lc: &LoadCommand,
-    encoded: &mut [u8],
-    endian: Endian,
-    delta: i64,
-) -> Result<()> {
-    match lc {
-        LoadCommand::Segment64(_) => {
-            // Layout: cmd(4)+cmdsize(4)+segname(16)+vmaddr(8)+vmsize(8)+fileoff(8)+...
-            // fileoff is at byte offset 40, nsects at 64
-            adjust_u64(encoded, endian, 40, delta); // fileoff
-            let nsects = read_u32(encoded, endian, 64) as usize;
-            for i in 0..nsects {
-                let base = 72 + i * 80;
-                let sect_offset = read_u32(encoded, endian, base + 48);
-                if sect_offset > 0 {
-                    adjust_u32(encoded, endian, base + 48, delta);
-                }
-                let reloff = read_u32(encoded, endian, base + 56);
-                if reloff > 0 {
-                    adjust_u32(encoded, endian, base + 56, delta);
-                }
-            }
-        }
-        LoadCommand::Segment32(_) => {
-            // Layout: cmd(4)+cmdsize(4)+segname(16)+vmaddr(4)+vmsize(4)+fileoff(4)+...
-            // fileoff is at byte offset 32, nsects at 48
-            adjust_u32(encoded, endian, 32, delta); // fileoff
-            let nsects = read_u32(encoded, endian, 48) as usize;
-            for i in 0..nsects {
-                let base = 56 + i * 68;
-                let sect_offset = read_u32(encoded, endian, base + 40);
-                if sect_offset > 0 {
-                    adjust_u32(encoded, endian, base + 40, delta);
-                }
-                let reloff = read_u32(encoded, endian, base + 44);
-                if reloff > 0 {
-                    adjust_u32(encoded, endian, base + 44, delta);
-                }
-            }
-        }
-        LoadCommand::Symtab(_) => {
-            adjust_u32(encoded, endian, 8, delta); // symoff
-            adjust_u32(encoded, endian, 16, delta); // stroff
-        }
-        LoadCommand::Dysymtab(_) => {
-            adjust_u32(encoded, endian, 32, delta); // tocoff
-            adjust_u32(encoded, endian, 40, delta); // modtaboff
-            adjust_u32(encoded, endian, 48, delta); // extrefsymoff
-            adjust_u32(encoded, endian, 56, delta); // indirectsymoff
-            adjust_u32(encoded, endian, 64, delta); // extreloff
-            adjust_u32(encoded, endian, 72, delta); // locreloff
-        }
-        LoadCommand::DyldInfo(_) | LoadCommand::DyldInfoOnly(_) => {
-            adjust_u32(encoded, endian, 8, delta); // rebase_off
-            adjust_u32(encoded, endian, 16, delta); // bind_off
-            adjust_u32(encoded, endian, 24, delta); // weak_bind_off
-            adjust_u32(encoded, endian, 32, delta); // lazy_bind_off
-            adjust_u32(encoded, endian, 40, delta); // export_off
-        }
-        LoadCommand::Main(_) => {
-            adjust_u64(encoded, endian, 8, delta); // entryoff
-        }
-        LoadCommand::CodeSignature(_)
-        | LoadCommand::SegmentSplitInfo(_)
-        | LoadCommand::FunctionStarts(_)
-        | LoadCommand::DataInCode(_)
-        | LoadCommand::DylibCodeSignDrs(_)
-        | LoadCommand::LinkerOptimizationHint(_)
-        | LoadCommand::DyldExportsTrie(_)
-        | LoadCommand::DyldChainedFixups(_)
-        | LoadCommand::AtomInfo(_)
-        | LoadCommand::FunctionVariants(_)
-        | LoadCommand::FunctionVariantFixups(_) => {
-            adjust_u32(encoded, endian, 8, delta); // dataoff
-        }
-        LoadCommand::EncryptionInfo(_) => {
-            adjust_u32(encoded, endian, 8, delta); // cryptoff
-        }
-        LoadCommand::EncryptionInfo64(_) => {
-            adjust_u32(encoded, endian, 8, delta); // cryptoff
-        }
-        LoadCommand::TwolevelHints(_) => {
-            adjust_u32(encoded, endian, 8, delta); // offset
-        }
-        LoadCommand::Note(_) => {
-            adjust_u64(encoded, endian, 24, delta); // offset
-        }
-        LoadCommand::FilesetEntry(_) => {
-            adjust_u64(encoded, endian, 16, delta); // fileoff
-        }
-        // Commands with no file offsets to adjust
-        _ => {}
-    }
-    Ok(())
-}
-
-fn read_u32(buf: &[u8], endian: Endian, offset: usize) -> u32 {
-    if offset + 4 > buf.len() {
-        return 0;
-    }
-    endian.interpret_u32(u32::from_ne_bytes(
-        buf[offset..offset + 4].try_into().unwrap(),
-    ))
-}
-
-fn adjust_u32(buf: &mut [u8], endian: Endian, offset: usize, delta: i64) {
-    if offset + 4 > buf.len() {
-        return;
-    }
-    let val = read_u32(buf, endian, offset);
-    if val == 0 {
-        return;
-    } // don't adjust zero offsets
-    let new_val = (val as i64 + delta) as u32;
-    write_u32_at(buf, endian, offset, new_val);
-}
-
-fn adjust_u64(buf: &mut [u8], endian: Endian, offset: usize, delta: i64) {
-    if offset + 8 > buf.len() {
-        return;
-    }
-    let val = endian.interpret_u64(u64::from_ne_bytes(
-        buf[offset..offset + 8].try_into().unwrap(),
-    ));
-    if val == 0 {
-        return;
-    }
-    let new_val = (val as i64 + delta) as u64;
-    let encoded = endian.encode_u64(new_val).to_ne_bytes();
-    buf[offset..offset + 8].copy_from_slice(&encoded);
 }

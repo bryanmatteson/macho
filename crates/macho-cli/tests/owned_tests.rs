@@ -1,11 +1,25 @@
 use macho::model::addr::ThinFileOffset;
 use macho::model::container::MachoContainer;
+use macho::mutate::AddSection;
 use macho::mutate::owned::{MachoOwnedExt, OwnedFatBinary};
 use macho::mutate::transaction::PatchTransaction;
 
 fn load_true() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
     unsafe { memmap2::Mmap::map(&file).expect("failed to mmap") }
+}
+
+#[test]
+fn add_section_borrows_file_mapping_without_copying() {
+    let mmap = load_true();
+    let request = AddSection::new("__LINKEDIT", "__mapped", &mmap).expect("valid section request");
+    let borrowed = request
+        .content()
+        .file_bytes()
+        .expect("file-backed section bytes");
+
+    assert_eq!(borrowed.as_ptr(), mmap.as_ptr());
+    assert_eq!(borrowed.len(), mmap.len());
 }
 
 #[test]
@@ -211,35 +225,53 @@ fn owned_fat_arch_mut() {
 
 #[test]
 fn owned_fat_into_bytes_rebuilds_after_size_changing_slice_edit() {
-    let mmap = load_true();
-    let container = macho::parse(&mmap).expect("failed to parse");
+    let input = macho_test_support::fat32(&[
+        (
+            macho_test_support::CPU_TYPE_X86_64,
+            3,
+            macho_test_support::signable_thin64_x86_64(2),
+        ),
+        (
+            macho_test_support::CPU_TYPE_ARM64,
+            0,
+            macho_test_support::signable_thin64_arm64(2),
+        ),
+    ]);
+    let container = macho::parse(&input).expect("failed to parse synthetic fat binary");
+    let fat = match &container {
+        MachoContainer::Fat(fat) => fat,
+        MachoContainer::Thin(_) => panic!("expected fat binary"),
+    };
+    let mut owned = OwnedFatBinary::from_fat(fat, &input);
+    let original_first_size = fat.arches()[0].size();
 
-    if let MachoContainer::Fat(ref fat) = container {
-        let mut owned = OwnedFatBinary::from_fat(fat, &mmap);
-        let original_len = mmap.len();
-        let first_arch = &fat.arches()[0];
+    let mut txn = PatchTransaction::new(fat.arches()[0].macho());
+    txn.add_section(
+        AddSection::new("__LINKEDIT", "__fatgrow", &[0xA5; 64]).expect("valid section request"),
+    );
+    let rebuilt_arch = txn.commit().expect("rebuild first arch");
 
-        let mut txn = PatchTransaction::new(first_arch.macho());
-        txn.add_rpath(format!("/{}", "z".repeat(0x5000)));
-        let rebuilt_arch = txn.commit().expect("rebuild first arch");
+    owned
+        .replace_arch(0, rebuilt_arch)
+        .expect("replace first arch");
+    let bytes = owned.try_into_bytes().expect("rebuild fat container");
 
-        owned
-            .replace_arch(0, rebuilt_arch)
-            .expect("replace first arch");
-        let bytes = owned.try_into_bytes().expect("rebuild fat container");
+    let reparsed = macho::parse(&bytes).expect("reparse rebuilt fat container");
+    let reparsed_fat = match reparsed {
+        MachoContainer::Fat(fat) => fat,
+        MachoContainer::Thin(_) => panic!("expected fat binary"),
+    };
 
-        assert!(bytes.len() > original_len, "fat container should grow");
-
-        let reparsed = macho::parse(&bytes).expect("reparse rebuilt fat container");
-        let reparsed_fat = match reparsed {
-            MachoContainer::Fat(fat) => fat,
-            MachoContainer::Thin(_) => panic!("expected fat binary"),
-        };
-
-        assert_eq!(reparsed_fat.arches().len(), fat.arches().len());
-        assert!(
-            reparsed_fat.arches()[0].size() > first_arch.size(),
-            "patched slice should be larger after structural edit"
-        );
-    }
+    assert_eq!(reparsed_fat.arches().len(), fat.arches().len());
+    assert!(
+        reparsed_fat.arches()[0].size() > original_first_size,
+        "patched slice should be larger after structural edit"
+    );
+    assert_eq!(
+        reparsed_fat.arches()[0]
+            .macho()
+            .section_bytes("__LINKEDIT", "__fatgrow")
+            .expect("added section payload"),
+        &[0xA5; 64]
+    );
 }

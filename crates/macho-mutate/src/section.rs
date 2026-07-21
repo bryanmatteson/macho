@@ -1,4 +1,5 @@
 use macho_core::format::constants::SectionAttributes;
+use macho_core::model::header::Bitness;
 use macho_core::model::section::SectionType;
 use macho_core::model::segment::Segment;
 
@@ -6,18 +7,19 @@ use crate::{Error, Result};
 
 const MAX_MACHO_NAME_LEN: usize = 16;
 const MAX_ALIGNMENT_EXPONENT: u32 = 31;
+const MAX_FILE_PADDING: u64 = 16 * 1024 * 1024;
 
 /// Bytes or virtual storage carried by a newly added section.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum SectionContent {
+pub enum SectionContent<'data> {
     /// File-backed section contents.
-    FileBacked(Vec<u8>),
+    FileBacked(&'data [u8]),
     /// Zero-filled virtual storage with no bytes in the file.
     ZeroFill(u64),
 }
 
-impl SectionContent {
+impl SectionContent<'_> {
     /// Return the section's virtual size.
     pub fn size(&self) -> u64 {
         match self {
@@ -35,16 +37,17 @@ impl SectionContent {
     }
 }
 
-/// Owned request to add one section to an existing segment.
+/// Borrowed request to add one section to an existing segment.
 ///
 /// Names use Mach-O's fixed 16-byte representation. Construction rejects
 /// empty, overlong, or NUL-containing names so an accepted request cannot be
 /// truncated during encoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AddSection {
-    segment_name: String,
-    section_name: String,
-    content: SectionContent,
+#[non_exhaustive]
+pub struct AddSection<'data> {
+    segment_name: MachoName,
+    section_name: MachoName,
+    content: SectionContent<'data>,
     align: u32,
     section_type: SectionType,
     attributes: SectionAttributes,
@@ -53,38 +56,43 @@ pub struct AddSection {
     reserved3: u32,
 }
 
-impl AddSection {
-    /// Create a regular file-backed section.
-    pub fn new(
-        segment_name: impl Into<String>,
-        section_name: impl Into<String>,
-        data: impl Into<Vec<u8>>,
-    ) -> Result<Self> {
+impl<'data> AddSection<'data> {
+    /// Create a regular file-backed section borrowing a byte source.
+    ///
+    /// The source is never copied. Raw slices, vectors, and read-only memory
+    /// maps can all be passed by reference through [`AsRef<[u8]>`]. Successful
+    /// construction performs no internal heap allocation.
+    pub fn new<S>(
+        segment_name: impl AsRef<str>,
+        section_name: impl AsRef<str>,
+        data: &'data S,
+    ) -> Result<Self>
+    where
+        S: AsRef<[u8]> + ?Sized,
+    {
         Self::with_content(
             segment_name,
             section_name,
-            SectionContent::FileBacked(data.into()),
+            SectionContent::FileBacked(data.as_ref()),
         )
     }
 
     /// Create a zero-filled section with the requested virtual size.
     pub fn zero_fill(
-        segment_name: impl Into<String>,
-        section_name: impl Into<String>,
+        segment_name: impl AsRef<str>,
+        section_name: impl AsRef<str>,
         size: u64,
     ) -> Result<Self> {
         Self::with_content(segment_name, section_name, SectionContent::ZeroFill(size))
     }
 
     fn with_content(
-        segment_name: impl Into<String>,
-        section_name: impl Into<String>,
-        content: SectionContent,
+        segment_name: impl AsRef<str>,
+        section_name: impl AsRef<str>,
+        content: SectionContent<'data>,
     ) -> Result<Self> {
-        let segment_name = segment_name.into();
-        let section_name = section_name.into();
-        validate_name("segment", &segment_name)?;
-        validate_name("section", &section_name)?;
+        let segment_name = MachoName::new("segment", segment_name.as_ref())?;
+        let section_name = MachoName::new("section", section_name.as_ref())?;
         let section_type = match content {
             SectionContent::FileBacked(_) => SectionType::Regular,
             SectionContent::ZeroFill(_) => SectionType::ZeroFill,
@@ -116,11 +124,11 @@ impl AddSection {
     /// Set the encoded Mach-O section type.
     ///
     /// Zero-fill content requires a zero-fill type, and file-backed content
-    /// requires a non-zero-fill type. This invariant is checked when the
-    /// operation is applied so builder calls remain order-independent.
-    pub fn with_section_type(mut self, section_type: SectionType) -> Self {
+    /// requires a non-zero-fill type. A mismatch is rejected immediately.
+    pub fn with_section_type(mut self, section_type: SectionType) -> Result<Self> {
         self.section_type = section_type;
-        self
+        validate_content_type(&self)?;
+        Ok(self)
     }
 
     /// Set encoded section attributes.
@@ -139,16 +147,16 @@ impl AddSection {
 
     /// Name of the existing segment that will contain the section.
     pub fn segment_name(&self) -> &str {
-        &self.segment_name
+        self.segment_name.as_str()
     }
 
     /// Name of the section to add.
     pub fn section_name(&self) -> &str {
-        &self.section_name
+        self.section_name.as_str()
     }
 
     /// Section contents or zero-fill extent.
-    pub fn content(&self) -> &SectionContent {
+    pub fn content(&self) -> &SectionContent<'data> {
         &self.content
     }
 
@@ -173,38 +181,56 @@ impl AddSection {
     }
 }
 
-fn validate_name(kind: &str, name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(Error::invalid(format!("{kind} name must not be empty")));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MachoName {
+    bytes: [u8; MAX_MACHO_NAME_LEN],
+    len: u8,
+}
+
+impl MachoName {
+    fn new(kind: &str, name: &str) -> Result<Self> {
+        if name.is_empty() {
+            return Err(Error::invalid(format!("{kind} name must not be empty")));
+        }
+        if name.as_bytes().contains(&0) {
+            return Err(Error::invalid(format!("{kind} name must not contain NUL")));
+        }
+        if name.len() > MAX_MACHO_NAME_LEN {
+            return Err(Error::invalid(format!(
+                "{kind} name {name:?} is {} bytes; Mach-O permits at most {MAX_MACHO_NAME_LEN}",
+                name.len()
+            )));
+        }
+        let mut bytes = [0; MAX_MACHO_NAME_LEN];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        Ok(Self {
+            bytes,
+            len: name.len() as u8,
+        })
     }
-    if name.as_bytes().contains(&0) {
-        return Err(Error::invalid(format!("{kind} name must not contain NUL")));
+
+    fn as_str(&self) -> &str {
+        std::str::from_utf8(&self.bytes[..usize::from(self.len)])
+            .expect("MachoName is constructed only from valid UTF-8")
     }
-    if name.len() > MAX_MACHO_NAME_LEN {
-        return Err(Error::invalid(format!(
-            "{kind} name {name:?} is {} bytes; Mach-O permits at most {MAX_MACHO_NAME_LEN}",
-            name.len()
-        )));
-    }
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PlacedSection {
-    pub(crate) request: AddSection,
+pub(crate) struct PlacedSection<'data> {
+    pub(crate) request: AddSection<'data>,
     pub(crate) address: u64,
     pub(crate) file_offset: u64,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct EditableSegment {
+pub(crate) struct EditableSegment<'data> {
     pub(crate) original: Segment,
     pub(crate) vm_size: u64,
     pub(crate) file_size: u64,
-    pub(crate) added_sections: Vec<PlacedSection>,
+    pub(crate) added_sections: Vec<PlacedSection<'data>>,
 }
 
-impl From<Segment> for EditableSegment {
+impl From<Segment> for EditableSegment<'_> {
     fn from(original: Segment) -> Self {
         Self {
             vm_size: original.vm_size(),
@@ -215,12 +241,18 @@ impl From<Segment> for EditableSegment {
     }
 }
 
-pub(crate) fn place_section(
-    segments: &mut [EditableSegment],
+pub(crate) fn place_section<'data>(
+    segments: &mut [EditableSegment<'data>],
     input_len: usize,
-    request: AddSection,
+    bitness: Bitness,
+    request: AddSection<'data>,
 ) -> Result<()> {
     validate_content_type(&request)?;
+    if bitness == Bitness::Bits32 && request.reserved3 != 0 {
+        return Err(Error::invalid(
+            "reserved3 is not representable in a 32-bit Mach-O section",
+        ));
+    }
 
     let matching = segments
         .iter()
@@ -276,34 +308,47 @@ pub(crate) fn place_section(
             let declared_end = segment_file_start
                 .checked_add(target.file_size)
                 .ok_or_else(|| Error::invalid("segment file range overflow"))?;
-            let next_file_start = segments
+            let later_file_segment = segments
                 .iter()
                 .enumerate()
                 .filter(|(index, segment)| {
                     *index != target_index
                         && segment.original.file_size() > 0
-                        && segment.original.file_offset().0 >= declared_end
+                        && segment.original.file_offset().0 > segment_file_start
                 })
                 .map(|(_, segment)| segment.original.file_offset().0)
                 .min();
-            let placement_base = if next_file_start.is_some() {
-                declared_end
-            } else {
-                declared_end.max(input_len as u64)
-            };
-            let file_offset = align_up(placement_base, alignment)?;
+            if let Some(next_start) = later_file_segment {
+                return Err(Error::invalid(format!(
+                    "cannot extend segment {}: a later file-backed segment starts at {next_start:#x}",
+                    request.segment_name()
+                )));
+            }
+            let input_len =
+                u64::try_from(input_len).map_err(|_| Error::invalid("input length exceeds u64"))?;
+            if target.file_size == target.original.file_size() && declared_end != input_len {
+                return Err(Error::invalid(format!(
+                    "cannot extend segment {}: its declared file range ends at {declared_end:#x}, but the input ends at {input_len:#x}",
+                    request.segment_name()
+                )));
+            }
+            let file_offset = align_up(declared_end, alignment)?;
+            let padding = file_offset - declared_end;
+            if padding > MAX_FILE_PADDING {
+                return Err(Error::invalid(format!(
+                    "section {},{} alignment requires {padding} bytes of file padding, exceeding the {MAX_FILE_PADDING}-byte limit",
+                    request.segment_name(),
+                    request.section_name()
+                )));
+            }
+            if file_offset > u64::from(u32::MAX) {
+                return Err(Error::invalid(
+                    "section file offset exceeds Mach-O's u32 field",
+                ));
+            }
             let file_end = file_offset
                 .checked_add(bytes.len() as u64)
                 .ok_or_else(|| Error::invalid("new section file range overflow"))?;
-            if let Some(limit) = next_file_start {
-                if file_end > limit {
-                    return Err(Error::invalid(format!(
-                        "section {},{} needs file range {file_offset:#x}..{file_end:#x}, but the next segment starts at {limit:#x}",
-                        request.segment_name(),
-                        request.section_name()
-                    )));
-                }
-            }
             let relative = file_offset
                 .checked_sub(segment_file_start)
                 .ok_or_else(|| Error::invalid("new section file offset precedes its segment"))?;
@@ -350,6 +395,37 @@ pub(crate) fn place_section(
     let new_vm_end = segment_vm_start
         .checked_add(new_vm_size)
         .ok_or_else(|| Error::invalid("extended segment VM range overflow"))?;
+    let section_vm_end = address
+        .checked_add(request.content().size())
+        .ok_or_else(|| Error::invalid("new section VM range overflow"))?;
+    if request.content().size() > 0 {
+        let overlaps_existing = segments[target_index]
+            .original
+            .sections()
+            .iter()
+            .map(|section| {
+                (
+                    section.addr().0,
+                    section.addr().0.saturating_add(section.size()),
+                )
+            })
+            .chain(segments[target_index].added_sections.iter().map(|section| {
+                (
+                    section.address,
+                    section
+                        .address
+                        .saturating_add(section.request.content().size()),
+                )
+            }))
+            .any(|(start, end)| start < section_vm_end && address < end);
+        if overlaps_existing {
+            return Err(Error::invalid(format!(
+                "section {},{} VM range {address:#x}..{section_vm_end:#x} overlaps an existing section",
+                request.segment_name(),
+                request.section_name()
+            )));
+        }
+    }
     if let Some(next_vm_start) = segments
         .iter()
         .enumerate()
@@ -381,7 +457,7 @@ pub(crate) fn place_section(
     Ok(())
 }
 
-fn validate_content_type(request: &AddSection) -> Result<()> {
+fn validate_content_type(request: &AddSection<'_>) -> Result<()> {
     let content_is_zero_fill = matches!(request.content(), SectionContent::ZeroFill(_));
     if content_is_zero_fill != request.section_type().is_zerofill() {
         return Err(Error::invalid(format!(
@@ -408,16 +484,43 @@ mod tests {
 
     #[test]
     fn names_are_validated_without_truncation() {
-        assert!(AddSection::new("", "__x", []).is_err());
-        assert!(AddSection::new("__DATA", "0123456789abcdefg", []).is_err());
-        assert!(AddSection::new("__DATA", "bad\0name", []).is_err());
-        assert!(AddSection::new("0123456789abcdef", "0123456789abcdef", []).is_ok());
+        assert!(AddSection::new("", "__x", &[]).is_err());
+        assert!(AddSection::new("__DATA", "0123456789abcdefg", &[]).is_err());
+        assert!(AddSection::new("__DATA", "bad\0name", &[]).is_err());
+        assert!(AddSection::new("0123456789abcdef", "0123456789abcdef", &[]).is_ok());
+    }
+
+    #[test]
+    fn file_content_borrows_raw_slice_without_copying() {
+        let payload = [1, 2, 3, 4];
+        let bytes: &[u8] = &payload;
+        let request = AddSection::new("__DATA", "__bytes", bytes).expect("valid request");
+        let borrowed = request.content().file_bytes().expect("file-backed bytes");
+
+        assert_eq!(borrowed.as_ptr(), bytes.as_ptr());
+        assert_eq!(borrowed.len(), bytes.len());
     }
 
     #[test]
     fn alignment_is_bounded() {
-        let request = AddSection::new("__DATA", "__x", []).expect("valid names");
+        let request = AddSection::new("__DATA", "__x", &[]).expect("valid names");
         assert!(request.clone().with_alignment(31).is_ok());
         assert!(request.with_alignment(32).is_err());
+    }
+
+    #[test]
+    fn content_and_section_type_must_agree() {
+        assert!(
+            AddSection::new("__DATA", "__x", &[])
+                .unwrap()
+                .with_section_type(SectionType::ZeroFill)
+                .is_err()
+        );
+        assert!(
+            AddSection::zero_fill("__DATA", "__x", 1)
+                .unwrap()
+                .with_section_type(SectionType::Regular)
+                .is_err()
+        );
     }
 }
