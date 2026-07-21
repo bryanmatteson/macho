@@ -26,6 +26,7 @@ pub mod preview;
 pub mod resign;
 /// Section-addition request types.
 pub mod section;
+#[cfg(feature = "signing")]
 pub mod sign;
 /// The transaction module.
 pub mod transaction;
@@ -36,6 +37,7 @@ pub use patch::{
     TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
 };
 pub use section::{AddSection, SectionContent};
+#[cfg(feature = "signing")]
 pub use sign::{
     InProcessSignatureProvider, SignatureKind, SignatureProvider, SignatureProviderError,
     SignatureRequest, verify_signed_binary,

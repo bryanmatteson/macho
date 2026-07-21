@@ -8,8 +8,12 @@
     repository.workspace   = true
     description            = "Mach-O mutation and patching"
 
+[features]
+    default = ["signing"]
+    signing = ["dep:apple-codesign", "dep:x509-certificate"]
+
 [dependencies]
-    apple-codesign.workspace = true
+    apple-codesign = { workspace = true, optional = true }
     macho-core.workspace = true
     macho-insn.workspace = true
     macho-dyld.workspace = true
@@ -17,7 +21,7 @@
     serde.workspace = true
     zerocopy.workspace = true
     thiserror.workspace = true
-    x509-certificate.workspace = true
+    x509-certificate = { workspace = true, optional = true }
 
 [dev-dependencies]
     macho-test-support.workspace = true
