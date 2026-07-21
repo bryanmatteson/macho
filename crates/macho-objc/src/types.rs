@@ -144,5 +144,7 @@ pub const RO_HAS_CXX_DTOR_ONLY: u32 = 1 << 8;
 // method_list_t flags
 /// The METHOD_LIST_USES_RELATIVE_OFFSETS constant.
 pub const METHOD_LIST_USES_RELATIVE_OFFSETS: u32 = 0x8000_0000;
+/// Relative method selector offsets point directly to selector strings.
+pub const METHOD_LIST_USES_DIRECT_SELECTOR_OFFSETS: u32 = 0x4000_0000;
 /// The METHOD_LIST_ENTSIZE_MASK constant.
 pub const METHOD_LIST_ENTSIZE_MASK: u32 = 0x0000_FFFF;

@@ -7,7 +7,10 @@ use macho_core::model::section::Section;
 
 use crate::error::{Error, Result};
 use crate::resolve::{ObjCPointerProvenance, ObjCResolver};
-use crate::types::{METHOD_LIST_ENTSIZE_MASK, METHOD_LIST_USES_RELATIVE_OFFSETS};
+use crate::types::{
+    METHOD_LIST_ENTSIZE_MASK, METHOD_LIST_USES_DIRECT_SELECTOR_OFFSETS,
+    METHOD_LIST_USES_RELATIVE_OFFSETS,
+};
 
 /// Objective-C method dispatch kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,10 +54,24 @@ pub enum ObjCMethodRecordEncoding {
         type_encoding_field_va: Va,
         /// Runtime address used as the implementation-offset basis.
         implementation_field_va: Va,
-        /// File offset reached by the selector relative offset. This may be a
-        /// selector-reference pointer or the selector string itself.
+        /// Direct-string or indirect-selector-reference representation.
+        selector: ObjCRelativeSelectorEncoding,
+    },
+}
+
+/// Selector representation selected by a relative method-list header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ObjCRelativeSelectorEncoding {
+    /// The relative offset reaches the selector string directly.
+    DirectString {
+        /// Exact file offset of the selector cstring.
+        selector_string_file_offset: ThinFileOffset,
+    },
+    /// The relative offset reaches a pointer to the selector string.
+    IndirectReference {
+        /// Exact file offset of the selector-reference pointer.
         selector_reference_file_offset: ThinFileOffset,
-        /// Provenance of a selector-reference pointer at that offset.
+        /// Fixup provenance of that pointer.
         selector_reference_pointer: ObjCPointerProvenance,
     },
 }
@@ -360,6 +377,7 @@ fn fold_method_list(
     let flags = endian.interpret_u32(header.entsize_and_flags);
     let count = endian.interpret_u32(header.count) as usize;
     let relative = flags & METHOD_LIST_USES_RELATIVE_OFFSETS != 0;
+    let direct_selectors = flags & METHOD_LIST_USES_DIRECT_SELECTOR_OFFSETS != 0;
     let minimum = if relative {
         size_of::<RawRelativeMethodT>()
     } else {
@@ -396,7 +414,7 @@ fn fold_method_list(
     for ordinal in 0..count {
         let entry_offset = entries_start + ordinal * entry_size;
         let record = if relative {
-            parse_relative_method(resolver, entry_offset, entry_size)?
+            parse_relative_method(resolver, entry_offset, entry_size, direct_selectors)?
         } else {
             parse_absolute_method(resolver, entry_offset, entry_size)?
         };
@@ -409,6 +427,7 @@ fn parse_relative_method(
     resolver: &ObjCResolver<'_>,
     entry_offset: usize,
     entry_size: usize,
+    direct_selectors: bool,
 ) -> Result<ParsedMethodRecord> {
     let data = resolver.macho().bytes();
     let endian = resolver.endian();
@@ -419,9 +438,25 @@ fn parse_relative_method(
     let selector_offset = entry_offset
         .checked_add_signed(name_relative)
         .ok_or_else(|| Error::address("relative method selector offset overflows"))?;
-    let name = match resolver.read_pointer_at_offset(selector_offset as u64)? {
-        Some(string_va) => resolver.read_cstring(string_va)?.to_owned(),
-        None => read_cstring_at_file_offset(data, selector_offset)?.to_owned(),
+    let (name, selector) = if direct_selectors {
+        (
+            read_cstring_at_file_offset(data, selector_offset)?.to_owned(),
+            ObjCRelativeSelectorEncoding::DirectString {
+                selector_string_file_offset: ThinFileOffset(selector_offset as u64),
+            },
+        )
+    } else {
+        let string_va = resolver
+            .read_pointer_at_offset(selector_offset as u64)?
+            .ok_or_else(|| Error::address("relative method selector reference is unresolved"))?;
+        (
+            resolver.read_cstring(string_va)?.to_owned(),
+            ObjCRelativeSelectorEncoding::IndirectReference {
+                selector_reference_file_offset: ThinFileOffset(selector_offset as u64),
+                selector_reference_pointer: resolver
+                    .pointer_provenance_at_offset(selector_offset as u64),
+            },
+        )
     };
     let types_field_offset = entry_offset
         .checked_add(4)
@@ -459,9 +494,7 @@ fn parse_relative_method(
                 type_encoding_field_va: address_map
                     .thin_offset_to_va(ThinFileOffset(types_field_offset as u64))?,
                 implementation_field_va: imp_field_va,
-                selector_reference_file_offset: ThinFileOffset(selector_offset as u64),
-                selector_reference_pointer: resolver
-                    .pointer_provenance_at_offset(selector_offset as u64),
+                selector,
             },
         },
     })
@@ -664,10 +697,34 @@ mod tests {
                 selector_field_va: Va(IMAGE_BASE + ENTRY as u64),
                 type_encoding_field_va: Va(IMAGE_BASE + ENTRY as u64 + 4),
                 implementation_field_va: Va(IMAGE_BASE + ENTRY as u64 + 8),
-                selector_reference_file_offset: ThinFileOffset(SELECTOR_REFERENCE as u64),
-                selector_reference_pointer: ObjCPointerProvenance::Direct,
+                selector: ObjCRelativeSelectorEncoding::IndirectReference {
+                    selector_reference_file_offset: ThinFileOffset(SELECTOR_REFERENCE as u64),
+                    selector_reference_pointer: ObjCPointerProvenance::Direct,
+                },
             }
         );
+
+        bytes[0x2c0..0x2c4].copy_from_slice(&0xc000_000cu32.to_le_bytes());
+        bytes[ENTRY..ENTRY + 4]
+            .copy_from_slice(&i32::try_from(0x2e8 - ENTRY).unwrap().to_le_bytes());
+        let direct_records = fold_method_records(thin(&bytes), Vec::new(), |items, item| {
+            items.push(item);
+            Ok(())
+        })
+        .unwrap();
+        let direct = direct_records
+            .iter()
+            .find(|item| item.method_name == "next")
+            .unwrap();
+        assert!(matches!(
+            direct.provenance.encoding,
+            ObjCMethodRecordEncoding::Relative {
+                selector: ObjCRelativeSelectorEncoding::DirectString {
+                    selector_string_file_offset: ThinFileOffset(0x2e8),
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

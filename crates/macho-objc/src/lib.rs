@@ -39,8 +39,8 @@ pub mod types;
 
 pub use imp::{
     ObjCMethodImp, ObjCMethodKind, ObjCMethodRecord, ObjCMethodRecordEncoding,
-    ObjCMethodRecordProvenance, fold_method_imps, fold_method_imps_from_source,
-    fold_method_records, fold_method_records_from_source,
+    ObjCMethodRecordProvenance, ObjCRelativeSelectorEncoding, fold_method_imps,
+    fold_method_imps_from_source, fold_method_records, fold_method_records_from_source,
 };
 pub use resolve::ObjCPointerProvenance;
 pub use types::{ObjCCategory, ObjCClass, ObjCIvar, ObjCMethod, ObjCProperty, ObjCProtocol};
