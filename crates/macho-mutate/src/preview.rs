@@ -2,6 +2,7 @@ use crate::Result;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::model::validate;
+#[cfg(feature = "external-signing")]
 use crate::mutate::resign::ResignPlan;
 use crate::operation::PatchOp;
 use serde::Serialize;
@@ -22,6 +23,7 @@ pub struct StructuralPatchPreview {
     /// The signature_outcome field.
     pub signature_outcome: SignatureOutcome,
     /// The resign_plan field.
+    #[cfg(feature = "external-signing")]
     pub resign_plan: Option<ResignPlan>,
 }
 
@@ -88,6 +90,7 @@ pub fn build_structural_preview(
         SignatureOutcome::Unchanged
     };
 
+    #[cfg(feature = "external-signing")]
     let resign_plan = if matches!(
         signature_outcome,
         SignatureOutcome::Invalidated | SignatureOutcome::Removed
@@ -104,6 +107,7 @@ pub fn build_structural_preview(
         validation_errors: errors,
         validation_warnings: warnings,
         signature_outcome,
+        #[cfg(feature = "external-signing")]
         resign_plan,
     })
 }

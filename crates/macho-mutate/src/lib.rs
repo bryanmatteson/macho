@@ -10,6 +10,7 @@ pub use error::{MutationError, MutationErrorKind, MutationOperation, Result};
 
 /// The metadata module.
 pub mod metadata {
+    #[cfg(feature = "external-signing")]
     pub use macho_codesign as codesign;
 }
 
@@ -21,6 +22,7 @@ pub mod owned;
 /// The preview module.
 pub mod preview;
 /// The resign module.
+#[cfg(feature = "external-signing")]
 pub mod resign;
 /// Section-addition request types.
 pub mod section;
@@ -213,6 +215,7 @@ pub mod mutate {
     pub use crate::layout;
     pub use crate::owned;
     pub use crate::preview;
+    #[cfg(feature = "external-signing")]
     pub use crate::resign;
     pub use crate::transaction;
     pub use crate::{AddSection, LoadCommandEditExt, MachoEditor, SectionContent};
