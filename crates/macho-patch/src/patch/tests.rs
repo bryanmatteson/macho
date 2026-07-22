@@ -342,7 +342,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(err.kind, crate::MutationErrorKind::InvalidInput);
+        assert_eq!(err.kind, crate::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("RIP-relative"));
     }
 
@@ -350,20 +350,20 @@ mod tests {
     fn instruction_failures_retain_typed_sources_and_location() {
         let decode = MachoPatcher::validate_trampoline_instructions(PatchArch::X86_64, &[0x0f])
             .expect_err("truncated instruction must fail");
-        assert_eq!(decode.kind, crate::MutationErrorKind::Instruction);
-        assert_eq!(decode.code(), "mutation.instruction.failed");
+        assert_eq!(decode.kind, crate::PatchErrorKind::Instruction);
+        assert_eq!(decode.code(), "patch.instruction.failed");
         assert_eq!(decode.location.expect("decode span").offset, 0);
         assert!(matches!(
             decode.source,
-            Some(crate::error::MutationErrorSource::Decode(_))
+            Some(crate::PatchErrorSource::Decode(_))
         ));
 
         let encode = nop_bytes_for_arch(PatchArch::Arm64, 2)
             .expect_err("arm64 NOP size must be instruction-aligned");
-        assert_eq!(encode.kind, crate::MutationErrorKind::Instruction);
+        assert_eq!(encode.kind, crate::PatchErrorKind::Instruction);
         assert!(matches!(
             encode.source,
-            Some(crate::error::MutationErrorSource::Encode(_))
+            Some(crate::PatchErrorSource::Encode(_))
         ));
     }
 
@@ -440,7 +440,7 @@ mod tests {
         let err = p
             .plan_function_entry_patch(PatchArch::X86_64, 0x100100, 0x1_0000_0000, 5)
             .unwrap_err();
-        assert_eq!(err.kind, crate::MutationErrorKind::InvalidInput);
+        assert_eq!(err.kind, crate::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("needs 14 bytes"));
     }
 
@@ -450,7 +450,7 @@ mod tests {
         let err = p
             .plan_function_entry_patch(PatchArch::Arm64, 0x100100, 0x100200, 6)
             .unwrap_err();
-        assert_eq!(err.kind, crate::MutationErrorKind::InvalidInput);
+        assert_eq!(err.kind, crate::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("divisible by 4"));
     }
 
@@ -476,7 +476,7 @@ mod tests {
             .plan_function_entry_hook(PatchArch::Arm64e, 0x100100, 0x100200, 0x100300, 4)
             .unwrap_err();
 
-        assert_eq!(err.kind, crate::MutationErrorKind::InvalidInput);
+        assert_eq!(err.kind, crate::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("register or authenticated branch"));
     }
 
@@ -487,7 +487,7 @@ mod tests {
             .plan_function_entry_patch(PatchArch::X86_64, 0x100ffc, 8, 8)
             .unwrap_err();
 
-        assert_eq!(err.kind, crate::MutationErrorKind::InvalidInput);
+        assert_eq!(err.kind, crate::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("not fully mappable"));
     }
 

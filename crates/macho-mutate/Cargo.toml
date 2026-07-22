@@ -9,9 +9,8 @@
     description            = "Mach-O mutation and patching"
 
 [features]
-    default = ["patch", "signing"]
+    default = ["signing"]
     structural = []
-    patch = ["dep:macho-dyld", "dep:macho-insn"]
     external-signing = ["dep:sha2"]
     signing = [
         "external-signing",
@@ -26,8 +25,6 @@
     apple-codesign = { workspace = true, optional = true }
     bytes = { workspace = true, optional = true }
     macho-core.workspace = true
-    macho-insn = { workspace = true, optional = true }
-    macho-dyld = { workspace = true, optional = true }
     macho-codesign.workspace = true
     serde.workspace = true
     sha2 = { workspace = true, optional = true }

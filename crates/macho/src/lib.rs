@@ -34,6 +34,8 @@ pub use macho_insn as insn;
 pub use macho_mutate as mutate;
 #[cfg(feature = "metadata")]
 pub use macho_objc as objc;
+#[cfg(feature = "mutation")]
+pub use macho_patch as patch;
 #[cfg(feature = "metadata")]
 pub use macho_swift as swift;
 #[cfg(feature = "metadata")]
@@ -63,5 +65,5 @@ pub mod resolve {
 #[cfg(feature = "metadata")]
 /// The symbols module.
 pub mod symbols {
-    pub use macho_symbols::{demangle, exports, imports, table};
+    pub use macho_symbols::{demangle, table};
 }

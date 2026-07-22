@@ -2,18 +2,12 @@ use std::fmt;
 
 use macho_codesign::CodesignError;
 use macho_core::{ContextFrame, OffsetSpan, ParseError};
-#[cfg(feature = "patch")]
-use macho_dyld::DyldError;
-#[cfg(feature = "patch")]
-use macho_insn::{DecodeError, EncodeError};
 
 const INVALID_INPUT_CODE: &str = "mutation.input.invalid";
 const OUT_OF_BOUNDS_CODE: &str = "mutation.bounds.exceeded";
 const VALIDATION_FAILED_CODE: &str = "mutation.validation.failed";
 const PARSE_FAILED_CODE: &str = "mutation.parse.failed";
-const DYLD_FAILED_CODE: &str = "mutation.dyld.failed";
 const CODESIGN_FAILED_CODE: &str = "mutation.codesign.failed";
-const INSTRUCTION_FAILED_CODE: &str = "mutation.instruction.failed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// The MutationOperation type.
@@ -45,12 +39,8 @@ pub enum MutationErrorKind {
     Validation,
     /// The Parse variant.
     Parse,
-    /// The Dyld variant.
-    Dyld,
     /// The Codesign variant.
     Codesign,
-    /// The Instruction variant.
-    Instruction,
 }
 
 #[derive(Debug)]
@@ -59,17 +49,8 @@ pub enum MutationErrorKind {
 pub enum MutationErrorSource {
     /// The Parse variant.
     Parse(Box<ParseError>),
-    /// The Dyld variant.
-    #[cfg(feature = "patch")]
-    Dyld(Box<DyldError>),
     /// The Codesign variant.
     Codesign(Box<CodesignError>),
-    /// The Decode variant.
-    #[cfg(feature = "patch")]
-    Decode(Box<DecodeError>),
-    /// The Encode variant.
-    #[cfg(feature = "patch")]
-    Encode(Box<EncodeError>),
 }
 
 #[derive(Debug)]
@@ -144,9 +125,7 @@ impl MutationError {
             MutationErrorKind::OutOfBounds => OUT_OF_BOUNDS_CODE,
             MutationErrorKind::Validation => VALIDATION_FAILED_CODE,
             MutationErrorKind::Parse => PARSE_FAILED_CODE,
-            MutationErrorKind::Dyld => DYLD_FAILED_CODE,
             MutationErrorKind::Codesign => CODESIGN_FAILED_CODE,
-            MutationErrorKind::Instruction => INSTRUCTION_FAILED_CODE,
         }
     }
 }
@@ -167,23 +146,6 @@ impl From<ParseError> for MutationError {
         }
     }
 }
-#[cfg(feature = "patch")]
-impl From<DyldError> for MutationError {
-    fn from(source: DyldError) -> Self {
-        let mut context = source.context.clone();
-        context.push(ContextFrame::Operation {
-            name: "mutation.patch",
-        });
-        Self {
-            operation: MutationOperation::Patch,
-            kind: MutationErrorKind::Dyld,
-            location: source.location,
-            context,
-            message: source.message().to_owned(),
-            source: Some(MutationErrorSource::Dyld(Box::new(source))),
-        }
-    }
-}
 impl From<CodesignError> for MutationError {
     fn from(source: CodesignError) -> Self {
         let mut context = source.context.clone();
@@ -200,37 +162,6 @@ impl From<CodesignError> for MutationError {
         }
     }
 }
-#[cfg(feature = "patch")]
-impl From<DecodeError> for MutationError {
-    fn from(source: DecodeError) -> Self {
-        Self {
-            operation: MutationOperation::Patch,
-            kind: MutationErrorKind::Instruction,
-            location: None,
-            context: vec![ContextFrame::Operation {
-                name: "mutation.patch.decode",
-            }],
-            message: source.message.clone(),
-            source: Some(MutationErrorSource::Decode(Box::new(source))),
-        }
-    }
-}
-#[cfg(feature = "patch")]
-impl From<EncodeError> for MutationError {
-    fn from(source: EncodeError) -> Self {
-        Self {
-            operation: MutationOperation::Patch,
-            kind: MutationErrorKind::Instruction,
-            location: None,
-            context: vec![ContextFrame::Operation {
-                name: "mutation.patch.encode",
-            }],
-            message: source.message.clone(),
-            source: Some(MutationErrorSource::Encode(Box::new(source))),
-        }
-    }
-}
-
 impl fmt::Display for MutationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.code(), self.message)
@@ -240,13 +171,7 @@ impl std::error::Error for MutationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|source| match source {
             MutationErrorSource::Parse(source) => source as _,
-            #[cfg(feature = "patch")]
-            MutationErrorSource::Dyld(source) => source as _,
             MutationErrorSource::Codesign(source) => source as _,
-            #[cfg(feature = "patch")]
-            MutationErrorSource::Decode(source) => source as _,
-            #[cfg(feature = "patch")]
-            MutationErrorSource::Encode(source) => source as _,
         })
     }
 }

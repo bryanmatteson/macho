@@ -14,6 +14,7 @@ const PRODUCT_CRATES: &[&str] = &[
     "macho-core",
     "macho-insn",
     "macho-dyld",
+    "macho-demangle",
     "macho-symbols",
     "macho-codesign",
     "macho-dwarf",
@@ -22,6 +23,7 @@ const PRODUCT_CRATES: &[&str] = &[
     "macho-cpp",
     "macho-analysis",
     "macho-mutate",
+    "macho-patch",
     "macho-dyld-cache",
     "macho-header-infer",
     "macho-header-syntax",
@@ -151,10 +153,10 @@ fn dependency_violation(
     if matches!(
         dependency,
         "cpp_demangle" | "rustc-demangle" | "swift-demangler"
-    ) && package != "macho-symbols"
+    ) && package != "macho-demangle"
     {
         return Some(format!(
-            "symbol-demangling dependency {dependency} is owned by macho-symbols, not {package}"
+            "symbol-demangling dependency {dependency} is owned by macho-demangle, not {package}"
         ));
     }
     if dependency == "apple-codesign" && package != "macho-mutate" {
@@ -196,6 +198,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
                 "dep:macho-dyld",
                 "dep:macho-insn",
                 "dep:macho-mutate",
+                "dep:macho-patch",
             ]),
         ),
         (
@@ -232,18 +235,16 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("macho-core", &[]),
         ("macho-header-syntax", &[]),
         ("macho-insn", &[]),
+        ("macho-demangle", &[]),
         ("macho-dyld", &["macho-core"]),
-        ("macho-symbols", &["macho-core", "macho-dyld"]),
+        ("macho-symbols", &["macho-core", "macho-demangle"]),
         ("macho-codesign", &["macho-core"]),
         ("macho-dwarf", &["macho-core"]),
         ("macho-objc", &["macho-core", "macho-dyld"]),
-        (
-            "macho-swift",
-            &["macho-core", "macho-symbols", "macho-objc"],
-        ),
+        ("macho-swift", &["macho-core", "macho-demangle"]),
         (
             "macho-cpp",
-            &["macho-core", "macho-insn", "macho-symbols", "macho-dyld"],
+            &["macho-core", "macho-insn", "macho-demangle", "macho-dyld"],
         ),
         (
             "macho-analysis",
@@ -260,10 +261,8 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-header-syntax",
             ],
         ),
-        (
-            "macho-mutate",
-            &["macho-core", "macho-insn", "macho-dyld", "macho-codesign"],
-        ),
+        ("macho-mutate", &["macho-core", "macho-codesign"]),
+        ("macho-patch", &["macho-core", "macho-insn"]),
         ("macho-dyld-cache", &["macho-core", "macho-dyld"]),
         (
             "macho-header-infer",
@@ -287,6 +286,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-cpp",
                 "macho-analysis",
                 "macho-mutate",
+                "macho-patch",
                 "macho-workflow",
                 "macho-dyld-cache",
                 "macho-header-infer",
@@ -728,7 +728,7 @@ mod tests {
                     .is_some()
             );
             assert_eq!(
-                dependency_violation("macho-symbols", dependency, &workspace_names, &allowed),
+                dependency_violation("macho-demangle", dependency, &workspace_names, &allowed),
                 None
             );
         }

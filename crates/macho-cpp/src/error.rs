@@ -1,6 +1,7 @@
 use std::fmt;
 
 use macho_core::{ContextFrame, OffsetSpan, ParseError};
+#[cfg(feature = "fixups")]
 use macho_dyld::DyldError;
 
 const INVALID_FORMAT_CODE: &str = "cpp.format.invalid";
@@ -8,6 +9,7 @@ const OUT_OF_BOUNDS_CODE: &str = "cpp.bounds.exceeded";
 const INVALID_ADDRESS_CODE: &str = "cpp.address.invalid";
 const UNSUPPORTED_INPUT_CODE: &str = "cpp.input.unsupported";
 const CORE_FAILED_CODE: &str = "cpp.core.failed";
+#[cfg(feature = "fixups")]
 const DYLD_FAILED_CODE: &str = "cpp.dyld.failed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +26,7 @@ pub enum CppErrorKind {
     Unsupported,
     /// The Core variant.
     Core,
+    #[cfg(feature = "fixups")]
     /// The Dyld variant.
     Dyld,
 }
@@ -34,6 +37,7 @@ pub enum CppErrorKind {
 pub enum CppErrorSource {
     /// The Parse variant.
     Parse(Box<ParseError>),
+    #[cfg(feature = "fixups")]
     /// The Dyld variant.
     Dyld(Box<DyldError>),
 }
@@ -104,6 +108,7 @@ impl CppError {
             CppErrorKind::InvalidAddress => INVALID_ADDRESS_CODE,
             CppErrorKind::Unsupported => UNSUPPORTED_INPUT_CODE,
             CppErrorKind::Core => CORE_FAILED_CODE,
+            #[cfg(feature = "fixups")]
             CppErrorKind::Dyld => DYLD_FAILED_CODE,
         }
     }
@@ -123,6 +128,7 @@ impl From<ParseError> for CppError {
     }
 }
 
+#[cfg(feature = "fixups")]
 impl From<DyldError> for CppError {
     fn from(source: DyldError) -> Self {
         let mut context = source.context.clone();
@@ -146,6 +152,7 @@ impl std::error::Error for CppError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|source| match source {
             CppErrorSource::Parse(source) => source as _,
+            #[cfg(feature = "fixups")]
             CppErrorSource::Dyld(source) => source as _,
         })
     }
@@ -154,4 +161,5 @@ impl std::error::Error for CppError {
 /// The Result type.
 pub type Result<T> = std::result::Result<T, CppError>;
 /// The Error type.
+#[cfg(feature = "fixups")]
 pub(crate) type Error = CppError;

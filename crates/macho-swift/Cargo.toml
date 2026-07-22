@@ -11,8 +11,7 @@ readme = "README.md"
 
 [dependencies]
 macho-core.workspace = true
-macho-symbols.workspace = true
-macho-objc.workspace = true
+macho-demangle.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 

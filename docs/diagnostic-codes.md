@@ -77,9 +77,7 @@ unregistered constants, and rows without an owning constant.
 | `insn.encode.invalid` | error | An instruction could not be encoded or relocated safely. |
 | `mutation.bounds.exceeded` | error | A mutation requested bytes outside the bounded image. |
 | `mutation.codesign.failed` | error | Mutation failed through a retained code-signature source. |
-| `mutation.dyld.failed` | error | Mutation failed through a retained dyld source. |
 | `mutation.input.invalid` | error | A patch or mutation request is invalid. |
-| `mutation.instruction.failed` | error | Mutation failed through a retained instruction decode or encode source. |
 | `mutation.parse.failed` | error | Mutation failed through a retained core parser source. |
 | `mutation.validation.failed` | error | A candidate mutation failed structural validation. |
 | `objc.address.invalid` | error | Objective-C metadata contains an address or offset that cannot be mapped safely. |
@@ -104,6 +102,9 @@ unregistered constants, and rows without an owning constant.
 | `parse.validation.segment_overlap` | error | Two segments have overlapping virtual-address ranges. |
 | `parse.validation.string_table_bounds` | error | The string table lies outside the image or overflows checked arithmetic. |
 | `parse.validation.symbol_table_bounds` | error | The symbol table lies outside the image or overflows checked arithmetic. |
+| `patch.bounds.exceeded` | error | An executable patch range lies outside its admitted byte buffer. |
+| `patch.input.invalid` | error | An executable hook, trampoline, or relocation request is invalid. |
+| `patch.instruction.failed` | error | Executable patch planning failed through a retained instruction decode or encode source. |
 | `swift.address.invalid` | error | Swift metadata contains an address or offset that cannot be mapped safely. |
 | `swift.bounds.exceeded` | error | Swift metadata references bytes outside the bounded input. |
 | `swift.core.failed` | error | Swift metadata parsing failed through a retained core parser source. |
@@ -112,6 +113,5 @@ unregistered constants, and rows without an owning constant.
 | `symbols.address.invalid` | error | Symbol metadata contains an address or offset that cannot be mapped safely. |
 | `symbols.bounds.exceeded` | error | Symbol metadata references bytes outside the bounded input. |
 | `symbols.core.failed` | error | Symbol parsing failed through a retained core parser source. |
-| `symbols.dyld.failed` | error | Symbol parsing failed through a retained dyld source. |
 | `symbols.format.invalid` | error | Symbol metadata is malformed or internally inconsistent. |
 | `symbols.input.unsupported` | error | Structurally valid symbol metadata uses an unsupported form. |

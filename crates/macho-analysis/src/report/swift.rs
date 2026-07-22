@@ -338,7 +338,27 @@ pub fn recover_swift_surface(macho: &MachoFile<'_>) -> crate::Result<SwiftReport
         cpu_subtype: macho.header().cpu_subtype().0,
     };
     let image = super::symbol_recovery::image_identity(macho, architecture)?;
-    let index = macho.ext::<macho_swift::SwiftTypeIndex>()?;
+    let mut index = macho.ext::<macho_swift::SwiftTypeIndex>()?;
+    if let Ok(metadata) = macho.ext::<macho_objc::ObjCMetadata>() {
+        let runtime_types = metadata
+            .classes
+            .iter()
+            .filter(|class| class.is_swift)
+            .map(|class| (class.name.clone(), macho_swift::types::SwiftTypeKind::Class))
+            .chain(
+                metadata
+                    .protocols
+                    .iter()
+                    .filter(|protocol| protocol.name.starts_with("_TtP"))
+                    .map(|protocol| {
+                        (
+                            protocol.name.clone(),
+                            macho_swift::types::SwiftTypeKind::Protocol,
+                        )
+                    }),
+            );
+        index.enrich_objc_runtime_types(runtime_types, &macho_swift::PureSwiftDemangler)?;
+    }
     let sections = macho.all_sections().collect::<Vec<_>>();
     let mut observations = Vec::new();
     let mut evidence = Vec::new();

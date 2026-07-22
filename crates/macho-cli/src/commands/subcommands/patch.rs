@@ -3,8 +3,8 @@ use crate::commands::args::{ArchitectureArgs, InputArgs};
 use crate::model::container::MachoContainer;
 use crate::model::macho_file::MachoFile;
 use crate::model::validate;
+use crate::mutate::PatchOp;
 use crate::mutate::owned::OwnedFatBinary;
-use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::{SignatureOutcome, StructuralPatchPreview};
 use crate::mutate::transaction::{PatchPlan, PreparedPatch};
 use crate::mutate::{

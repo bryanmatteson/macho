@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::model::addr::Va;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use crate::symbols::demangle::demangle_symbol;
 use crate::{Error, Result};
+use macho_demangle::demangle_symbol;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// The VtableIndex type.
@@ -389,8 +389,8 @@ enum VtableFixup {
 /// Build a map from file_offset -> resolved fixup, using chained fixups
 /// if available, otherwise legacy bind/rebase opcodes.
 fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u64, VtableFixup> {
-    use crate::dyld::chained::parse_chained_fixups;
-    use crate::dyld::types::FixupKind;
+    use macho_dyld::chained::parse_chained_fixups;
+    use macho_dyld::types::FixupKind;
 
     let mut map = std::collections::HashMap::new();
 
@@ -422,7 +422,7 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
         }
         Err(_) => {
             // Try legacy bind/rebase opcodes
-            if let Ok((regular, weak, lazy)) = crate::dyld::bind::parse_bind_entries(macho) {
+            if let Ok((regular, weak, lazy)) = macho_dyld::bind::parse_bind_entries(macho) {
                 for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset().0 + entry.segment_offset;
@@ -436,7 +436,7 @@ fn build_vtable_fixup_map(macho: &MachoFile<'_>) -> std::collections::HashMap<u6
                 }
             }
 
-            if let Ok(rebases) = crate::dyld::rebase::parse_rebase_entries(macho) {
+            if let Ok(rebases) = macho_dyld::rebase::parse_rebase_entries(macho) {
                 for entry in &rebases {
                     if let Some(seg) = macho.segments().get(entry.segment_index) {
                         let file_offset = seg.file_offset().0 + entry.segment_offset;

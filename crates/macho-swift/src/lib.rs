@@ -6,8 +6,6 @@
 //! borrowed byte source.
 
 pub use macho_core::{ext, model};
-pub use macho_objc as objc;
-pub use macho_symbols as symbols;
 
 /// The error module.
 pub mod error;
@@ -21,8 +19,7 @@ pub use types::SwiftTypeIndex;
 use crate::ext::MachoExt;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use crate::objc::ObjCMetadata;
-use crate::symbols::demangle::demangle_symbol;
+use macho_demangle::demangle_swift_symbol;
 
 /// Injectable Swift symbol demangler.
 pub trait SwiftDemangler: Send + Sync {
@@ -31,13 +28,13 @@ pub trait SwiftDemangler: Send + Sync {
     fn demangle(&self, symbol: &str) -> Result<Option<String>>;
 }
 
-/// Process-free demangler backed by the symbol crate's pure implementation.
+/// Process-free Swift demangler backed directly by the Swift demangling library.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct PureSwiftDemangler;
 
 impl SwiftDemangler for PureSwiftDemangler {
     fn demangle(&self, symbol: &str) -> Result<Option<String>> {
-        Ok(demangle_symbol(symbol))
+        Ok(demangle_swift_symbol(symbol))
     }
 }
 
@@ -86,7 +83,7 @@ impl SwiftTypeIndex {
         // 1. Native Swift context descriptors. These are the authoritative
         //    source for nominal kinds and include types that are neither
         //    Objective-C-visible nor represented by exported symbols.
-        for swift_type in context_descriptors::discover(macho) {
+        for swift_type in context_descriptors::discover(macho, demangler) {
             insert_swift_type(&mut types, swift_type);
         }
 
@@ -124,44 +121,10 @@ impl SwiftTypeIndex {
             }
         }
 
-        // 3. From ObjC classes and protocols visible to the runtime.
-        if let Ok(meta) = macho.ext::<ObjCMetadata>() {
-            for cls in &meta.classes {
-                if cls.is_swift {
-                    insert_swift_type(
-                        &mut types,
-                        swift_type_from_objc_runtime_name(
-                            &cls.name,
-                            types::SwiftTypeKind::Class,
-                            demangler,
-                        )?,
-                    );
-                }
-            }
-            for protocol in &meta.protocols {
-                if is_swift_objc_protocol_name(&protocol.name) {
-                    insert_swift_type(
-                        &mut types,
-                        swift_type_from_objc_runtime_name(
-                            &protocol.name,
-                            types::SwiftTypeKind::Protocol,
-                            demangler,
-                        )?,
-                    );
-                }
-            }
-        }
-
-        types.sort_by(|left, right| {
-            left.name
-                .cmp(&right.name)
-                .then_with(|| left.address.cmp(&right.address))
-                .then_with(|| source_rank(right.source).cmp(&source_rank(left.source)))
-                .then_with(|| left.mangled_name.cmp(&right.mangled_name))
-        });
+        sort_types(&mut types);
         let parents = context_descriptors::discover_parents(macho, &types);
         let conformances = context_descriptors::discover_conformances(macho);
-        let associated_types = context_descriptors::discover_associated_types(macho);
+        let associated_types = context_descriptors::discover_associated_types(macho, demangler);
         Ok(SwiftTypeIndex {
             types,
             parents,
@@ -183,6 +146,26 @@ impl SwiftTypeIndex {
     {
         let macho = parse_source(source)?;
         Self::build_with_demangler(&macho, demangler)
+    }
+
+    /// Compose Objective-C runtime names into this Swift index without making
+    /// the Swift parser depend on an Objective-C parser.
+    pub fn enrich_objc_runtime_types<I>(
+        &mut self,
+        runtime_types: I,
+        demangler: &dyn SwiftDemangler,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = (String, types::SwiftTypeKind)>,
+    {
+        for (runtime_name, kind) in runtime_types {
+            insert_swift_type(
+                &mut self.types,
+                swift_type_from_objc_runtime_name(&runtime_name, kind, demangler)?,
+            );
+        }
+        sort_types(&mut self.types);
+        Ok(())
     }
 }
 
@@ -217,13 +200,19 @@ fn swift_type_from_objc_runtime_name(
     })
 }
 
-fn is_swift_objc_protocol_name(name: &str) -> bool {
-    name.starts_with("_TtP")
-}
-
 fn is_swift_mangled(name: &str) -> bool {
     let stripped = name.strip_prefix('_').unwrap_or(name);
     stripped.starts_with("$s") || stripped.starts_with("$S") || stripped.starts_with("$e")
+}
+
+fn sort_types(types: &mut [types::SwiftType]) {
+    types.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.address.cmp(&right.address))
+            .then_with(|| source_rank(right.source).cmp(&source_rank(left.source)))
+            .then_with(|| left.mangled_name.cmp(&right.mangled_name))
+    });
 }
 
 fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<types::SwiftType> {

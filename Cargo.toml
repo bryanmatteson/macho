@@ -18,6 +18,7 @@
     macho-codesign     = { path = "crates/macho-codesign", version = "0.2.0" }
     macho-core         = { path = "crates/macho-core", version = "0.2.0" }
     macho-cpp          = { path = "crates/macho-cpp", version = "0.2.0" }
+    macho-demangle     = { path = "crates/macho-demangle", version = "0.2.0" }
     macho-dwarf        = { path = "crates/macho-dwarf", version = "0.2.0" }
     macho-dyld         = { path = "crates/macho-dyld", version = "0.2.0" }
     macho-dyld-cache   = { path = "crates/macho-dyld-cache", version = "0.2.0" }
@@ -26,6 +27,7 @@
     macho-insn         = { path = "crates/macho-insn", version = "0.2.0" }
     macho-mutate       = { path = "crates/macho-mutate", version = "0.2.0" }
     macho-objc         = { path = "crates/macho-objc", version = "0.2.0" }
+    macho-patch        = { path = "crates/macho-patch", version = "0.2.0" }
     macho-swift        = { path = "crates/macho-swift", version = "0.2.0" }
     macho-symbols      = { path = "crates/macho-symbols", version = "0.2.0" }
     macho-test-support = { path = "crates/macho-test-support", version = "0.2.0" }

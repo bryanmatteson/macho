@@ -1,3 +1,6 @@
+#![deny(missing_docs)]
+//! Process-free Rust, C++, and Swift symbol demangling and normalization.
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 

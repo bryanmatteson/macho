@@ -10,5 +10,5 @@ pub use document::diff_documents;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::dyld::imports::ImportRecord;
 use crate::snapshot::*;
-use crate::symbols::imports::ImportRecord;

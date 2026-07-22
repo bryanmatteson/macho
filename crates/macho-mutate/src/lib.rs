@@ -11,8 +11,6 @@ pub use error::{MutationError, MutationErrorKind, MutationOperation, Result};
 /// The metadata module.
 pub mod metadata {
     pub use macho_codesign as codesign;
-    #[cfg(feature = "patch")]
-    pub use macho_dyld as dyld;
 }
 
 /// The layout module.
@@ -20,9 +18,6 @@ pub mod layout;
 mod operation;
 /// The owned module.
 pub mod owned;
-/// The patch module.
-#[cfg(feature = "patch")]
-pub mod patch;
 /// The preview module.
 pub mod preview;
 /// The resign module.
@@ -35,12 +30,6 @@ pub mod sign;
 pub mod transaction;
 
 pub use operation::PatchOp;
-#[cfg(feature = "patch")]
-pub use patch::{
-    FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachoPatcher,
-    PatchArch, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable,
-    TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
-};
 pub use section::{AddSection, SectionContent};
 #[cfg(feature = "signing")]
 pub use sign::InProcessSignatureProvider;
@@ -223,16 +212,8 @@ impl LoadCommandEditExt for macho_core::model::load_command::LoadCommand {
 pub mod mutate {
     pub use crate::layout;
     pub use crate::owned;
-    #[cfg(feature = "patch")]
-    pub use crate::patch;
     pub use crate::preview;
     pub use crate::resign;
     pub use crate::transaction;
     pub use crate::{AddSection, LoadCommandEditExt, MachoEditor, SectionContent};
-    #[cfg(feature = "patch")]
-    pub use crate::{
-        FunctionEntryHookPlan, FunctionEntryPatchPlan, HookJump, HookJumpEncoding, MachoPatcher,
-        PatchArch, PatchSectionInfo, PatchSegmentInfo, PatchSymbolEntry, PatchSymbolTable,
-        TrampolinePlan, nop_bytes_for_arch, vtable_mangled_prefix,
-    };
 }

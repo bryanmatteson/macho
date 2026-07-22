@@ -53,7 +53,9 @@ Parsing and index construction still allocate their result models. Source
 helpers accept one thin image; parse universal binaries with `macho_core::parse`,
 select an architecture, and call the existing `MachoFile` entry points.
 
-The `itanium-rtti` and `fixups` features are enabled by default. Consumers that
-disable default features must opt into both for the complete strict path.
+The `abi`, `itanium-rtti`, and `fixups` features are enabled by default.
+Consumers that disable default features opt into `fixups` for RTTI/vtable
+resolution and `abi` for instruction-backed function-body inference.
 
-Requires `macho-core`, `macho-insn`, `macho-symbols`, and `macho-dyld`.
+Requires `macho-core` and `macho-demangle`. The `fixups` feature adds
+`macho-dyld`; `abi` adds `macho-insn` and implies `fixups`.

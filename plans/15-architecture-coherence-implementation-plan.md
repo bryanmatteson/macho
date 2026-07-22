@@ -130,14 +130,14 @@ is true:
 
 This amended contract starts from the live 0.2.0 workspace, not the pre-workspace
 `src/` layout in plan 14 or the pre-implementation baseline previously recorded
-for plan 15. On July 18, 2026, two independent package counts (`cargo metadata`
-and workspace crate manifests) both report 18 packages. The target graph has 19:
-`macho-header-syntax` is the sole missing package.
+for plan 15. The amended target graph has 21 packages. Its three deliberately
+small new ownership leaves are `macho-header-syntax`, `macho-demangle`, and
+`macho-patch`; they replace cross-domain ownership rather than duplicating it.
 
 | Area | Verified live state | Required delta |
 | --- | --- | --- |
-| Workspace graph | The metadata leaves, analysis, mutation, workflow, façade, CLI, test support, and `crates/xtask` already exist. | Create only `macho-header-syntax`; update permitted edges, façade features, and all callers for that leaf. Audit existing crates in place rather than recreating them. |
-| Core and mutation | `macho-core` has no normal workspace dependency; `macho-mutate` depends on core, instruction, dyld, and code-signing leaves and has no analysis edge. | Preserve these achieved boundaries while applying the amended language/report contracts. |
+| Workspace graph | The metadata leaves, analysis, mutation, workflow, façade, CLI, test support, and `crates/xtask` exist. | Keep header syntax, shared demangling, and executable patch planning in their three dependency-low leaves; update permitted edges, façade features, and callers without adding forwarding crates. |
+| Core and mutation | `macho-core` has no normal workspace dependency; structural mutation and executable patch planning have separate crate boundaries. | Keep `macho-mutate` on core and code-signing leaves; keep instruction-backed hook/trampoline work in `macho-patch`. |
 | Façade | `macho --no-default-features` depends only on `macho-core`. | Preserve the minimal tree and extend the feature authority only where header syntax requires it. |
 | Verifier | `crates/xtask` already routes `architecture`, `docs --check`, `release --check`, `verify`, and `verify-fuzz`. Its architecture registry does not yet know `macho-header-syntax` or the amended dependency edges. | Extend the existing verifier and its invalid fixtures; do not create a new skeleton or a second verifier. |
 | Snapshot/report schema | Analysis and CLI tests still assert snapshot/report schema version 2. | Implement schema 3, the normative language/recovery wire registry, exact rejection fixtures, and per-domain schema goldens. |
@@ -159,18 +159,20 @@ An omitted edge is forbidden.
 ```text
 macho-core                     -> no workspace crates
 macho-insn                     -> no workspace crates
+macho-demangle                 -> no workspace crates
 macho-dyld                     -> core
-macho-symbols                  -> core, dyld
+macho-symbols                  -> core, demangle
 macho-codesign                 -> core
 macho-dwarf                    -> core
-macho-objc                     -> core, dyld, header-syntax
-macho-swift                    -> core, symbols, objc
-macho-cpp                      -> core, insn, symbols, dyld, dwarf
+macho-objc                     -> core, dyld
+macho-swift                    -> core, demangle
+macho-cpp                      -> core, demangle; feature-selected insn, dyld
 macho-header-syntax            -> no workspace crates
 
 macho-analysis                 -> core, insn, symbols, dyld, codesign,
                                   dwarf, objc, swift, cpp, header-syntax
-macho-mutate                   -> core, insn, dyld, codesign
+macho-mutate                   -> core, codesign
+macho-patch                    -> core, insn
 macho-dyld-cache               -> core, dyld
 macho-header-infer             -> analysis, header-syntax
 macho-workflow                 -> core, analysis, mutate
@@ -196,16 +198,18 @@ belong to `macho-cli`; cargo metadata/tooling dependencies belong to `xtask`.
 | --- | --- | --- | --- |
 | `macho-core` | Byte-safe container/header/load-command/segment/section/symbol/relocation parsing, address types/maps, parse limits, structural validation, and diagnostics | Keep `format/`, structural `model/`, structural `ext`, and validation; reduce `lib.rs` | Serialization DTOs, domain metadata, analysis, mutation, CLI, process execution |
 | `macho-insn` | Architecture-aware decode, encode, and relocation primitives | Existing crate | Mach-O parsing, analysis policy, silent decode recovery |
-| `macho-symbols` | Symbol-table helpers, import/export naming, pure Rust/C++ demangling, demangler traits | `core/symbols/`; dyld-derived import/export collection calls downward into `macho-dyld` | Host process execution, ObjC/Swift graphs |
-| `macho-dyld` | Bind/rebase/chained-fixup/export parsing, pointer resolution, and dyld value types | `core/dyld/`, `core/resolve/fixups.rs`, `core/resolve/pointers.rs` | Image compatibility policy, CLI paths, mutation |
+| `macho-demangle` | Process-free Rust, C++, and Swift demangling, normalization, and caching | Demangler adapters formerly owned by `macho-symbols` | Mach-O parsing, metadata graphs, host processes |
+| `macho-symbols` | Symbol-table helpers and presentation adapters | `core/symbols/` | Dyld traversal, host process execution, ObjC/Swift graphs |
+| `macho-dyld` | Bind/rebase/chained-fixup/import/export parsing, pointer resolution, and dyld value types | `core/dyld/`, `core/resolve/fixups.rs`, `core/resolve/pointers.rs`, former symbol import/export wrappers | Image compatibility policy, CLI paths, mutation |
 | `macho-codesign` | Code-directory, superblob, entitlement, and signature parsing/types | `core/codesign/` | Signing mutation, audit policy, filesystem access |
 | `macho-dwarf` | DWARF section loading and typed function/type indexes | `core/dwarf/` | Compiler invocation, header output, filesystem writes |
 | `macho-objc` | ObjC metadata parsing, encoding, resolver, and owned metadata values | `core/objc/` | Swift enrichment, rendering, CLI filtering |
-| `macho-swift` | Swift metadata indexing and in-process Swift demangling | `core/swift/` plus Swift-specific demangling coordination | Process-backed demangling, ObjC ownership |
-| `macho-cpp` | RTTI/vtable parsing and architecture-specific ABI/body inference | `core/rtti/` and pure ABI inference from `analysis/reconstruct/cpp/abi.rs` | Header filesystem output, compiler invocation, generic diff/reporting |
+| `macho-swift` | Native Swift metadata indexing with injected demangling | `core/swift/`; Objective-C enrichment is composed in analysis | Process-backed demangling, ObjC parsing/ownership |
+| `macho-cpp` | RTTI/vtable parsing and feature-selected architecture-specific ABI/body inference | `core/rtti/` and pure ABI inference from `analysis/reconstruct/cpp/abi.rs` | Generic symbol ownership, header filesystem output, compiler invocation, generic diff/reporting |
 | `macho-header-syntax` | Typed supported C/C++/Objective-C declaration ASTs, bundled in-process parsing, deterministic rendering, and syntax plus semantic validation | Consolidate header AST/parser/render/validation code split across reconstruction, ObjC rendering, and header inference | Mach-O evidence, runtime encodings, recovery facts, prompts, model hypotheses, process execution, filesystem access |
 | `macho-analysis` | Domain planning/execution, snapshots, diff, audit, dependency compatibility, strings/xrefs, container analysis, recovery facts, and safe header projection | Existing crate plus normalized `core/image.rs` and path/compatibility policy | Mutation, CLI arguments, host processes, filesystem writes, C-family parser implementation |
-| `macho-mutate` | Owned model, layout, patch planning/application, process-free signing and verification, structural preview, and transactional validation | Existing crate | Analysis dependency/reexport, semantic diff, credential-file I/O, CLI concerns |
+| `macho-mutate` | Owned model, layout, structural patch application, process-free signing and verification, structural preview, and transactional validation | Existing crate without executable hook/trampoline planning | Instruction decoding, dyld traversal, analysis dependency/reexport, semantic diff, credential-file I/O, CLI concerns |
+| `macho-patch` | Executable hook planning, instruction relocation, trampoline construction, and byte patching | `macho-mutate/src/patch/` | Mach-O layout rebuilding, signing, semantic analysis, filesystem writes |
 | `macho-workflow` | Cross-layer patch workflow and semantic before/after preview | Semantic portions of `mutate/preview.rs` and transaction orchestration that consumes analysis | CLI parsing/rendering, low-level parsers |
 | `macho-dyld-cache` | Dyld shared-cache model, parsing, and extraction-bytes API | `macho/src/inputs/dyld_cache/` | Filesystem writes, CLI flags, text output |
 | `macho-header-infer` | Bounded deterministic-report projection, prompt/response artifacts, model hypothesis records, and validation orchestration | Reusable inference logic now reached from `header_infer`; parser implementation moves to `macho-header-syntax` | Recovery-fact ownership, parser/AST ownership, process execution, environment discovery, filesystem writes |
@@ -218,8 +222,9 @@ concept to the lowest crate that can own it without policy. Examples:
 
 - raw load-command dylib kinds remain in `macho-core`; normalized dependency
   reports live in `macho-analysis`;
-- raw dyld exports live in `macho-dyld`; symbol presentation lives in
-  `macho-symbols` without making dyld depend on symbols;
+- raw dyld imports and exports live in `macho-dyld`; symbol-table presentation
+  lives in `macho-symbols`; shared language demangling lives in
+  `macho-demangle` without making language crates depend on `macho-symbols`;
 - C++ RTTI can consume a caller-supplied name normalizer rather than making
   `macho-symbols` depend upward on `macho-cpp`;
 - C/C++/Objective-C declaration syntax and semantic validation live in the dependency-free
@@ -245,7 +250,7 @@ metadata = [
 analysis = ["metadata", "dep:macho-insn", "dep:macho-analysis"]
 mutation = [
   "dep:macho-insn", "dep:macho-dyld", "dep:macho-codesign",
-  "dep:macho-mutate",
+  "dep:macho-mutate", "dep:macho-patch",
 ]
 workflow = ["analysis", "mutation", "dep:macho-workflow"]
 dyld-cache = ["dep:macho-dyld-cache"]
@@ -882,8 +887,8 @@ replacement and backup policy only after the workflow returns verified bytes.
 
 Inspection and recovery are process-free on every platform:
 
-- `macho-symbols` performs Rust and Itanium demangling in process;
-- `macho-swift` performs supported Swift demangling in process and reports an
+- `macho-demangle` performs Rust, Itanium, and Swift demangling in process;
+- `macho-swift` consumes supported Swift demangling in process and reports an
   unsupported encoding as typed evidence rather than launching a tool;
 - `macho-header-syntax` provides the bundled C/C++/Objective-C parsers, typed
   renderers, and semantic validator used by analysis and header inference;
@@ -1276,9 +1281,10 @@ dependencies; architecture check finds no upward or host edge.
 
 ### WP2 — Extract reusable metadata leaves
 
-1. Audit and complete the existing `macho-symbols`, `macho-dyld`,
-   `macho-codesign`, `macho-dwarf`, `macho-objc`, `macho-swift`, and `macho-cpp`
-   crates in place. Create only `macho-header-syntax`, using the ownership above.
+1. Audit and complete `macho-symbols`, `macho-dyld`, `macho-codesign`,
+   `macho-dwarf`, `macho-objc`, `macho-swift`, and `macho-cpp` in place. Keep
+   shared process-free demangling in `macho-demangle` and header syntax in
+   `macho-header-syntax`, using the ownership above.
 2. Resolve concepts by moving them downward or injecting traits; never add a
    reverse dependency.
 3. Replace process-backed Swift demangling and header validation with complete
@@ -1326,7 +1332,8 @@ execution; snapshot-rejection and state-distinction fixtures pass.
 ### WP5 — Separate mutation from workflow
 
 1. Remove the analysis dependency and reexport from `macho-mutate`.
-2. Split patch planning by responsibility and architecture.
+2. Move executable hook, relocation, and trampoline planning into
+   `macho-patch`; retain structural image operations in `macho-mutate`.
 3. Implement structural preview and strict reparse/validation.
 4. Complete the existing `macho-workflow` crate for selected semantic
    before/after analysis and diff.
@@ -1469,6 +1476,8 @@ The agent must also run these independent inspections after `verify`:
 cargo metadata --no-deps --format-version 1
 cargo tree -p macho-core
 cargo tree -p macho-mutate
+cargo tree -p macho-patch
+cargo tree -p macho-swift
 cargo tree -p macho --no-default-features
 cargo run -q -p macho-cli -- --help
 cargo run -q -p macho-cli -- --version

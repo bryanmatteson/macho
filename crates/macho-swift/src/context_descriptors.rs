@@ -1,3 +1,4 @@
+use crate::SwiftDemangler;
 use crate::model::addr::Va;
 use crate::model::macho_file::MachoFile;
 use crate::types::{
@@ -20,12 +21,13 @@ const MAX_ASSOCIATED_TYPE_RECORDS: usize = 1_000_000;
 const FIELD_DESCRIPTOR_HEADER_SIZE: u64 = 16;
 const MIN_FIELD_RECORD_SIZE: usize = 12;
 
-pub(crate) fn discover(macho: &MachoFile<'_>) -> Vec<SwiftType> {
-    let mut types = discover_section(macho, "__swift5_types", None);
+pub(crate) fn discover(macho: &MachoFile<'_>, demangler: &dyn SwiftDemangler) -> Vec<SwiftType> {
+    let mut types = discover_section(macho, "__swift5_types", None, demangler);
     types.extend(discover_section(
         macho,
         "__swift5_protos",
         Some(SwiftTypeKind::Protocol),
+        demangler,
     ));
     types
 }
@@ -91,7 +93,10 @@ pub(crate) fn discover_conformances(macho: &MachoFile<'_>) -> Vec<SwiftConforman
         .collect()
 }
 
-pub(crate) fn discover_associated_types(macho: &MachoFile<'_>) -> Vec<SwiftAssociatedTypeInfo> {
+pub(crate) fn discover_associated_types(
+    macho: &MachoFile<'_>,
+    demangler: &dyn SwiftDemangler,
+) -> Vec<SwiftAssociatedTypeInfo> {
     let Some(section) = macho
         .all_sections()
         .find(|section| section.section_name() == "__swift5_assocty")
@@ -143,8 +148,8 @@ pub(crate) fn discover_associated_types(macho: &MachoFile<'_>) -> Vec<SwiftAssoc
             .and_then(|value| add_signed(cursor, value));
         let conforming_type_name =
             conforming_type_address.and_then(|address| read_mangled_bytes(macho, address));
-        let resolved_conforming_type_name =
-            conforming_type_address.and_then(|address| resolve_mangled_nominal(macho, address));
+        let resolved_conforming_type_name = conforming_type_address
+            .and_then(|address| resolve_mangled_nominal(macho, address, demangler));
         let mut records = Vec::with_capacity(count);
         let Some(records_start) = add_unsigned(cursor, 16) else {
             break;
@@ -188,6 +193,7 @@ fn discover_section(
     macho: &MachoFile<'_>,
     section_name: &str,
     expected_kind: Option<SwiftTypeKind>,
+    demangler: &dyn SwiftDemangler,
 ) -> Vec<SwiftType> {
     let Some(section) = macho
         .all_sections()
@@ -206,7 +212,7 @@ fn discover_section(
             let relative = macho.endian().read_i32(chunk.try_into().ok()?);
             let entry_address = add_unsigned(section.addr(), (index * 4) as u64)?;
             let descriptor = resolve_relative_pointer(macho, entry_address, relative)?;
-            parse_type_descriptor(macho, descriptor, expected_kind)
+            parse_type_descriptor(macho, descriptor, expected_kind, demangler)
         })
         .collect()
 }
@@ -215,6 +221,7 @@ fn parse_type_descriptor(
     macho: &MachoFile<'_>,
     descriptor: Va,
     expected_kind: Option<SwiftTypeKind>,
+    demangler: &dyn SwiftDemangler,
 ) -> Option<SwiftType> {
     let flags = read_u32(macho, descriptor)?;
     let kind = swift_type_kind(flags & CONTEXT_KIND_MASK)?;
@@ -233,11 +240,15 @@ fn parse_type_descriptor(
         address: Some(descriptor.0),
         source: SwiftTypeSource::SwiftMetadata,
         confidence: SwiftTypeConfidence::High,
-        fields: parse_fields(macho, descriptor),
+        fields: parse_fields(macho, descriptor, demangler),
     })
 }
 
-fn parse_fields(macho: &MachoFile<'_>, descriptor: Va) -> Option<Vec<SwiftFieldInfo>> {
+fn parse_fields(
+    macho: &MachoFile<'_>,
+    descriptor: Va,
+    demangler: &dyn SwiftDemangler,
+) -> Option<Vec<SwiftFieldInfo>> {
     let field_pointer = add_unsigned(descriptor, 16)?;
     let relative = read_i32(macho, field_pointer)?;
     if relative == 0 {
@@ -264,7 +275,7 @@ fn parse_fields(macho: &MachoFile<'_>, descriptor: Va) -> Option<Vec<SwiftFieldI
         let type_name = read_i32(macho, type_field)
             .filter(|relative| *relative != 0)
             .and_then(|relative| add_signed(type_field, relative))
-            .and_then(|address| resolve_mangled_nominal(macho, address));
+            .and_then(|address| resolve_mangled_nominal(macho, address, demangler));
         let name = read_i32(macho, name_field)
             .filter(|relative| *relative != 0)
             .and_then(|relative| add_signed(name_field, relative))
@@ -411,7 +422,11 @@ fn read_mangled_bytes(macho: &MachoFile<'_>, address: Va) -> Option<Vec<u8>> {
     None
 }
 
-fn resolve_mangled_nominal(macho: &MachoFile<'_>, address: Va) -> Option<String> {
+fn resolve_mangled_nominal(
+    macho: &MachoFile<'_>,
+    address: Va,
+    demangler: &dyn SwiftDemangler,
+) -> Option<String> {
     let first = *macho.read_bytes_at_va(address, 1).ok()?.first()?;
     if matches!(first, 0x01 | 0x02) {
         let relative_field = add_unsigned(address, 1)?;
@@ -426,8 +441,11 @@ fn resolve_mangled_nominal(macho: &MachoFile<'_>, address: Va) -> Option<String>
     }
     let bytes = read_mangled_bytes(macho, address)?;
     let raw = std::str::from_utf8(&bytes).ok()?;
-    macho_symbols::demangle::demangle_swift_symbol(raw)
-        .or_else(|| macho_symbols::demangle::demangle_swift_symbol(&format!("$s{raw}")))
+    demangler
+        .demangle(raw)
+        .ok()
+        .flatten()
+        .or_else(|| demangler.demangle(&format!("$s{raw}")).ok().flatten())
 }
 
 fn read_i32(macho: &MachoFile<'_>, address: Va) -> Option<i32> {

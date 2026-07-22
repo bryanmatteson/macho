@@ -5,6 +5,7 @@ use crate::AnalysisIssue;
 use crate::codesign::CodeSignature;
 use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
+use crate::dyld::imports::{ImportRecord, collect_imports};
 use crate::dyld::types::ExportKind;
 use crate::error::{
     CODESIGN_FAILED_CODE, EXPORTS_FAILED_CODE, FIXUPS_FAILED_CODE, IMPORTS_FAILED_CODE,
@@ -15,7 +16,6 @@ use crate::model::load_command::LoadCommand;
 use crate::model::load_command::format_uuid;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use crate::symbols::imports::{ImportRecord, collect_imports};
 
 pub use self::model::*;
 

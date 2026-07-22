@@ -16,4 +16,6 @@ Parsing and index construction still allocate their result models. Source
 helpers accept one thin image; parse universal binaries with `macho_core::parse`,
 select an architecture, and call `SwiftTypeIndex::build`.
 
-Requires `macho-core`, `macho-symbols`, and `macho-objc`.
+Requires `macho-core` and the dependency-free `macho-demangle` leaf. Objective-C
+runtime enrichment is composed by `macho-analysis`; the Swift parser does not
+depend on an Objective-C parser.

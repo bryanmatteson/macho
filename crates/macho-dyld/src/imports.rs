@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-use crate::dyld::bind::parse_bind_entries;
-use crate::dyld::chained::parse_chained_fixups;
-use crate::dyld::types::BindEntry;
+use crate::bind::parse_bind_entries;
+use crate::chained::parse_chained_fixups;
 use crate::error::Result;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
+use crate::types::BindEntry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 /// The ImportRecord type.

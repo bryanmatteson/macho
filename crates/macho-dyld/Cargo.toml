@@ -10,4 +10,5 @@ description = "Mach-O dyld metadata and pointer resolution"
 
 [dependencies]
 macho-core.workspace = true
+serde.workspace = true
 thiserror.workspace = true

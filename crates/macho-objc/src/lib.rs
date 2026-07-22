@@ -8,9 +8,6 @@
 extern crate self as objc;
 
 pub use macho_core::{format, model};
-#[cfg(feature = "fixups")]
-pub use macho_dyld as dyld;
-
 /// The error module.
 pub mod error;
 pub(crate) use error::Error;

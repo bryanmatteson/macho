@@ -1,15 +1,15 @@
 use std::collections::HashMap;
 
-#[cfg(feature = "fixups")]
-use crate::dyld::chained::{ChainedFixups, parse_chained_fixups};
-#[cfg(feature = "fixups")]
-use crate::dyld::types::FixupKind;
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
 use crate::format::io::pod;
 use crate::model::addr::{ThinFileOffset, Va};
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
+#[cfg(feature = "fixups")]
+use macho_dyld::chained::{ChainedFixups, parse_chained_fixups};
+#[cfg(feature = "fixups")]
+use macho_dyld::types::FixupKind;
 
 /// Resolves pointers in ObjC metadata, handling chained fixups.
 ///
@@ -267,7 +267,7 @@ fn build_legacy_fixup_map(macho: &MachoFile<'_>) -> Result<HashMap<u64, Resolved
     let mut map = HashMap::new();
 
     // Import bind entries — these give us symbol names at specific offsets
-    let (regular, weak, lazy) = crate::dyld::bind::parse_bind_entries(macho)?;
+    let (regular, weak, lazy) = macho_dyld::bind::parse_bind_entries(macho)?;
     for entry in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
         let seg = macho.segments().get(entry.segment_index).ok_or_else(|| {
             Error::format(format!(
@@ -289,7 +289,7 @@ fn build_legacy_fixup_map(macho: &MachoFile<'_>) -> Result<HashMap<u64, Resolved
     }
 
     // Rebase entries — these tell us which pointers contain relocated addresses
-    for entry in crate::dyld::rebase::parse_rebase_entries(macho)? {
+    for entry in macho_dyld::rebase::parse_rebase_entries(macho)? {
         let seg = macho.segments().get(entry.segment_index).ok_or_else(|| {
             Error::format(format!(
                 "legacy rebase references absent segment {}",

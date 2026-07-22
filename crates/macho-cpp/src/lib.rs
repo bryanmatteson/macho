@@ -6,25 +6,26 @@
 //! [`macho_core::MachoFile`] or a borrowed byte source.
 
 pub use macho_core::{format, model};
-pub use macho_dyld as dyld;
-pub use macho_dyld::resolve;
-pub use macho_symbols as symbols;
 
 /// The error module.
 pub mod error;
+#[cfg(feature = "fixups")]
 pub(crate) use error::Error;
 pub use error::{CppError, CppErrorKind, Result};
 
+#[cfg(feature = "abi")]
 pub mod abi;
 mod abi_types;
 #[cfg(feature = "itanium-rtti")]
 mod strict_rtti;
 #[cfg(feature = "itanium-rtti")]
 mod strict_vtable;
+#[cfg(feature = "fixups")]
 /// The typeinfo module.
 pub mod typeinfo;
 /// The types module.
 pub mod types;
+#[cfg(feature = "fixups")]
 /// The vtable module.
 pub mod vtable;
 
@@ -46,14 +47,18 @@ pub use strict_vtable::{
     StrictVtableBatch, StrictVtableLimits, StrictVtableRecord, decode_strict_vtables,
     decode_strict_vtables_from_source,
 };
+#[cfg(feature = "fixups")]
 pub use typeinfo::{build_typeinfo_index, build_typeinfo_index_from_source};
 pub use types::{
     CppBaseClass, CppConfidence, CppEvidence, CppEvidenceKind, CppTypeInfoKind, CppTypeInfoNode,
 };
+#[cfg(feature = "fixups")]
 pub use vtable::{SlotTarget, VtableEntry, VtableIndex, VtableSlot};
 
+#[cfg(feature = "fixups")]
 use crate::model::macho_file::MachoFile;
 
+#[cfg(feature = "fixups")]
 fn parse_source<'data, S>(source: &'data S) -> Result<MachoFile<'data>>
 where
     S: AsRef<[u8]> + ?Sized,

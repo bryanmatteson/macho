@@ -1,14 +1,12 @@
 use std::fmt;
 
 use macho_core::{ContextFrame, OffsetSpan, ParseError};
-use macho_dyld::DyldError;
 
 const INVALID_FORMAT_CODE: &str = "symbols.format.invalid";
 const OUT_OF_BOUNDS_CODE: &str = "symbols.bounds.exceeded";
 const INVALID_ADDRESS_CODE: &str = "symbols.address.invalid";
 const UNSUPPORTED_INPUT_CODE: &str = "symbols.input.unsupported";
 const CORE_FAILED_CODE: &str = "symbols.core.failed";
-const DYLD_FAILED_CODE: &str = "symbols.dyld.failed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// The SymbolsErrorKind type.
@@ -24,8 +22,6 @@ pub enum SymbolsErrorKind {
     Unsupported,
     /// The Core variant.
     Core,
-    /// The Dyld variant.
-    Dyld,
 }
 
 #[derive(Debug)]
@@ -34,8 +30,6 @@ pub enum SymbolsErrorKind {
 pub enum SymbolsErrorSource {
     /// The Parse variant.
     Parse(Box<ParseError>),
-    /// The Dyld variant.
-    Dyld(Box<DyldError>),
 }
 
 #[derive(Debug)]
@@ -104,7 +98,6 @@ impl SymbolsError {
             SymbolsErrorKind::InvalidAddress => INVALID_ADDRESS_CODE,
             SymbolsErrorKind::Unsupported => UNSUPPORTED_INPUT_CODE,
             SymbolsErrorKind::Core => CORE_FAILED_CODE,
-            SymbolsErrorKind::Dyld => DYLD_FAILED_CODE,
         }
     }
 }
@@ -123,20 +116,6 @@ impl From<ParseError> for SymbolsError {
     }
 }
 
-impl From<DyldError> for SymbolsError {
-    fn from(source: DyldError) -> Self {
-        let mut context = source.context.clone();
-        context.push(ContextFrame::Operation { name: "symbols" });
-        Self {
-            kind: SymbolsErrorKind::Dyld,
-            location: source.location,
-            context,
-            message: source.message().to_owned(),
-            source: Some(SymbolsErrorSource::Dyld(Box::new(source))),
-        }
-    }
-}
-
 impl fmt::Display for SymbolsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "{}: {}", self.code(), self.message)
@@ -146,7 +125,6 @@ impl std::error::Error for SymbolsError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|source| match source {
             SymbolsErrorSource::Parse(source) => source as _,
-            SymbolsErrorSource::Dyld(source) => source as _,
         })
     }
 }

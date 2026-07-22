@@ -2097,6 +2097,7 @@ dependencies = [
  "macho-insn",
  "macho-mutate",
  "macho-objc",
+ "macho-patch",
  "macho-swift",
  "macho-symbols",
  "macho-test-support",
@@ -2165,13 +2166,22 @@ name = "macho-cpp"
 version = "0.2.0"
 dependencies = [
  "macho-core",
+ "macho-demangle",
  "macho-dyld",
  "macho-insn",
- "macho-symbols",
  "macho-test-support",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "macho-demangle"
+version = "0.2.0"
+dependencies = [
+ "cpp_demangle",
+ "rustc-demangle",
+ "swift-demangler",
 ]
 
 [[package]]
@@ -2189,6 +2199,7 @@ name = "macho-dyld"
 version = "0.2.0"
 dependencies = [
  "macho-core",
+ "serde",
  "thiserror 2.0.18",
 ]
 
@@ -2241,8 +2252,6 @@ dependencies = [
  "bytes",
  "macho-codesign",
  "macho-core",
- "macho-dyld",
- "macho-insn",
  "macho-test-support",
  "serde",
  "sha2",
@@ -2264,12 +2273,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "macho-patch"
+version = "0.2.0"
+dependencies = [
+ "macho-core",
+ "macho-insn",
+ "macho-test-support",
+]
+
+[[package]]
 name = "macho-swift"
 version = "0.2.0"
 dependencies = [
  "macho-core",
- "macho-objc",
- "macho-symbols",
+ "macho-demangle",
  "macho-test-support",
  "serde",
  "thiserror 2.0.18",
@@ -2279,12 +2296,8 @@ dependencies = [
 name = "macho-symbols"
 version = "0.2.0"
 dependencies = [
- "cpp_demangle",
  "macho-core",
- "macho-dyld",
- "rustc-demangle",
- "serde",
- "swift-demangler",
+ "macho-demangle",
  "thiserror 2.0.18",
 ]
 

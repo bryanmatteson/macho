@@ -10,15 +10,16 @@ description = "C++ RTTI, vtable, and ABI inference for Mach-O images"
 readme = "README.md"
 
 [features]
-default = ["fixups", "itanium-rtti"]
-fixups = []
-itanium-rtti = []
+default = ["abi", "fixups", "itanium-rtti"]
+abi = ["fixups", "dep:macho-insn"]
+fixups = ["dep:macho-dyld"]
+itanium-rtti = ["fixups"]
 
 [dependencies]
 macho-core.workspace = true
-macho-insn.workspace = true
-macho-symbols.workspace = true
-macho-dyld.workspace = true
+macho-demangle.workspace = true
+macho-insn = { workspace = true, optional = true }
+macho-dyld = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 
