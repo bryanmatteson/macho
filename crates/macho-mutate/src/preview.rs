@@ -2,8 +2,8 @@ use crate::Result;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::model::validate;
-use crate::mutate::patch::PatchOp;
 use crate::mutate::resign::ResignPlan;
+use crate::operation::PatchOp;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

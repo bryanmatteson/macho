@@ -1,5 +1,7 @@
 use crate::{Error, Result};
 
+pub use crate::operation::PatchOp;
+
 include!("model.rs");
 include!("planner.rs");
 include!("trampoline.rs");

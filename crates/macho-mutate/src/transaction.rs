@@ -2,9 +2,9 @@ use crate::format::parse;
 use crate::model::load_command::LoadCommand;
 use crate::model::macho_file::MachoFile;
 use crate::mutate::MachoEditor;
-pub use crate::mutate::patch::PatchOp;
 use crate::mutate::preview::build_structural_preview;
 pub use crate::mutate::preview::{SignatureOutcome, StructuralPatchPreview};
+pub use crate::operation::PatchOp;
 use crate::section::AddSection;
 use crate::{Error, Result};
 

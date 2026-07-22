@@ -2,7 +2,9 @@ use std::fmt;
 
 use macho_codesign::CodesignError;
 use macho_core::{ContextFrame, OffsetSpan, ParseError};
+#[cfg(feature = "patch")]
 use macho_dyld::DyldError;
+#[cfg(feature = "patch")]
 use macho_insn::{DecodeError, EncodeError};
 
 const INVALID_INPUT_CODE: &str = "mutation.input.invalid";
@@ -58,12 +60,15 @@ pub enum MutationErrorSource {
     /// The Parse variant.
     Parse(Box<ParseError>),
     /// The Dyld variant.
+    #[cfg(feature = "patch")]
     Dyld(Box<DyldError>),
     /// The Codesign variant.
     Codesign(Box<CodesignError>),
     /// The Decode variant.
+    #[cfg(feature = "patch")]
     Decode(Box<DecodeError>),
     /// The Encode variant.
+    #[cfg(feature = "patch")]
     Encode(Box<EncodeError>),
 }
 
@@ -162,6 +167,7 @@ impl From<ParseError> for MutationError {
         }
     }
 }
+#[cfg(feature = "patch")]
 impl From<DyldError> for MutationError {
     fn from(source: DyldError) -> Self {
         let mut context = source.context.clone();
@@ -194,6 +200,7 @@ impl From<CodesignError> for MutationError {
         }
     }
 }
+#[cfg(feature = "patch")]
 impl From<DecodeError> for MutationError {
     fn from(source: DecodeError) -> Self {
         Self {
@@ -208,6 +215,7 @@ impl From<DecodeError> for MutationError {
         }
     }
 }
+#[cfg(feature = "patch")]
 impl From<EncodeError> for MutationError {
     fn from(source: EncodeError) -> Self {
         Self {
@@ -232,9 +240,12 @@ impl std::error::Error for MutationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_ref().map(|source| match source {
             MutationErrorSource::Parse(source) => source as _,
+            #[cfg(feature = "patch")]
             MutationErrorSource::Dyld(source) => source as _,
             MutationErrorSource::Codesign(source) => source as _,
+            #[cfg(feature = "patch")]
             MutationErrorSource::Decode(source) => source as _,
+            #[cfg(feature = "patch")]
             MutationErrorSource::Encode(source) => source as _,
         })
     }
