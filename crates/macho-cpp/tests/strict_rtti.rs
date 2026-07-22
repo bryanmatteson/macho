@@ -346,3 +346,34 @@ fn strict_itanium_leaf_preserves_pointer_to_member_qualifiers_and_owner() {
         StrictPointerTarget::Local { va: IMAGE + 0x138 }
     );
 }
+
+#[test]
+fn strict_itanium_leaf_decodes_real_darwin_tagged_and_coalesced_rtti() {
+    let mut saw_non_unique_name = false;
+    for bytes in [
+        include_bytes!("fixtures/arm64-darwin-tagged-rtti.dylib").as_slice(),
+        include_bytes!("fixtures/x86_64-darwin-tagged-rtti.dylib").as_slice(),
+    ] {
+        let batch = decode_strict_rtti_from_source(bytes, StrictRttiLimits::default())
+            .expect("real Darwin RTTI decodes");
+        assert_eq!(
+            batch.outcome,
+            StrictRttiOutcome::Complete,
+            "{:#?}",
+            batch.gaps
+        );
+        assert!(batch.records.len() >= 8);
+        saw_non_unique_name |= batch.records.iter().any(|record| {
+            matches!(
+                record,
+                StrictRttiRecord::TypeInfo { record } if record.type_name_non_unique
+            )
+        });
+        assert!(batch.records.iter().any(|record| matches!(
+            record,
+            StrictRttiRecord::TypeInfo { record }
+                if record.family == ItaniumTypeInfoFamily::PointerToMember
+        )));
+    }
+    assert!(saw_non_unique_name);
+}

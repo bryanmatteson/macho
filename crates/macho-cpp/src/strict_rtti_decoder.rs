@@ -11,7 +11,7 @@ use macho_dyld::FixupKind;
 use super::*;
 use crate::{Error, Result};
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct PointerFixup {
     encoding: StrictPointerEncoding,
     authentication: StrictPointerAuthentication,
@@ -90,7 +90,8 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
             self.pointer_size,
             StrictRttiObservationKind::Pointer,
         )?;
-        let (encoding, authentication, target) = self.pointer_value(file_offset, raw_value)?;
+        let (encoding, authentication, target) =
+            self.pointer_value(file_offset, raw_value, u64::MAX)?;
         Ok(StrictPointerObservation {
             observation_ordinal,
             raw_value,
@@ -99,6 +100,40 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
             authentication,
             target,
         })
+    }
+
+    fn type_name_pointer(
+        &mut self,
+        symbol: &str,
+        va: u64,
+    ) -> Result<(StrictPointerObservation, bool)> {
+        let file_offset = self.macho.address_map().va_to_thin_offset(Va(va))?.0;
+        let raw_value = self.peek_word(va)?;
+        let shift = u32::try_from(self.pointer_size * 8 - 1)
+            .map_err(|_| Error::format("strict RTTI type-name tag width is invalid"))?;
+        let tag = 1_u64
+            .checked_shl(shift)
+            .ok_or_else(|| Error::format("strict RTTI type-name tag width is invalid"))?;
+        let observation_ordinal = self.observe(
+            symbol,
+            "type_name",
+            va,
+            self.pointer_size,
+            StrictRttiObservationKind::Pointer,
+        )?;
+        let (encoding, authentication, target) =
+            self.pointer_value(file_offset, raw_value, !tag)?;
+        Ok((
+            StrictPointerObservation {
+                observation_ordinal,
+                raw_value,
+                width: self.pointer_size as u8,
+                encoding,
+                authentication,
+                target,
+            },
+            raw_value & tag != 0,
+        ))
     }
 
     pub(crate) fn peek_word(&self, va: u64) -> Result<u64> {
@@ -123,7 +158,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
     pub(crate) fn peek_pointer_target(&self, va: u64) -> Result<StrictPointerTarget> {
         let file_offset = self.macho.address_map().va_to_thin_offset(Va(va))?.0;
         let raw_value = self.peek_word(va)?;
-        self.pointer_value(file_offset, raw_value)
+        self.pointer_value(file_offset, raw_value, u64::MAX)
             .map(|(_, _, target)| target)
     }
 
@@ -131,6 +166,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
         &self,
         file_offset: u64,
         raw_value: u64,
+        local_address_mask: u64,
     ) -> Result<(
         StrictPointerEncoding,
         StrictPointerAuthentication,
@@ -152,6 +188,12 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
             },
             |value| (value.encoding, value.authentication, value.target),
         );
+        let target = match target {
+            StrictPointerTarget::Local { va } => StrictPointerTarget::Local {
+                va: va & local_address_mask,
+            },
+            value => value,
+        };
         if let StrictPointerTarget::Local { va: target } = target {
             if target != 0
                 && self
@@ -271,8 +313,8 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
         let ptr = self.pointer_size;
         let runtime_vtable = self.pointer(symbol.name, "runtime_vtable", symbol.value)?;
         let family = self.family(&runtime_vtable)?;
-        let type_name_pointer =
-            self.pointer(symbol.name, "type_name", checked_add(symbol.value, ptr)?)?;
+        let (type_name_pointer, type_name_non_unique) =
+            self.type_name_pointer(symbol.name, checked_add(symbol.value, ptr)?)?;
         let type_name = self.type_name(symbol.name, &type_name_pointer)?;
         let mut class_flags = 0;
         let mut bases = Vec::new();
@@ -388,6 +430,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
             file_offset,
             family,
             type_name,
+            type_name_non_unique,
             runtime_vtable,
             type_name_pointer,
             class_flags,
@@ -683,6 +726,20 @@ fn build_pointer_fixups(macho: &MachoFile<'_>) -> Result<BTreeMap<u64, PointerFi
     if !has_legacy {
         return Ok(values);
     }
+    let mut local_symbols = BTreeMap::<&str, Option<u64>>::new();
+    for symbol in macho.ext::<SymbolTable<'_>>()?.symbols() {
+        if !symbol.is_defined() || symbol.value == 0 {
+            continue;
+        }
+        local_symbols
+            .entry(symbol.name)
+            .and_modify(|value| {
+                if *value != Some(symbol.value) {
+                    *value = None;
+                }
+            })
+            .or_insert(Some(symbol.value));
+    }
     let (regular, weak, lazy) = macho_dyld::parse_bind_entries(macho)?;
     for bind in regular.iter().chain(weak.iter()).chain(lazy.iter()) {
         let segment = macho
@@ -701,12 +758,25 @@ fn build_pointer_fixups(macho: &MachoFile<'_>) -> Result<BTreeMap<u64, PointerFi
                 lazy: bind.lazy,
             },
             authentication: StrictPointerAuthentication::NotApplicable,
-            target: StrictPointerTarget::External {
-                symbol: bind.symbol_name.to_owned(),
-                library_ordinal: bind
-                    .lib_ordinal
-                    .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
-                    as i32,
+            target: if bind.lib_ordinal == 0 {
+                local_symbols
+                    .get(bind.symbol_name)
+                    .and_then(|value| *value)
+                    .map_or_else(
+                        || StrictPointerTarget::External {
+                            symbol: bind.symbol_name.to_owned(),
+                            library_ordinal: 0,
+                        },
+                        |va| StrictPointerTarget::Local { va },
+                    )
+            } else {
+                StrictPointerTarget::External {
+                    symbol: bind.symbol_name.to_owned(),
+                    library_ordinal: bind
+                        .lib_ordinal
+                        .clamp(i64::from(i32::MIN), i64::from(i32::MAX))
+                        as i32,
+                }
             },
         };
         if values.insert(file_offset, value).is_some() {
@@ -736,9 +806,23 @@ fn build_pointer_fixups(macho: &MachoFile<'_>) -> Result<BTreeMap<u64, PointerFi
                 StrictPointerTarget::Local { va: raw }
             },
         };
-        if values.insert(file_offset, value).is_some() {
-            return Err(Error::format("duplicate legacy RTTI fixup location"));
+        if let Some(existing) = values.get(&file_offset) {
+            // A legacy lazy pointer is initially rebased to dyld's stub helper
+            // and later overwritten by the lazy bind. Both opcode streams
+            // therefore own the same storage. The eventual bind is the
+            // semantic target; all other cross-stream collisions are corrupt.
+            if matches!(
+                existing.encoding,
+                StrictPointerEncoding::LegacyBind { lazy: true, .. }
+            ) || existing.target == value.target
+            {
+                continue;
+            }
+            return Err(Error::format(format!(
+                "conflicting legacy RTTI fixup at file offset {file_offset:#x}: {existing:?} versus {value:?}"
+            )));
         }
+        values.insert(file_offset, value);
     }
     Ok(values)
 }

@@ -325,6 +325,8 @@ pub struct ItaniumTypeInfoRecord {
     pub family: ItaniumTypeInfoFamily,
     /// Exact encoded type-name bytes interpreted as UTF-8.
     pub type_name: String,
+    /// Darwin's high-bit type-name tag marks this RTTI identity non-unique.
+    pub type_name_non_unique: bool,
     /// Runtime-family vptr observation.
     pub runtime_vtable: StrictPointerObservation,
     /// Type-name pointer observation.
