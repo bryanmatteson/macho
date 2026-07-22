@@ -1,5 +1,6 @@
 use std::fmt;
 
+#[cfg(feature = "external-signing")]
 use macho_codesign::CodesignError;
 use macho_core::{ContextFrame, OffsetSpan, ParseError};
 #[cfg(feature = "patch")]
@@ -63,6 +64,7 @@ pub enum MutationErrorSource {
     #[cfg(feature = "patch")]
     Dyld(Box<DyldError>),
     /// The Codesign variant.
+    #[cfg(feature = "external-signing")]
     Codesign(Box<CodesignError>),
     /// The Decode variant.
     #[cfg(feature = "patch")]
@@ -184,6 +186,7 @@ impl From<DyldError> for MutationError {
         }
     }
 }
+#[cfg(feature = "external-signing")]
 impl From<CodesignError> for MutationError {
     fn from(source: CodesignError) -> Self {
         let mut context = source.context.clone();
@@ -242,6 +245,7 @@ impl std::error::Error for MutationError {
             MutationErrorSource::Parse(source) => source as _,
             #[cfg(feature = "patch")]
             MutationErrorSource::Dyld(source) => source as _,
+            #[cfg(feature = "external-signing")]
             MutationErrorSource::Codesign(source) => source as _,
             #[cfg(feature = "patch")]
             MutationErrorSource::Decode(source) => source as _,

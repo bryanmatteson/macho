@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.0
+
+- Added a bounded format probe for callers that need to identify Mach-O input
+  without accepting malformed containers.
+- Isolated structural mutation from instruction, dyld, analysis, workflow, and
+  CLI dependencies.
+- Added a minimal external-signing feature whose dependency closure contains
+  only the structural core, code-signature parsing, and digest support.
+- Isolated Objective-C fixup decoding behind the `fixups` feature while
+  retaining strict chained and legacy pointer resolution for Splice.
+
 ## 0.2.0
 
 - Split structural parsing, metadata, analysis, mutation, workflow, façade, and

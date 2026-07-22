@@ -14,4 +14,4 @@ bitflags.workspace = true
 
 [dev-dependencies]
 trybuild.workspace = true
-macho-test-support.workspace = true
+macho-test-support = { path = "../macho-test-support" }

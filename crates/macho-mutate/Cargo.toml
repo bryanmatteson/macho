@@ -12,7 +12,7 @@
     default = ["patch", "signing"]
     structural = []
     patch = ["dep:macho-dyld", "dep:macho-insn"]
-    external-signing = ["dep:sha2"]
+    external-signing = ["dep:macho-codesign", "dep:sha2"]
     signing = [
         "external-signing",
         "dep:apple-codesign",
@@ -28,7 +28,7 @@
     macho-core.workspace = true
     macho-insn = { workspace = true, optional = true }
     macho-dyld = { workspace = true, optional = true }
-    macho-codesign.workspace = true
+    macho-codesign = { workspace = true, optional = true }
     serde.workspace = true
     sha2 = { workspace = true, optional = true }
     signature = { workspace = true, optional = true }
@@ -38,4 +38,4 @@
     zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
-    macho-test-support.workspace = true
+    macho-test-support = { path = "../macho-test-support" }
