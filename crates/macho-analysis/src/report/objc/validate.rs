@@ -261,7 +261,10 @@ fn validate_header(
                     }
                 }
             }
-            HeaderDecl::ObjcForward { .. } => {}
+            // Objective-C headers may carry C record forwards required by
+            // recovered ivar and method types (`struct CGPoint;`, etc.).
+            // They have no runtime entity or member identity to validate.
+            HeaderDecl::ObjcForward { .. } | HeaderDecl::Forward { .. } => {}
             _ => return invalid("non-Objective-C declaration in Objective-C header projection"),
         }
     }

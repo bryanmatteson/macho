@@ -1,6 +1,7 @@
 //! Tree-sitter-backed header parsing and typed lowering.
 
 mod declaration;
+mod diagnostics;
 
 use declaration::{lower_declaration, lower_record};
 
@@ -44,7 +45,7 @@ pub enum ParseError {
     #[error("header parser did not produce a syntax tree")]
     NoTree,
     /// Concrete syntax errors were found.
-    #[error("header contains syntax errors")]
+    #[error("header contains syntax errors: {}", diagnostics::format_syntax_issues(.0))]
     Syntax(Vec<SyntaxIssue>),
     /// A syntactically valid construct cannot be represented by the typed AST.
     #[error("unsupported header construct `{kind}` at byte {span_start}")]
@@ -415,7 +416,7 @@ fn parse_objc_ivars(text: &str) -> Result<Vec<crate::ObjectiveCIvar>, ParseError
         let (ty, name) = split_type_and_name(value)?;
         ivars.push(crate::ObjectiveCIvar {
             name: parse_identifier(name.trim_start_matches('*').trim())?,
-            ty: parse_type(ty)?,
+            ty: parse_type(ty, Language::ObjectiveC)?,
             access,
         });
     }
@@ -438,7 +439,7 @@ fn parse_objc_property(text: &str) -> Result<crate::ObjectiveCProperty, ParseErr
     let (ty, name) = split_type_and_name(value)?;
     Ok(crate::ObjectiveCProperty {
         name: parse_identifier(name.trim_start_matches('*').trim())?,
-        ty: parse_type(ty)?,
+        ty: parse_type(ty, Language::ObjectiveC)?,
         attributes,
     })
 }
@@ -477,7 +478,7 @@ fn parse_objc_method(text: &str) -> Result<ObjectiveCMethod, ParseError> {
         .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
     let return_close = matching_delimiter(rest, return_open, '(', ')')
         .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
-    let return_type = parse_type(&rest[return_open + 1..return_close])?;
+    let return_type = parse_type(&rest[return_open + 1..return_close], Language::ObjectiveC)?;
     let tail = rest[return_close + 1..].trim();
     if !tail.contains(':') {
         return Ok(ObjectiveCMethod {
@@ -505,7 +506,7 @@ fn parse_objc_method(text: &str) -> Result<ObjectiveCMethod, ParseError> {
             .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
         let close = matching_delimiter(remaining, open, '(', ')')
             .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
-        let ty = parse_type(&remaining[open + 1..close])?;
+        let ty = parse_type(&remaining[open + 1..close], Language::ObjectiveC)?;
         remaining = remaining[close + 1..].trim_start();
         let end = remaining
             .find(char::is_whitespace)
@@ -529,6 +530,7 @@ fn parse_objc_method(text: &str) -> Result<ObjectiveCMethod, ParseError> {
 
 pub(super) fn parse_parameters(
     text: &str,
+    language: Language,
 ) -> Result<(Vec<Parameter>, bool, ParameterState), ParseError> {
     let text = text.trim();
     if text.is_empty() {
@@ -551,13 +553,13 @@ pub(super) fn parse_parameters(
         });
         parameters.push(Parameter {
             name,
-            ty: parse_type(ty)?,
+            ty: parse_type(ty, language)?,
         });
     }
     Ok((parameters, variadic, ParameterState::Known))
 }
 
-pub(super) fn parse_type(text: &str) -> Result<Type, ParseError> {
+pub(super) fn parse_type(text: &str, language: Language) -> Result<Type, ParseError> {
     let mut text = strip_attributes(text.trim());
     let qualifiers = TypeQualifiers {
         is_const: text.split_whitespace().any(|word| word == "const"),
@@ -572,28 +574,26 @@ pub(super) fn parse_type(text: &str) -> Result<Type, ParseError> {
         .trim();
     if let Some(base) = text.strip_suffix("&&") {
         return Ok(Type::Reference {
-            target: Box::new(parse_type(base)?),
+            target: Box::new(parse_type(base, language)?),
             kind: crate::ReferenceKind::Rvalue,
         });
     }
     if let Some(base) = text.strip_suffix('&') {
         return Ok(Type::Reference {
-            target: Box::new(parse_type(base)?),
+            target: Box::new(parse_type(base, language)?),
             kind: crate::ReferenceKind::Lvalue,
         });
     }
     if let Some(base) = text.strip_suffix('*') {
         return Ok(Type::Pointer {
-            pointee: Box::new(parse_type(base)?),
+            pointee: Box::new(parse_type(base, language)?),
             qualifiers,
         });
     }
-    if text == "id" {
-        return Ok(Type::ObjectiveCObject {
-            name: None,
-            protocols: Vec::new(),
-            qualifiers,
-        });
+    if language == Language::ObjectiveC {
+        if let Some(ty) = parse_objc_object_type(text, qualifiers)? {
+            return Ok(ty);
+        }
     }
     if let Some(builtin) = builtin_type(text) {
         return Ok(Type::Builtin(builtin));
@@ -609,7 +609,7 @@ pub(super) fn parse_type(text: &str) -> Result<Type, ParseError> {
     } else {
         (NamedTypeTag::Typedef, text)
     };
-    let (path_text, template_arguments) = parse_template_arguments(named)?;
+    let (path_text, template_arguments) = parse_template_arguments(named, language)?;
     Ok(Type::Named {
         tag,
         path: parse_path(path_text)?,
@@ -617,7 +617,60 @@ pub(super) fn parse_type(text: &str) -> Result<Type, ParseError> {
     })
 }
 
-fn parse_template_arguments(text: &str) -> Result<(&str, Vec<TemplateArgument>), ParseError> {
+fn parse_objc_object_type(
+    text: &str,
+    qualifiers: TypeQualifiers,
+) -> Result<Option<Type>, ParseError> {
+    if text == "id" {
+        return Ok(Some(Type::ObjectiveCObject {
+            name: None,
+            protocols: Vec::new(),
+            qualifiers,
+        }));
+    }
+
+    let Some(base) = text.strip_suffix('*').map(str::trim) else {
+        let Some(open) = text.find('<') else {
+            return Ok(None);
+        };
+        let close = matching_delimiter(text, open, '<', '>')
+            .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
+        if &text[..open].trim() != "id" || !text[close + 1..].trim().is_empty() {
+            return Ok(None);
+        }
+        return Ok(Some(Type::ObjectiveCObject {
+            name: None,
+            protocols: parse_objc_protocol_list(&text[open + 1..close])?,
+            qualifiers,
+        }));
+    };
+    let Some(open) = base.find('<') else {
+        return Ok(None);
+    };
+    let close = matching_delimiter(base, open, '<', '>')
+        .ok_or_else(|| ParseError::InvalidDeclaration(base.to_owned()))?;
+    if !base[close + 1..].trim().is_empty() {
+        return Ok(None);
+    }
+    let name = base[..open].trim();
+    if name == "id" {
+        return Ok(None);
+    }
+    Ok(Some(Type::ObjectiveCObject {
+        name: Some(parse_identifier(name)?),
+        protocols: parse_objc_protocol_list(&base[open + 1..close])?,
+        qualifiers,
+    }))
+}
+
+fn parse_objc_protocol_list(text: &str) -> Result<Vec<Identifier>, ParseError> {
+    text.split(',').map(str::trim).map(parse_identifier).collect()
+}
+
+fn parse_template_arguments(
+    text: &str,
+    language: Language,
+) -> Result<(&str, Vec<TemplateArgument>), ParseError> {
     let Some(open) = text.find('<') else {
         return Ok((text.trim(), Vec::new()));
     };
@@ -628,7 +681,7 @@ fn parse_template_arguments(text: &str) -> Result<(&str, Vec<TemplateArgument>),
         let value = value.trim();
         if let Ok(integer) = value.parse::<i64>() {
             arguments.push(TemplateArgument::Integer(integer));
-        } else if let Ok(ty) = parse_type(value) {
+        } else if let Ok(ty) = parse_type(value, language) {
             arguments.push(TemplateArgument::Type(ty));
         } else {
             arguments.push(TemplateArgument::Identifier(parse_path(value)?));

@@ -11,6 +11,8 @@ pub mod asm;
 pub mod columns;
 /// JSON serialization helpers for machine output.
 pub mod json;
+/// Objective-C semantic profile for recovered header presentation.
+pub mod objc;
 /// SARIF rendering for audit output.
 pub mod sarif;
 

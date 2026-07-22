@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+mod identifiers;
+
 use macho_header_syntax as syntax;
 use syntax::HeaderParser;
 
@@ -84,6 +86,7 @@ struct ProjectionContext {
     class_forwards: BTreeSet<String>,
     protocol_forwards: BTreeSet<String>,
     record_forwards: BTreeSet<(RecordKind, String)>,
+    projected_protocol_names: BTreeSet<String>,
 }
 
 impl ProjectionContext {
@@ -229,6 +232,13 @@ impl ProjectionContext {
             );
         let (wire_members, syntax_methods, syntax_properties) =
             self.project_members(entity_id, methods, &value.properties);
+        if !self
+            .projected_protocol_names
+            .insert(name.as_str().to_owned())
+        {
+            self.entity_gap(entity_id, ObjCUnavailableReason::ConflictingMetadata);
+            return;
+        }
         self.wire_declarations.push(HeaderDecl::ObjcProtocol {
             id: entity_id.clone(),
             name,
@@ -355,8 +365,7 @@ impl ProjectionContext {
         value: &ObjCProperty,
     ) -> Result<(ObjCHeaderMember, syntax::ObjectiveCProperty, String), ObjCUnavailableReason> {
         let name = known(&value.name).ok_or_else(|| value_reason(&value.name))?;
-        let (wire_name, syntax_name) =
-            identifier(Some(name)).ok_or(ObjCUnavailableReason::UnsupportedEncoding)?;
+        let (wire_name, syntax_name) = identifiers::objc_member_identifier(name)?;
         let attributes = known(&value.parsed_attributes)
             .ok_or_else(|| value_reason(&value.parsed_attributes))?;
         if !attributes.unknown.is_empty()
@@ -413,8 +422,7 @@ impl ProjectionContext {
         value: &ObjCIvar,
     ) -> Result<(ObjCHeaderIvar, syntax::ObjectiveCIvar), ObjCUnavailableReason> {
         let name = known(&value.name).ok_or_else(|| value_reason(&value.name))?;
-        let (wire_name, syntax_name) =
-            identifier(Some(name)).ok_or(ObjCUnavailableReason::UnsupportedEncoding)?;
+        let (wire_name, syntax_name) = identifiers::objc_member_identifier(name)?;
         let encoded = known(&value.parsed_type).ok_or_else(|| value_reason(&value.parsed_type))?;
         let ty = self.project_type(encoded)?;
         Ok((

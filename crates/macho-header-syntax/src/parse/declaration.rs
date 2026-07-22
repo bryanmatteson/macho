@@ -18,7 +18,7 @@ pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<De
             .ok_or_else(|| ParseError::InvalidDeclaration(trimmed.to_owned()))?;
         return Ok(vec![Decl::Alias {
             path: parse_path(name)?,
-            target: parse_type(target)?,
+            target: parse_type(target, language)?,
         }]);
     }
     if let Some(typedef) = trimmed.strip_prefix("typedef ") {
@@ -29,7 +29,7 @@ pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<De
         let (target, name) = split_type_and_name(rest)?;
         return Ok(vec![Decl::Alias {
             path: parse_path(name)?,
-            target: parse_type(target)?,
+            target: parse_type(target, language)?,
         }]);
     }
     if starts_with_record(trimmed) {
@@ -41,9 +41,10 @@ pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<De
         let prefix = trimmed[..open].trim();
         let (return_text, name_text) = split_type_and_name(prefix)?;
         let name = parse_identifier(name_text)?;
-        let (parameters, variadic, parameter_state) = parse_parameters(&trimmed[open + 1..close])?;
+        let (parameters, variadic, parameter_state) =
+            parse_parameters(&trimmed[open + 1..close], language)?;
         let signature = Type::Function {
-            return_type: Box::new(parse_type(return_text)?),
+            return_type: Box::new(parse_type(return_text, language)?),
             parameters,
             parameter_state,
             variadic,
@@ -59,7 +60,7 @@ pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<De
     }
     let (ty, names) = split_type_and_declarators(trimmed)?;
     let storage = parse_storage(trimmed);
-    let ty = parse_type(ty)?;
+    let ty = parse_type(ty, language)?;
     names
         .into_iter()
         .map(|name| {

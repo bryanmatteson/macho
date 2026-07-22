@@ -16,7 +16,7 @@ use macho::core::model::symbol::{SymbolTable, SymbolType};
 use serde::Serialize;
 
 use crate::commands::args::{ArchitectureArgs, InputArgs, OptionalInputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::output::{Options as OutputOptions, Style, columns, objc};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
@@ -147,7 +147,7 @@ fn run_surface(
                     .header
                     .as_ref()
                     .expect("header projection requested for every selected slice");
-                out.write_all(header.source.as_bytes())?;
+                out.write_all(objc::render_header(output.style(), &header.source).as_bytes())?;
                 if !header.unresolved.is_empty() {
                     writeln!(
                         out,

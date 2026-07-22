@@ -148,6 +148,13 @@ pub fn validate(
     let mut objc_classes = BTreeSet::new();
     let mut objc_protocols = BTreeSet::new();
 
+    // `id`, `Class`, and `SEL` are supplied by the Objective-C runtime rather
+    // than by a recovered image. They are valid in a standalone projected
+    // header without needing an SDK preamble.
+    if unit.language == crate::Language::ObjectiveC {
+        declared_tags.extend(["id".to_owned(), "Class".to_owned(), "SEL".to_owned()]);
+    }
+
     for (index, declaration) in unit.declarations.iter().enumerate() {
         collect_declared_types(
             declaration,
