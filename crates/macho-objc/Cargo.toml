@@ -19,4 +19,4 @@ macho-dyld = { workspace = true, optional = true }
 thiserror.workspace = true
 
 [dev-dependencies]
-macho-test-support.workspace = true
+macho-test-support = { path = "../macho-test-support" }

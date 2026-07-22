@@ -38,4 +38,4 @@
     zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
-    macho-test-support.workspace = true
+    macho-test-support = { path = "../macho-test-support" }
