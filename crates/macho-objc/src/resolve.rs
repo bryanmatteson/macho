@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
+#[cfg(feature = "fixups")]
 use crate::dyld::chained::{ChainedFixups, parse_chained_fixups};
+#[cfg(feature = "fixups")]
 use crate::dyld::types::FixupKind;
 use crate::error::{Error, Result};
 use crate::format::io::endian::Endian;
@@ -44,6 +46,7 @@ pub enum ObjCPointerProvenance {
 }
 
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "fixups"), allow(dead_code))]
 enum ResolvedFixup {
     ChainedRebase(u64),
     ChainedBind { import_name: String },
@@ -60,6 +63,7 @@ impl<'data> ObjCResolver<'data> {
         // Presence is decided by the load command, not by whether its payload
         // happened to parse. Damaged chained metadata must reject rather than
         // being misclassified as an image that uses legacy fixups.
+        #[cfg(feature = "fixups")]
         let fixup_map = if macho
             .find_load_command(|command| matches!(command, LoadCommand::DyldChainedFixups(_)))
             .is_some()
@@ -68,6 +72,25 @@ impl<'data> ObjCResolver<'data> {
             build_fixup_map(macho, &fixups)?
         } else {
             build_legacy_fixup_map(macho)?
+        };
+        #[cfg(not(feature = "fixups"))]
+        let fixup_map = {
+            if macho
+                .find_load_command(|command| {
+                    matches!(
+                        command,
+                        LoadCommand::DyldChainedFixups(_)
+                            | LoadCommand::DyldInfo(_)
+                            | LoadCommand::DyldInfoOnly(_)
+                    )
+                })
+                .is_some()
+            {
+                return Err(Error::unsupported(
+                    "Objective-C fixup decoding requires the `fixups` feature",
+                ));
+            }
+            HashMap::new()
         };
 
         Ok(Self {
@@ -188,6 +211,7 @@ impl<'data> ObjCResolver<'data> {
     }
 }
 
+#[cfg(feature = "fixups")]
 fn build_fixup_map(
     macho: &MachoFile<'_>,
     fixups: &ChainedFixups<'_>,
@@ -238,6 +262,7 @@ fn build_fixup_map(
     Ok(map)
 }
 
+#[cfg(feature = "fixups")]
 fn build_legacy_fixup_map(macho: &MachoFile<'_>) -> Result<HashMap<u64, ResolvedFixup>> {
     let mut map = HashMap::new();
 

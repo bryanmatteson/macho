@@ -108,6 +108,7 @@ impl From<ParseError> for ObjcError {
     }
 }
 
+#[cfg(feature = "fixups")]
 impl From<macho_dyld::DyldError> for ObjcError {
     fn from(source: macho_dyld::DyldError) -> Self {
         let message = source.message().to_owned();
