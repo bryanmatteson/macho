@@ -12,15 +12,15 @@
     default = ["patch", "signing"]
     structural = []
     patch = ["dep:macho-dyld", "dep:macho-insn"]
-    external-signing = [
+    external-signing = ["dep:sha2"]
+    signing = [
+        "external-signing",
         "dep:apple-codesign",
         "dep:bytes",
-        "dep:sha2",
         "dep:signature",
         "dep:x509-certificate",
         "dep:zeroize",
     ]
-    signing = ["external-signing"]
 
 [dependencies]
     apple-codesign = { workspace = true, optional = true }

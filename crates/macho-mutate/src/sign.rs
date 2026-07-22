@@ -5,17 +5,26 @@
 
 #[cfg(feature = "signing")]
 use apple_codesign::cryptography::{InMemoryPrivateKey, parse_pfx_data};
+#[cfg(feature = "signing")]
 use apple_codesign::{
     MachFile, MachOSigner, SettingsScope, SigningSettings, VerificationProblemType,
     verify_macho_data,
 };
+#[cfg(feature = "signing")]
 use bytes::Bytes;
+#[cfg(feature = "signing")]
 use sha2::{Digest, Sha256, Sha384};
+#[cfg(feature = "signing")]
 use signature::Signer;
+#[cfg(feature = "signing")]
 use x509_certificate::{
     CapturedX509Certificate, EcdsaCurve, KeyAlgorithm, Sign, Signature, SignatureAlgorithm,
 };
+#[cfg(feature = "signing")]
 use zeroize::Zeroizing;
+
+#[cfg(not(feature = "signing"))]
+mod minimal;
 
 /// Per-binary metadata supplied to an injected signing capability.
 ///
@@ -133,29 +142,36 @@ impl SignatureProvider for AdHocSignatureProvider {
         bytes: &[u8],
         request: &SignatureRequest,
     ) -> std::result::Result<Vec<u8>, SignatureProviderError> {
-        let mut settings = SigningSettings::default();
-        if let Some(identifier) = request.identifier() {
-            settings.set_binary_identifier(SettingsScope::Main, identifier);
+        #[cfg(not(feature = "signing"))]
+        {
+            minimal::sign_adhoc(bytes, request)
         }
-        if let Some(entitlements_xml) = request.entitlements_xml() {
+        #[cfg(feature = "signing")]
+        {
+            let mut settings = SigningSettings::default();
+            if let Some(identifier) = request.identifier() {
+                settings.set_binary_identifier(SettingsScope::Main, identifier);
+            }
+            if let Some(entitlements_xml) = request.entitlements_xml() {
+                settings
+                    .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
+                    .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            }
             settings
-                .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
+                .import_settings_from_macho(bytes)
                 .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            if settings.binary_identifier(SettingsScope::Main).is_none() {
+                settings.set_binary_identifier(SettingsScope::Main, "adhoc-signed");
+            }
+            let signer = MachOSigner::new(bytes)
+                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            let mut signed = Vec::new();
+            signer
+                .write_signed_binary(&settings, &mut signed)
+                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            verify_signed_binary(&signed, SignatureKind::AdHoc)?;
+            Ok(signed)
         }
-        settings
-            .import_settings_from_macho(bytes)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        if settings.binary_identifier(SettingsScope::Main).is_none() {
-            settings.set_binary_identifier(SettingsScope::Main, "adhoc-signed");
-        }
-        let signer = MachOSigner::new(bytes)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        let mut signed = Vec::new();
-        signer
-            .write_signed_binary(&settings, &mut signed)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        verify_signed_binary(&signed, SignatureKind::AdHoc)?;
-        Ok(signed)
     }
 
     fn kind(&self) -> SignatureKind {
@@ -197,6 +213,7 @@ impl<'provider> ExternalSignatureProvider<'provider> {
     }
 }
 
+#[cfg(feature = "signing")]
 struct ExternalKey<'provider> {
     signer: &'provider dyn ExternalDigestSigner,
     algorithm_name: &'static str,
@@ -205,6 +222,7 @@ struct ExternalKey<'provider> {
     public_key: Bytes,
 }
 
+#[cfg(feature = "signing")]
 impl Signer<Signature> for ExternalKey<'_> {
     fn try_sign(&self, message: &[u8]) -> std::result::Result<Signature, signature::Error> {
         let digest = match self.signature_algorithm {
@@ -223,6 +241,7 @@ impl Signer<Signature> for ExternalKey<'_> {
 }
 
 #[allow(deprecated)]
+#[cfg(feature = "signing")]
 impl Sign for ExternalKey<'_> {
     fn sign(
         &self,
@@ -263,8 +282,10 @@ impl Sign for ExternalKey<'_> {
     }
 }
 
+#[cfg(feature = "signing")]
 impl x509_certificate::KeyInfoSigner for ExternalKey<'_> {}
 
+#[cfg(feature = "signing")]
 fn external_algorithm(
     algorithms: &[String],
     certificate: &CapturedX509Certificate,
@@ -307,64 +328,72 @@ impl SignatureProvider for ExternalSignatureProvider<'_> {
         bytes: &[u8],
         request: &SignatureRequest,
     ) -> std::result::Result<Vec<u8>, SignatureProviderError> {
-        let certificate_bytes = self.signer.certificate_chain();
-        let mut certificates = certificate_bytes
-            .iter()
-            .map(|certificate| {
-                CapturedX509Certificate::from_der(certificate.clone())
-                    .map_err(|error| SignatureProviderError::InvalidCredentials(error.to_string()))
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        if certificates.is_empty() {
-            return Err(SignatureProviderError::InvalidCredentials(
-                "external signer returned an empty certificate chain".to_string(),
-            ));
+        #[cfg(not(feature = "signing"))]
+        {
+            minimal::sign_external(bytes, request, self.signer)
         }
-        let leaf = certificates.remove(0);
-        let (algorithm_name, key_algorithm, signature_algorithm) =
-            external_algorithm(&self.signer.algorithms(), &leaf)?;
-        let key = ExternalKey {
-            signer: self.signer,
-            algorithm_name,
-            key_algorithm,
-            signature_algorithm,
-            public_key: leaf.public_key_data(),
-        };
-
-        let mut settings = SigningSettings::default();
-        settings.set_signing_key(&key, leaf);
-        for certificate in certificates {
-            settings.chain_certificate(certificate);
-        }
-        if let Some(identifier) = request.identifier() {
-            settings.set_binary_identifier(SettingsScope::Main, identifier);
-        }
-        if let Some(entitlements_xml) = request.entitlements_xml() {
-            settings
-                .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
-                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        }
-        settings
-            .import_settings_from_macho(bytes)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        if settings.binary_identifier(SettingsScope::Main).is_none() {
-            let digest = Sha256::digest(self.signer.public_identity().as_bytes());
-            let identity = digest
+        #[cfg(feature = "signing")]
+        {
+            let certificate_bytes = self.signer.certificate_chain();
+            let mut certificates = certificate_bytes
                 .iter()
-                .take(12)
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
-            settings.set_binary_identifier(SettingsScope::Main, format!("external.{identity}"));
-        }
+                .map(|certificate| {
+                    CapturedX509Certificate::from_der(certificate.clone()).map_err(|error| {
+                        SignatureProviderError::InvalidCredentials(error.to_string())
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            if certificates.is_empty() {
+                return Err(SignatureProviderError::InvalidCredentials(
+                    "external signer returned an empty certificate chain".to_string(),
+                ));
+            }
+            let leaf = certificates.remove(0);
+            let (algorithm_name, key_algorithm, signature_algorithm) =
+                external_algorithm(&self.signer.algorithms(), &leaf)?;
+            let key = ExternalKey {
+                signer: self.signer,
+                algorithm_name,
+                key_algorithm,
+                signature_algorithm,
+                public_key: leaf.public_key_data(),
+            };
 
-        let signer = MachOSigner::new(bytes)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        let mut signed = Vec::new();
-        signer
-            .write_signed_binary(&settings, &mut signed)
-            .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
-        verify_signed_binary(&signed, SignatureKind::Certificate)?;
-        Ok(signed)
+            let mut settings = SigningSettings::default();
+            settings.set_signing_key(&key, leaf);
+            for certificate in certificates {
+                settings.chain_certificate(certificate);
+            }
+            if let Some(identifier) = request.identifier() {
+                settings.set_binary_identifier(SettingsScope::Main, identifier);
+            }
+            if let Some(entitlements_xml) = request.entitlements_xml() {
+                settings
+                    .set_entitlements_xml(SettingsScope::Main, entitlements_xml)
+                    .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            }
+            settings
+                .import_settings_from_macho(bytes)
+                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            if settings.binary_identifier(SettingsScope::Main).is_none() {
+                let digest = Sha256::digest(self.signer.public_identity().as_bytes());
+                let identity = digest
+                    .iter()
+                    .take(12)
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                settings.set_binary_identifier(SettingsScope::Main, format!("external.{identity}"));
+            }
+
+            let signer = MachOSigner::new(bytes)
+                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            let mut signed = Vec::new();
+            signer
+                .write_signed_binary(&settings, &mut signed)
+                .map_err(|error| SignatureProviderError::Failed(error.to_string()))?;
+            verify_signed_binary(&signed, SignatureKind::Certificate)?;
+            Ok(signed)
+        }
     }
 
     fn kind(&self) -> SignatureKind {
@@ -513,43 +542,51 @@ pub fn verify_signed_binary(
     bytes: &[u8],
     kind: SignatureKind,
 ) -> std::result::Result<(), SignatureProviderError> {
-    if kind == SignatureKind::Opaque {
-        return Err(SignatureProviderError::Unavailable(
-            "opaque signatures must be verified by their signing provider".to_string(),
-        ));
+    #[cfg(not(feature = "signing"))]
+    {
+        minimal::verify_signed_binary(bytes, kind)
     }
-    let permits_absent_cms = kind == SignatureKind::AdHoc;
-    let empty_adhoc_cms = permits_absent_cms && all_cms_slots_are_empty(bytes);
-    let problems = verify_macho_data(bytes)
-        .into_iter()
-        .filter(|problem| {
-            let expected_absent_cms = permits_absent_cms
-                && matches!(
-                    &problem.problem,
-                    VerificationProblemType::NoCryptographicSignature
-                );
-            // apple-codesign emits an empty BlobWrapper for ad-hoc signing.
-            // Its high-level verifier attempts to parse that empty payload as
-            // CMS and reports CmsError, while EmbeddedSignature::signed_data
-            // correctly classifies the same payload as absent CMS. Only allow
-            // the verifier's false-positive when every slice independently
-            // proves it carries the canonical empty wrapper.
-            let canonical_empty_wrapper =
-                empty_adhoc_cms && matches!(&problem.problem, VerificationProblemType::CmsError(_));
-            !(expected_absent_cms || canonical_empty_wrapper)
-        })
-        .map(|problem| problem.to_string())
-        .collect::<Vec<_>>();
+    #[cfg(feature = "signing")]
+    {
+        if kind == SignatureKind::Opaque {
+            return Err(SignatureProviderError::Unavailable(
+                "opaque signatures must be verified by their signing provider".to_string(),
+            ));
+        }
+        let permits_absent_cms = kind == SignatureKind::AdHoc;
+        let empty_adhoc_cms = permits_absent_cms && all_cms_slots_are_empty(bytes);
+        let problems = verify_macho_data(bytes)
+            .into_iter()
+            .filter(|problem| {
+                let expected_absent_cms = permits_absent_cms
+                    && matches!(
+                        &problem.problem,
+                        VerificationProblemType::NoCryptographicSignature
+                    );
+                // apple-codesign emits an empty BlobWrapper for ad-hoc signing.
+                // Its high-level verifier attempts to parse that empty payload as
+                // CMS and reports CmsError, while EmbeddedSignature::signed_data
+                // correctly classifies the same payload as absent CMS. Only allow
+                // the verifier's false-positive when every slice independently
+                // proves it carries the canonical empty wrapper.
+                let canonical_empty_wrapper = empty_adhoc_cms
+                    && matches!(&problem.problem, VerificationProblemType::CmsError(_));
+                !(expected_absent_cms || canonical_empty_wrapper)
+            })
+            .map(|problem| problem.to_string())
+            .collect::<Vec<_>>();
 
-    if problems.is_empty() {
-        Ok(())
-    } else {
-        Err(SignatureProviderError::VerificationFailed(
-            problems.join("; "),
-        ))
+        if problems.is_empty() {
+            Ok(())
+        } else {
+            Err(SignatureProviderError::VerificationFailed(
+                problems.join("; "),
+            ))
+        }
     }
 }
 
+#[cfg(feature = "signing")]
 fn all_cms_slots_are_empty(bytes: &[u8]) -> bool {
     let Ok(file) = MachFile::parse(bytes) else {
         return false;
@@ -617,6 +654,56 @@ mod tests {
             error,
             SignatureProviderError::InvalidCredentials(_)
         ));
+    }
+
+    #[cfg(not(feature = "signing"))]
+    struct MinimalExternalSigner;
+
+    #[cfg(not(feature = "signing"))]
+    impl ExternalDigestSigner for MinimalExternalSigner {
+        fn public_identity(&self) -> String {
+            "test.minimal".to_string()
+        }
+
+        fn algorithms(&self) -> Vec<String> {
+            vec!["ecdsa-p256-sha256".to_string()]
+        }
+
+        fn certificate_chain(&self) -> Vec<Vec<u8>> {
+            // The feature-minimal encoder needs only the DER certificate's
+            // issuer and serial fields; credential validation remains the
+            // external provider's responsibility.
+            vec![vec![
+                0x30, 0x0f, // Certificate
+                0x30, 0x0d, // TBSCertificate
+                0x02, 0x01, 0x01, // serial
+                0x30, 0x02, 0x06, 0x00, // signature algorithm
+                0x30, 0x04, 0x31, 0x02, 0x30, 0x00, // issuer
+            ]]
+        }
+
+        fn sign_digest(
+            &self,
+            _algorithm: &str,
+            digest: &[u8],
+        ) -> std::result::Result<Vec<u8>, SignatureProviderError> {
+            assert_eq!(digest.len(), 32);
+            Ok(vec![0x30, 0x00])
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "signing"))]
+    fn feature_minimal_external_signing_emits_verified_cms_without_private_key_loading() {
+        let provider = ExternalSignatureProvider::new(&MinimalExternalSigner);
+        let signed = provider
+            .sign(
+                &macho_test_support::signable_thin64_x86_64(2),
+                &SignatureRequest::default(),
+            )
+            .expect("minimal external signing succeeds");
+        verify_signed_binary(&signed, SignatureKind::Certificate)
+            .expect("minimal external signature verifies structurally");
     }
 
     #[test]
