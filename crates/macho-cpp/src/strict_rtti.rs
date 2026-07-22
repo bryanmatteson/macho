@@ -5,7 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::{Error, Result};
 
 #[path = "strict_rtti_decoder.rs"]
-mod decoder;
+pub(crate) mod decoder;
 pub use decoder::{decode_strict_rtti, decode_strict_rtti_from_source};
 
 const HARD_RECORDS: u64 = 4_000_000;
@@ -98,7 +98,7 @@ pub struct StrictRttiConservation {
 }
 
 impl StrictRttiConservation {
-    fn validate(self) -> Result<()> {
+    pub(crate) fn validate(self) -> Result<()> {
         let balanced = self
             .included
             .checked_add(self.unknown)

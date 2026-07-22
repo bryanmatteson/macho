@@ -20,6 +20,11 @@ let batch = macho_cpp::decode_strict_rtti_from_source(
     &bytes,
     macho_cpp::StrictRttiLimits::default(),
 )?;
+
+let tables = macho_cpp::decode_strict_vtables_from_source(
+    &bytes,
+    macho_cpp::StrictVtableLimits::default(),
+)?;
 ```
 
 The strict batch is fail-closed and conserves every defined or external `_ZTI`
@@ -30,6 +35,17 @@ malformed field or exceeded budget produces `rejected` with typed gaps; it does
 not become absence, an empty index, or a usable truncated result. Validating
 deserialization rejects forged conservation, pointer-observation links, and
 family-specific shapes.
+
+The companion vtable batch conserves complete (`_ZTV`) and construction
+(`_ZTC`) groups plus VTT (`_ZTT`) arrays. It records symbol/section extent
+authority, address points, offset-to-top and typeinfo headers, null RTTI,
+pre-address-point offset words, exact function targets, destructor variants,
+pure/deleted virtual entries, and parsed non-virtual, virtual, and covariant
+thunk adjustments. When a multiple-address-point region cannot be divided
+between prior slots and the following vcall/vbase prefix from leaf evidence
+alone, the words remain explicit `ambiguous_words`; the decoder does not guess
+or scan until an address merely looks executable. Relative-vtable layouts are
+outside this absolute-pointer profile and fail closed.
 
 The source is borrowed through `AsRef<[u8]>`, so `&[u8]`, `&Vec<u8>`, and a
 caller-retained read-only `memmap2::Mmap` are accepted without copying the input.

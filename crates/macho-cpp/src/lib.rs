@@ -19,6 +19,8 @@ pub mod abi;
 mod abi_types;
 #[cfg(feature = "itanium-rtti")]
 mod strict_rtti;
+#[cfg(feature = "itanium-rtti")]
+mod strict_vtable;
 /// The typeinfo module.
 pub mod typeinfo;
 /// The types module.
@@ -34,6 +36,15 @@ pub use strict_rtti::{
     StrictPointerTarget, StrictRttiBatch, StrictRttiConservation, StrictRttiGap, StrictRttiGapCode,
     StrictRttiLimits, StrictRttiObservation, StrictRttiObservationKind, StrictRttiOutcome,
     StrictRttiRecord, decode_strict_rtti, decode_strict_rtti_from_source,
+};
+#[cfg(feature = "itanium-rtti")]
+pub use strict_vtable::{
+    ItaniumThunkAdjustment, ItaniumVtableAddressPointRecord, ItaniumVtableAddressPointSource,
+    ItaniumVtableAmbiguousWordRecord, ItaniumVtableExtentSource, ItaniumVtableGroupRecord,
+    ItaniumVtableOffsetRecord, ItaniumVtableOffsetRole, ItaniumVtableSlotRecord,
+    ItaniumVtableSlotRole, ItaniumVtableSymbolKind, ItaniumVttEntryRecord, ItaniumVttRecord,
+    StrictVtableBatch, StrictVtableLimits, StrictVtableRecord, decode_strict_vtables,
+    decode_strict_vtables_from_source,
 };
 pub use typeinfo::{build_typeinfo_index, build_typeinfo_index_from_source};
 pub use types::{

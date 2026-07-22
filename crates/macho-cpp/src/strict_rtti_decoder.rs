@@ -18,19 +18,19 @@ struct PointerFixup {
     target: StrictPointerTarget,
 }
 
-struct StrictDecoder<'a, 'data> {
-    macho: &'a MachoFile<'data>,
+pub(crate) struct StrictDecoder<'a, 'data> {
+    pub(crate) macho: &'a MachoFile<'data>,
     limits: StrictRttiLimits,
-    pointer_size: u64,
+    pub(crate) pointer_size: u64,
     fixups: BTreeMap<u64, PointerFixup>,
-    symbols_by_va: BTreeMap<u64, String>,
-    observations: Vec<StrictRttiObservation>,
+    pub(crate) symbols_by_va: BTreeMap<u64, String>,
+    pub(crate) observations: Vec<StrictRttiObservation>,
     base_count: u64,
     evidence_bytes: u64,
 }
 
 impl<'a, 'data> StrictDecoder<'a, 'data> {
-    fn new(macho: &'a MachoFile<'data>, limits: StrictRttiLimits) -> Result<Self> {
+    pub(crate) fn new(macho: &'a MachoFile<'data>, limits: StrictRttiLimits) -> Result<Self> {
         Ok(Self {
             macho,
             limits,
@@ -43,7 +43,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
         })
     }
 
-    fn observe(
+    pub(crate) fn observe(
         &mut self,
         symbol: &str,
         field: impl Into<String>,
@@ -74,7 +74,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
         Ok(ordinal)
     }
 
-    fn pointer(
+    pub(crate) fn pointer(
         &mut self,
         symbol: &str,
         field: impl Into<String>,
@@ -82,19 +82,7 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
     ) -> Result<StrictPointerObservation> {
         let field = field.into();
         let file_offset = self.macho.address_map().va_to_thin_offset(Va(va))?.0;
-        let bytes = self
-            .macho
-            .read_bytes_at_va(Va(va), self.pointer_size as usize)?;
-        let raw_value =
-            if self.pointer_size == 8 {
-                self.macho.endian().read_u64(bytes.try_into().map_err(|_| {
-                    Error::format("strict RTTI pointer read returned the wrong width")
-                })?)
-            } else {
-                u64::from(self.macho.endian().read_u32(bytes.try_into().map_err(|_| {
-                    Error::format("strict RTTI pointer read returned the wrong width")
-                })?))
-            };
+        let raw_value = self.peek_word(va)?;
         let observation_ordinal = self.observe(
             symbol,
             field,
@@ -102,6 +90,52 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
             self.pointer_size,
             StrictRttiObservationKind::Pointer,
         )?;
+        let (encoding, authentication, target) = self.pointer_value(file_offset, raw_value)?;
+        Ok(StrictPointerObservation {
+            observation_ordinal,
+            raw_value,
+            width: self.pointer_size as u8,
+            encoding,
+            authentication,
+            target,
+        })
+    }
+
+    pub(crate) fn peek_word(&self, va: u64) -> Result<u64> {
+        let bytes = self
+            .macho
+            .read_bytes_at_va(Va(va), self.pointer_size as usize)?;
+        if self.pointer_size == 8 {
+            Ok(self.macho.endian().read_u64(
+                bytes.try_into().map_err(|_| {
+                    Error::format("strict RTTI pointer read returned the wrong width")
+                })?,
+            ))
+        } else {
+            Ok(u64::from(self.macho.endian().read_u32(
+                bytes.try_into().map_err(|_| {
+                    Error::format("strict RTTI pointer read returned the wrong width")
+                })?,
+            )))
+        }
+    }
+
+    pub(crate) fn peek_pointer_target(&self, va: u64) -> Result<StrictPointerTarget> {
+        let file_offset = self.macho.address_map().va_to_thin_offset(Va(va))?.0;
+        let raw_value = self.peek_word(va)?;
+        self.pointer_value(file_offset, raw_value)
+            .map(|(_, _, target)| target)
+    }
+
+    fn pointer_value(
+        &self,
+        file_offset: u64,
+        raw_value: u64,
+    ) -> Result<(
+        StrictPointerEncoding,
+        StrictPointerAuthentication,
+        StrictPointerTarget,
+    )> {
         let fixup = self.fixups.get(&file_offset).cloned();
         let (encoding, authentication, target) = fixup.map_or_else(
             || {
@@ -127,18 +161,11 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
                     .is_err()
             {
                 return Err(Error::address(format!(
-                    "strict RTTI pointer at {va:#x} targets unmapped VA {target:#x}"
+                    "strict RTTI pointer targets unmapped VA {target:#x}"
                 )));
             }
         }
-        Ok(StrictPointerObservation {
-            observation_ordinal,
-            raw_value,
-            width: self.pointer_size as u8,
-            encoding,
-            authentication,
-            target,
-        })
+        Ok((encoding, authentication, target))
     }
 
     fn integer_u32(&mut self, symbol: &str, field: impl Into<String>, va: u64) -> Result<u32> {
@@ -152,7 +179,12 @@ impl<'a, 'data> StrictDecoder<'a, 'data> {
         Ok(value)
     }
 
-    fn integer_word(&mut self, symbol: &str, field: impl Into<String>, va: u64) -> Result<u64> {
+    pub(crate) fn integer_word(
+        &mut self,
+        symbol: &str,
+        field: impl Into<String>,
+        va: u64,
+    ) -> Result<u64> {
         if self.pointer_size == 8 {
             let bytes = self.macho.read_bytes_at_va(Va(va), 8)?;
             let value =
@@ -777,7 +809,7 @@ fn classify_family(name: &str) -> Option<ItaniumTypeInfoFamily> {
     .find_map(|(needle, family)| name.contains(needle).then_some(family))
 }
 
-fn checked_add(left: u64, right: u64) -> Result<u64> {
+pub(crate) fn checked_add(left: u64, right: u64) -> Result<u64> {
     left.checked_add(right)
         .ok_or_else(|| Error::format("strict RTTI address arithmetic overflows"))
 }
