@@ -49,6 +49,7 @@ pub(crate) fn discover_parents(macho: &MachoFile<'_>, types: &[SwiftType]) -> Ve
             }
             Some(SwiftParentInfo {
                 descriptor_address: descriptor.0,
+                parent_descriptor_address: parent.0,
                 parent_name: context_path(macho, parent, 0)?.join("."),
             })
         })
@@ -126,6 +127,9 @@ pub(crate) fn discover_associated_types(
         if count > MAX_ASSOCIATED_TYPE_RECORDS || record_size < 8 {
             break;
         }
+        let Ok(record_size_u32) = u32::try_from(record_size) else {
+            break;
+        };
         let Some(records_bytes) = count.checked_mul(record_size) else {
             break;
         };
@@ -148,8 +152,8 @@ pub(crate) fn discover_associated_types(
             .and_then(|value| add_signed(cursor, value));
         let conforming_type_name =
             conforming_type_address.and_then(|address| read_mangled_bytes(macho, address));
-        let resolved_conforming_type_name = conforming_type_address
-            .and_then(|address| resolve_mangled_nominal(macho, address, demangler));
+        let resolved_conforming_type = conforming_type_address
+            .and_then(|address| resolve_mangled_nominal_identity(macho, address, demangler));
         let mut records = Vec::with_capacity(count);
         let Some(records_start) = add_unsigned(cursor, 16) else {
             break;
@@ -169,6 +173,8 @@ pub(crate) fn discover_associated_types(
                 .and_then(|(field, value)| add_signed(field, value))
                 .and_then(|address| read_mangled_bytes(macho, address));
             records.push(SwiftAssociatedTypeRecordInfo {
+                record_address: record.0,
+                record_size: record_size_u32,
                 name,
                 substituted_type_name,
             });
@@ -177,7 +183,11 @@ pub(crate) fn discover_associated_types(
             address: cursor.0,
             byte_len: descriptor_size as u32,
             conforming_type_name,
-            resolved_conforming_type_name,
+            resolved_conforming_type_name: resolved_conforming_type
+                .as_ref()
+                .map(|(name, _)| name.clone()),
+            resolved_conforming_type_descriptor_address: resolved_conforming_type
+                .and_then(|(_, descriptor)| descriptor),
             protocol_type_name,
             records,
         });
@@ -238,6 +248,7 @@ fn parse_type_descriptor(
         kind,
         mangled_name: None,
         address: Some(descriptor.0),
+        metadata_address: None,
         source: SwiftTypeSource::SwiftMetadata,
         confidence: SwiftTypeConfidence::High,
         fields: parse_fields(macho, descriptor, demangler),
@@ -281,6 +292,8 @@ fn parse_fields(
             .and_then(|relative| add_signed(name_field, relative))
             .and_then(|address| read_c_string(macho, address));
         fields.push(SwiftFieldInfo {
+            record_address: record.0,
+            record_size: u32::try_from(record_size).ok()?,
             name,
             mangled_type,
             type_name,
@@ -427,6 +440,14 @@ fn resolve_mangled_nominal(
     address: Va,
     demangler: &dyn SwiftDemangler,
 ) -> Option<String> {
+    resolve_mangled_nominal_identity(macho, address, demangler).map(|(name, _)| name)
+}
+
+fn resolve_mangled_nominal_identity(
+    macho: &MachoFile<'_>,
+    address: Va,
+    demangler: &dyn SwiftDemangler,
+) -> Option<(String, Option<u64>)> {
     let first = *macho.read_bytes_at_va(address, 1).ok()?.first()?;
     if matches!(first, 0x01 | 0x02) {
         let relative_field = add_unsigned(address, 1)?;
@@ -437,15 +458,16 @@ fn resolve_mangled_nominal(
         } else {
             read_pointer(macho, direct)?
         };
-        return context_path(macho, descriptor, 0).map(|path| path.join("."));
+        return context_path(macho, descriptor, 0).map(|path| (path.join("."), Some(descriptor.0)));
     }
     let bytes = read_mangled_bytes(macho, address)?;
     let raw = std::str::from_utf8(&bytes).ok()?;
-    demangler
+    let name = demangler
         .demangle(raw)
         .ok()
         .flatten()
-        .or_else(|| demangler.demangle(&format!("$s{raw}")).ok().flatten())
+        .or_else(|| demangler.demangle(&format!("$s{raw}")).ok().flatten())?;
+    Some((name, None))
 }
 
 fn read_i32(macho: &MachoFile<'_>, address: Va) -> Option<i32> {

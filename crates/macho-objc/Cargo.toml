@@ -12,6 +12,7 @@ readme = "README.md"
 [features]
 default = ["fixups"]
 fixups = ["dep:macho-dyld"]
+strict-rtti = []
 
 [dependencies]
 macho-core.workspace = true

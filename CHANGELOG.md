@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- Added opt-in strict RTTI leaves for Swift and Objective-C. Swift now retains
+  emitted static metadata objects separately from accessors and decodes local
+  value-witness layouts without target execution. Objective-C now provides an
+  all-or-error conserved scan over runtime lists and strict method records.
+- Kept the strict C++ Itanium RTTI, vtable, fixup, and ABI surfaces available
+  through their closed existing feature set for downstream deterministic
+  runtime-type graph construction.
+
 ## 0.3.0
 
 - Added a bounded format probe for callers that need to identify Mach-O input

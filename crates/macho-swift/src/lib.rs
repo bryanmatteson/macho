@@ -15,6 +15,8 @@ mod context_descriptors;
 pub mod types;
 
 pub use types::SwiftTypeIndex;
+#[cfg(feature = "strict-rtti")]
+pub mod strict;
 
 use crate::ext::MachoExt;
 use crate::model::macho_file::MachoFile;
@@ -194,6 +196,7 @@ fn swift_type_from_objc_runtime_name(
             .starts_with("_Tt")
             .then(|| runtime_name.to_owned()),
         address: None,
+        metadata_address: None,
         source: types::SwiftTypeSource::ObjCMetadata,
         confidence: types::SwiftTypeConfidence::High,
         fields: None,
@@ -233,6 +236,8 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
         || demangled.contains("nominal type descriptor")
     {
         types::SwiftTypeKind::Struct
+    } else if demangled.contains("type metadata for ") {
+        types::SwiftTypeKind::Unknown
     } else if demangled.contains("type metadata accessor") {
         // Metadata accessors exist for all types; we cannot determine the
         // concrete kind from this symbol alone. Mark as Unknown — if a
@@ -245,12 +250,16 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
     };
 
     let name = extract_type_name(demangled)?;
+    let metadata_address = demangled
+        .starts_with("type metadata for ")
+        .then_some(address);
 
     Some(types::SwiftType {
         name,
         kind,
         mangled_name: Some(mangled.to_string()),
-        address: Some(address),
+        address: metadata_address.is_none().then_some(address),
+        metadata_address,
         source: types::SwiftTypeSource::DemangledSymbol,
         confidence: if kind == types::SwiftTypeKind::Unknown {
             types::SwiftTypeConfidence::Partial
@@ -271,6 +280,7 @@ fn extract_type_name(demangled: &str) -> Option<String> {
         "class descriptor for ",
         "enum descriptor for ",
         "struct descriptor for ",
+        "type metadata for ",
         "type metadata accessor for ",
     ];
 
@@ -342,6 +352,11 @@ fn insert_swift_type(types: &mut Vec<types::SwiftType>, candidate: types::SwiftT
 }
 
 fn same_swift_identity(existing: &types::SwiftType, candidate: &types::SwiftType) -> bool {
+    if (existing.metadata_address.is_some() || candidate.metadata_address.is_some())
+        && existing.name == candidate.name
+    {
+        return true;
+    }
     if existing.address.is_some() && existing.address == candidate.address {
         return true;
     }
@@ -385,6 +400,7 @@ fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -
         .clone()
         .or_else(|| candidate.mangled_name.clone());
     let address = existing.address.or(candidate.address);
+    let metadata_address = existing.metadata_address.or(candidate.metadata_address);
     let fields = existing.fields.clone().or_else(|| candidate.fields.clone());
     let mut preferred = if candidate_rank > existing_rank
         || (candidate_rank == existing_rank
@@ -401,6 +417,7 @@ fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -
 
     preferred.mangled_name = mangled_name;
     preferred.address = address;
+    preferred.metadata_address = metadata_address;
     preferred.fields = fields;
     preferred
 }
@@ -454,6 +471,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Unknown,
                 mangled_name: Some("$s4Demo6WidgetC".into()),
                 address: Some(0x1000),
+                metadata_address: None,
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
                 fields: None,
@@ -466,6 +484,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
+                metadata_address: None,
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -493,6 +512,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Unknown,
                 mangled_name: Some("$s4Demo6WidgetC".into()),
                 address: Some(0x2000),
+                metadata_address: None,
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
                 fields: None,
@@ -505,6 +525,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
+                metadata_address: None,
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -532,6 +553,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: None,
+                metadata_address: None,
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -544,6 +566,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: Some("$s4Demo6WidgetC".into()),
                 address: Some(0x3000),
+                metadata_address: None,
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -569,6 +592,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: None,
                 address: Some(0x4000),
+                metadata_address: None,
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -581,6 +605,7 @@ mod tests {
                 kind: types::SwiftTypeKind::Class,
                 mangled_name: Some("_TtC4Demo6Widget".into()),
                 address: None,
+                metadata_address: None,
                 source: types::SwiftTypeSource::ObjCMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
@@ -609,6 +634,7 @@ mod tests {
                     kind: types::SwiftTypeKind::Struct,
                     mangled_name: None,
                     address: Some(address),
+                    metadata_address: None,
                     source: types::SwiftTypeSource::SwiftMetadata,
                     confidence: types::SwiftTypeConfidence::High,
                     fields: None,
@@ -616,5 +642,34 @@ mod tests {
             );
         }
         assert_eq!(types.len(), 2);
+    }
+
+    #[test]
+    fn emitted_metadata_is_retained_without_treating_an_accessor_as_an_instance() {
+        let descriptor = extract_swift_type(
+            "nominal type descriptor for Demo.Value",
+            "_$s4Demo5ValueVMn",
+            0x1000,
+        )
+        .expect("descriptor");
+        let metadata =
+            extract_swift_type("type metadata for Demo.Value", "_$s4Demo5ValueVN", 0x2000)
+                .expect("metadata");
+        let accessor = extract_swift_type(
+            "type metadata accessor for Demo.Value",
+            "_$s4Demo5ValueVMa",
+            0x3000,
+        )
+        .expect("accessor");
+
+        let mut types = Vec::new();
+        insert_swift_type(&mut types, descriptor);
+        insert_swift_type(&mut types, metadata);
+        insert_swift_type(&mut types, accessor);
+
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].address, Some(0x1000));
+        assert_eq!(types[0].metadata_address, Some(0x2000));
+        assert_ne!(types[0].metadata_address, Some(0x3000));
     }
 }

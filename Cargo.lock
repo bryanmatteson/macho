@@ -2082,7 +2082,7 @@ dependencies = [
 
 [[package]]
 name = "macho"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "macho-analysis",
@@ -2106,7 +2106,7 @@ dependencies = [
 
 [[package]]
 name = "macho-analysis"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "gimli",
  "macho-codesign",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "macho-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -2144,7 +2144,7 @@ dependencies = [
 
 [[package]]
 name = "macho-codesign"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-test-support",
@@ -2153,7 +2153,7 @@ dependencies = [
 
 [[package]]
 name = "macho-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.11.0",
  "macho-test-support",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "macho-cpp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-demangle",
@@ -2177,7 +2177,7 @@ dependencies = [
 
 [[package]]
 name = "macho-demangle"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cpp_demangle",
  "rustc-demangle",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "macho-dwarf"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "gimli",
  "macho-core",
@@ -2196,7 +2196,7 @@ dependencies = [
 
 [[package]]
 name = "macho-dyld"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "serde",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "macho-dyld-cache"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-dyld",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "macho-header-infer"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-analysis",
  "macho-header-syntax",
@@ -2227,7 +2227,7 @@ dependencies = [
 
 [[package]]
 name = "macho-header-syntax"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "thiserror 2.0.18",
  "tree-sitter",
@@ -2238,7 +2238,7 @@ dependencies = [
 
 [[package]]
 name = "macho-insn"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bad64",
  "iced-x86",
@@ -2246,7 +2246,7 @@ dependencies = [
 
 [[package]]
 name = "macho-mutate"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apple-codesign",
  "bytes",
@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "macho-objc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-dyld",
@@ -2274,7 +2274,7 @@ dependencies = [
 
 [[package]]
 name = "macho-patch"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-insn",
@@ -2283,7 +2283,7 @@ dependencies = [
 
 [[package]]
 name = "macho-swift"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-demangle",
@@ -2294,7 +2294,7 @@ dependencies = [
 
 [[package]]
 name = "macho-symbols"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-demangle",
@@ -2303,14 +2303,14 @@ dependencies = [
 
 [[package]]
 name = "macho-test-support"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64",
 ]
 
 [[package]]
 name = "macho-workflow"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "macho-analysis",
  "macho-core",
@@ -4811,7 +4811,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "cargo_metadata",

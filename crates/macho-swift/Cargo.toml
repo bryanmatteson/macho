@@ -9,6 +9,10 @@ repository.workspace = true
 description = "Swift metadata indexing for Mach-O images"
 readme = "README.md"
 
+[features]
+default = []
+strict-rtti = []
+
 [dependencies]
 macho-core.workspace = true
 macho-demangle.workspace = true

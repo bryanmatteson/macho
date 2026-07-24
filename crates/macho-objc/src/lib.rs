@@ -32,6 +32,8 @@ pub mod property;
 pub mod protocol;
 /// The resolve module.
 pub mod resolve;
+#[cfg(feature = "strict-rtti")]
+pub mod strict;
 /// The types module.
 pub mod types;
 

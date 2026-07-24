@@ -72,6 +72,13 @@ pub struct SwiftType {
     pub mangled_name: Option<String>,
     /// The address field.
     pub address: Option<u64>,
+    /// Address of an emitted, already-materialized metadata object when the
+    /// image exports a `type metadata for` symbol.
+    ///
+    /// This is deliberately distinct from [`Self::address`], which identifies
+    /// the descriptor or symbol occurrence that established the definition.
+    /// Metadata accessors never populate this field.
+    pub metadata_address: Option<u64>,
     /// The source field.
     pub source: SwiftTypeSource,
     /// The confidence field.
@@ -83,6 +90,10 @@ pub struct SwiftType {
 /// One record from a Swift nominal field descriptor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SwiftFieldInfo {
+    /// Virtual address of this exact ABI field record.
+    pub record_address: u64,
+    /// Declared byte width of the containing field-record format.
+    pub record_size: u32,
     /// Field/case name when the reflection string is available.
     pub name: Option<String>,
     /// Raw mangled type-reference bytes, excluding the terminating NUL.
@@ -98,6 +109,8 @@ pub struct SwiftFieldInfo {
 pub struct SwiftParentInfo {
     /// Nominal descriptor virtual address.
     pub descriptor_address: u64,
+    /// Enclosing nominal or protocol descriptor virtual address.
+    pub parent_descriptor_address: u64,
     /// Fully-qualified enclosing context name.
     pub parent_name: String,
 }
@@ -122,6 +135,10 @@ pub struct SwiftConformanceInfo {
 /// One record from an associated-type descriptor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SwiftAssociatedTypeRecordInfo {
+    /// Virtual address of this exact associated-type record.
+    pub record_address: u64,
+    /// Declared byte width of the containing record format.
+    pub record_size: u32,
     /// Associated-type requirement name.
     pub name: Option<String>,
     /// Raw substituted-type mangling bytes.
@@ -139,6 +156,9 @@ pub struct SwiftAssociatedTypeInfo {
     pub conforming_type_name: Option<Vec<u8>>,
     /// Resolved conforming nominal type name when available.
     pub resolved_conforming_type_name: Option<String>,
+    /// Resolved conforming nominal descriptor address when the mangling carries
+    /// an in-image symbolic reference.
+    pub resolved_conforming_type_descriptor_address: Option<u64>,
     /// Raw protocol-type mangling bytes.
     pub protocol_type_name: Option<Vec<u8>>,
     /// Associated-type records.
