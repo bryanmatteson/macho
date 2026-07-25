@@ -215,7 +215,7 @@ pub fn classify_swift_type_metadata_symbol(name: &str) -> SwiftTypeMetadataSymbo
     } else {
         full_name
     };
-    if name.is_empty() || name.chars().any(char::is_whitespace) {
+    if name.is_empty() {
         return SwiftTypeMetadataSymbolEvidence::Malformed {
             detail: "Swift emitted type metadata has an invalid qualified name".into(),
         };
@@ -842,6 +842,15 @@ mod tests {
         let extension = swift_type_metadata_identity("_$sSo8NSNumberC6plutilE15BetterSwiftTypeON")
             .expect("expected metadata nested in an extension");
         assert_eq!(extension.name, "__C.NSNumber.BetterSwiftType");
+        let private = swift_type_metadata_identity(
+            "_$s13SwiftPlan00040aB7Private33_C754C3B558BDB8C9E83DFE94C8941DB3LLVN",
+        )
+        .expect("expected private emitted structure metadata");
+        assert_eq!(
+            private.name,
+            "SwiftPlan0004.(SwiftPlan0004Private in _C754C3B558BDB8C9E83DFE94C8941DB3)"
+        );
+        assert_eq!(private.kind, SwiftNominalMetadataKind::Struct);
     }
 
     #[test]
