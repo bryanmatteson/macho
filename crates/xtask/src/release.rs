@@ -117,7 +117,7 @@ fn check_lockfile(root: &Path, version: &str) -> Result<()> {
             "macho-dyld-cache",
             "macho-header-infer",
             "macho-workflow",
-            "macho",
+            "macho-lib",
             "macho-cli",
             "macho-test-support",
             "xtask",

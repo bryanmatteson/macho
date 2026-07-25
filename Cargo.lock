@@ -2082,31 +2082,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macho"
-version = "0.4.0"
-dependencies = [
- "criterion",
- "macho-analysis",
- "macho-codesign",
- "macho-core",
- "macho-cpp",
- "macho-dwarf",
- "macho-dyld",
- "macho-dyld-cache",
- "macho-evidence",
- "macho-header-infer",
- "macho-header-syntax",
- "macho-insn",
- "macho-mutate",
- "macho-objc",
- "macho-patch",
- "macho-swift",
- "macho-symbols",
- "macho-test-support",
- "macho-workflow",
-]
-
-[[package]]
 name = "macho-analysis"
 version = "0.4.0"
 dependencies = [
@@ -2134,7 +2109,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
- "macho",
+ "macho-lib",
  "macho-test-support",
  "memmap2",
  "serde",
@@ -2256,6 +2231,31 @@ version = "0.4.0"
 dependencies = [
  "bad64",
  "iced-x86",
+]
+
+[[package]]
+name = "macho-lib"
+version = "0.4.0"
+dependencies = [
+ "criterion",
+ "macho-analysis",
+ "macho-codesign",
+ "macho-core",
+ "macho-cpp",
+ "macho-dwarf",
+ "macho-dyld",
+ "macho-dyld-cache",
+ "macho-evidence",
+ "macho-header-infer",
+ "macho-header-syntax",
+ "macho-insn",
+ "macho-mutate",
+ "macho-objc",
+ "macho-patch",
+ "macho-swift",
+ "macho-symbols",
+ "macho-test-support",
+ "macho-workflow",
 ]
 
 [[package]]

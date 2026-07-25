@@ -27,7 +27,7 @@ const PRODUCT_CRATES: &[&str] = &[
     "macho-header-infer",
     "macho-header-syntax",
     "macho-workflow",
-    "macho",
+    "macho-lib",
     "macho-cli",
 ];
 
@@ -57,8 +57,8 @@ pub fn check(root: &Path) -> Result<()> {
     let facade = metadata
         .packages
         .iter()
-        .find(|package| package.name.as_str() == "macho")
-        .context("workspace has no macho facade package")?;
+        .find(|package| package.name.as_str() == "macho-lib")
+        .context("workspace has no macho-lib facade package")?;
     check_feature_authority(&facade.features)?;
 
     let mut violations = Vec::new();
@@ -282,7 +282,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
             &["macho-core", "macho-analysis", "macho-mutate"],
         ),
         (
-            "macho",
+            "macho-lib",
             &[
                 "macho-core",
                 "macho-insn",
@@ -303,7 +303,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-header-syntax",
             ],
         ),
-        ("macho-cli", &["macho"]),
+        ("macho-cli", &["macho-lib"]),
         ("xtask", &["macho-cli"]),
         ("macho-test-support", &[]),
     ];
@@ -637,7 +637,8 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
             "mutation exposes a string-bucket result instead of MutationError: {path}"
         ));
     }
-    if crate_name == "macho" && (path.contains("/src/commands") || path.contains("/src/inputs")) {
+    if crate_name == "macho-lib" && (path.contains("/src/commands") || path.contains("/src/inputs"))
+    {
         violations.push(format!("façade owns delivery module: {path}"));
     }
     if facts.public_vec_reference {
@@ -680,7 +681,7 @@ mod tests {
             assert!(graph.contains_key(*name), "missing graph row for {name}");
         }
         assert!(graph["macho-core"].is_empty());
-        assert_eq!(graph["macho-cli"], BTreeSet::from(["macho"]));
+        assert_eq!(graph["macho-cli"], BTreeSet::from(["macho-lib"]));
 
         let workspace_names = graph.keys().copied().collect();
         for (package, allowed) in &graph {
@@ -795,7 +796,11 @@ mod tests {
                 "crates/macho-mutate/src/x.rs",
                 "pub fn patch() -> Result<Vec<u8>, String> { todo!() }",
             ),
-            ("macho", "crates/macho/src/commands.rs", "pub fn run() {}"),
+            (
+                "macho-lib",
+                "crates/macho/src/commands.rs",
+                "pub fn run() {}",
+            ),
             (
                 "macho-core",
                 "crates/macho-core/src/x.rs",

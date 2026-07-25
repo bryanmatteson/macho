@@ -1,14 +1,18 @@
 [package]
-name = "macho"
+name = "macho-lib"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
 description = "Feature-gated Mach-O library façade"
 keywords = ["macho", "binary", "dylib", "executable", "macos"]
 categories = ["development-tools::debugging", "development-tools::profiling"]
+
+[lib]
+name = "macho"
 
 [features]
 default = ["analysis"]

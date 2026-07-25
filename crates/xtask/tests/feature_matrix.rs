@@ -21,9 +21,13 @@ fn every_facade_feature_combination_compiles() {
     ];
     for (name, feature) in combinations {
         let mut command = Command::new(&cargo);
-        command
-            .current_dir(&root)
-            .args(["check", "-p", "macho", "--lib", "--no-default-features"]);
+        command.current_dir(&root).args([
+            "check",
+            "-p",
+            "macho-lib",
+            "--lib",
+            "--no-default-features",
+        ]);
         if let Some(feature) = feature {
             command.args(["--features", feature]);
         }
@@ -38,7 +42,7 @@ fn every_facade_feature_combination_compiles() {
     assert!(
         Command::new(cargo)
             .current_dir(root)
-            .args(["check", "-p", "macho", "--lib"])
+            .args(["check", "-p", "macho-lib", "--lib"])
             .status()
             .expect("run default feature compile check")
             .success(),
