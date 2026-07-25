@@ -1,3 +1,6 @@
+//! Dependency-graph corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::analysis::deps::compat::{CompatCategory, CompatReport, CompatSeverity};
 use macho::analysis::deps::graph::{DepGraph, ImportProvider, IssueSeverity};
 use macho::metadata::image::DylibLinkKind;

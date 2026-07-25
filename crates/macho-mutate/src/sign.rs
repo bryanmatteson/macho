@@ -79,8 +79,7 @@ pub enum SignatureKind {
     AdHoc,
     /// A certificate-backed signature containing CMS data.
     Certificate,
-    /// A signature whose mechanism is intentionally hidden by an external
-    /// provider.
+    /// A signature whose mechanism is hidden by an external provider.
     Opaque,
 }
 

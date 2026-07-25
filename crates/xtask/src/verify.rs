@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 pub fn run(root: &Path) -> Result<()> {
     super::architecture::check(root)?;
     super::docs::check(root)?;
-    super::release::check(root)?;
+    super::release::check(root, false)?;
     for command in [
         &["fmt", "--all", "--", "--check"][..],
         &["check", "--workspace", "--all-targets", "--all-features"][..],

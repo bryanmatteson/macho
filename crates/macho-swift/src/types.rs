@@ -75,9 +75,9 @@ pub struct SwiftType {
     /// Address of an emitted, already-materialized metadata object when the
     /// image exports a `type metadata for` symbol.
     ///
-    /// This is deliberately distinct from [`Self::address`], which identifies
-    /// the descriptor or symbol occurrence that established the definition.
-    /// Metadata accessors never populate this field.
+    /// Distinct from [`Self::address`], which identifies the descriptor or
+    /// symbol occurrence that established the definition. Metadata accessors
+    /// never populate this field.
     pub metadata_address: Option<u64>,
     /// The source field.
     pub source: SwiftTypeSource,

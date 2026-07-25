@@ -1,8 +1,12 @@
 mod support;
 
-use macho::metadata::swift::SwiftTypeIndex;
 use macho::model::container::MachoContainer;
-use support::{copy_macho_fixture, run_cli, temp_file_path};
+use support::{run_cli, temp_file_path, write_macho_fixture};
+
+#[cfg(target_os = "macos")]
+use macho::metadata::swift::SwiftTypeIndex;
+#[cfg(target_os = "macos")]
+use support::copy_macho_fixture;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -16,7 +20,11 @@ fn has_rpath(macho: &macho::model::macho_file::MachoFile<'_>, needle: &str) -> b
 
 #[test]
 fn snapshot_arch_filter_requires_match() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "snapshot-true");
+    let fixture = write_macho_fixture(
+        &macho_test_support::thin64_x86_64(2),
+        "snapshot-thin",
+        false,
+    );
     let output = run_cli([
         "snapshot",
         "--arch",
@@ -100,7 +108,11 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
 
 #[test]
 fn container_json_accepts_selected_parity_domains() {
-    let fixture = copy_macho_fixture("/usr/bin/plutil", "container-plutil");
+    let fixture = write_macho_fixture(
+        &macho_test_support::thin64_x86_64(2),
+        "container-thin",
+        false,
+    );
     let output = run_cli([
         "container",
         "--format",
@@ -155,7 +167,22 @@ fn fileset_inspect_reports_single_not_found_message() {
 
 #[test]
 fn fat_patch_bytes_requires_arch() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "fat-patch-bytes");
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_X86_64,
+                3,
+                macho_test_support::signable_thin64_x86_64(2),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::signable_thin64_arm64(2),
+            ),
+        ]),
+        "fat-patch-bytes",
+        false,
+    );
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
@@ -185,7 +212,22 @@ fn fat_patch_bytes_requires_arch() {
 
 #[test]
 fn fat_patch_add_rpath_selected_arch_only() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "fat-selected-true");
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_X86_64,
+                3,
+                macho_test_support::signable_thin64_x86_64(2),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::signable_thin64_arm64(2),
+            ),
+        ]),
+        "fat-selected",
+        false,
+    );
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
@@ -307,6 +349,7 @@ fn fat_patch_add_rpath_all_arches_by_default() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn swift_json_kind_filter_applies_to_output() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "swift-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -372,6 +415,7 @@ fn swift_json_kind_filter_applies_to_output() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn swift_name_state_and_repeatable_kind_filters_compose() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "swift-composed-filters");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -460,6 +504,7 @@ fn swift_name_state_and_repeatable_kind_filters_compose() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn objc_kind_presence_and_name_filters_compose() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-composed-filters");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -531,7 +576,11 @@ fn objc_kind_presence_and_name_filters_compose() {
 
 #[test]
 fn objc_graph_json_reports_explicit_zero_surface_without_metadata() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "objc-graph-true");
+    let fixture = write_macho_fixture(
+        &macho_test_support::thin64_x86_64(2),
+        "objc-graph-thin",
+        false,
+    );
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
@@ -576,6 +625,7 @@ fn objc_graph_json_reports_explicit_zero_surface_without_metadata() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn objc_selectors_json_reports_candidates() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-selectors-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -635,6 +685,7 @@ fn objc_selectors_json_reports_candidates() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn objc_xrefs_json_reports_exact_address_resolution_status() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-xrefs-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -687,6 +738,7 @@ fn objc_xrefs_json_reports_exact_address_resolution_status() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn objc_headers_render_class_dump_style_property_accessors() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-headers-plutil");
     let fixture_path = fixture.path().to_str().expect("utf8 path");
@@ -729,7 +781,22 @@ fn objc_headers_render_class_dump_style_property_accessors() {
 #[test]
 #[cfg(unix)]
 fn patch_preserves_execute_bit() {
-    let fixture = copy_macho_fixture("/usr/bin/true", "preserve-mode-true");
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_X86_64,
+                3,
+                macho_test_support::signable_thin64_x86_64(2),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::signable_thin64_arm64(2),
+            ),
+        ]),
+        "preserve-mode-fat",
+        true,
+    );
     let fixture_path = fixture.path().to_str().expect("utf8 path");
     let data = std::fs::read(fixture.path()).expect("read fixture");
     let container = macho::parse(&data).expect("parse fixture");
@@ -972,6 +1039,7 @@ fn ranges_name_and_source_filters_restrict_entries() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn xrefs_kind_and_import_filters_restrict_entries() {
     let source = "/usr/bin/tar";
     if !std::path::Path::new(source).exists() {
@@ -1015,6 +1083,7 @@ fn xrefs_kind_and_import_filters_restrict_entries() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn strings_min_length_exact_and_offsets_shape_output() {
     let source = "/usr/bin/tar";
     if !std::path::Path::new(source).exists() {

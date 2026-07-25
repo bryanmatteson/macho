@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use cargo_metadata::MetadataCommand;
 
-pub fn check(root: &Path) -> Result<()> {
+pub fn check(root: &Path, require_tag: bool) -> Result<()> {
     let metadata = MetadataCommand::new()
         .manifest_path(root.join("Cargo.toml"))
         .no_deps()
@@ -40,9 +40,29 @@ pub fn check(root: &Path) -> Result<()> {
         bail!("CHANGELOG.md has no `## {version}` heading");
     }
     check_lockfile(root, version)?;
-    check_clean_exact_tag(root, version)?;
+    check_package_preparation(root)?;
+    check_clean_exact_tag(root, version, require_tag)?;
     println!("release: ok ({version})");
     Ok(())
+}
+
+fn check_package_preparation(root: &Path) -> Result<()> {
+    let status = Command::new("cargo")
+        .args([
+            "package",
+            "--workspace",
+            "--locked",
+            "--no-verify",
+            "--allow-dirty",
+        ])
+        .current_dir(root)
+        .status()
+        .context("run cargo package for workspace")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("workspace package preparation failed")
+    }
 }
 
 fn check_license_contract(root: &Path, metadata: &cargo_metadata::Metadata) -> Result<()> {
@@ -66,8 +86,8 @@ fn validate_license_declaration(
     license: Option<&str>,
     has_license_file: bool,
 ) -> Result<()> {
-    if license != Some("Apache-2.0") {
-        bail!("workspace package {package} license is not Apache-2.0");
+    if license != Some("MIT") {
+        bail!("workspace package {package} license is not MIT");
     }
     if has_license_file {
         bail!("workspace package {package} declares redundant license-file");
@@ -131,7 +151,7 @@ fn check_lockfile_packages(path: &Path, version: &str, names: &[&str]) -> Result
     Ok(())
 }
 
-fn check_clean_exact_tag(root: &Path, version: &str) -> Result<()> {
+fn check_clean_exact_tag(root: &Path, version: &str, require_tag: bool) -> Result<()> {
     let paths = ["Cargo.toml", "Cargo.lock", "CHANGELOG.md", "crates"];
     let status = Command::new("git")
         .arg("diff")
@@ -143,6 +163,9 @@ fn check_clean_exact_tag(root: &Path, version: &str) -> Result<()> {
         .status()
         .context("run git diff for version-bearing files")?;
     if !status.success() {
+        if require_tag {
+            bail!("tagged release requires clean version-bearing paths");
+        }
         return Ok(());
     }
     let output = Command::new("git")
@@ -150,19 +173,21 @@ fn check_clean_exact_tag(root: &Path, version: &str) -> Result<()> {
         .current_dir(root)
         .output()
         .context("query exact tag")?;
-    if output.status.success() {
-        let tag = String::from_utf8(output.stdout)?.trim().to_string();
-        validate_tag(&tag, version)?;
-    }
-    Ok(())
+    let tag = output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout))
+        .transpose()?;
+    validate_tag(tag.as_deref().map(str::trim), version, require_tag)
 }
 
-fn validate_tag(tag: &str, version: &str) -> Result<()> {
+fn validate_tag(tag: Option<&str>, version: &str, require_tag: bool) -> Result<()> {
     let expected = format!("v{version}");
-    if tag == expected {
-        Ok(())
-    } else {
-        bail!("exact tag {tag} differs from workspace version {expected}")
+    match tag {
+        Some(tag) if tag == expected => Ok(()),
+        Some(tag) => bail!("exact tag {tag} differs from workspace version {expected}"),
+        None if require_tag => bail!("HEAD has no exact release tag {expected}"),
+        None => Ok(()),
     }
 }
 
@@ -172,22 +197,32 @@ mod tests {
 
     #[test]
     fn matching_tag_is_accepted() {
-        validate_tag("v0.2.0", "0.2.0").unwrap();
+        validate_tag(Some("v0.2.0"), "0.2.0", true).unwrap();
     }
 
     #[test]
     fn mismatched_tag_is_rejected() {
-        assert!(validate_tag("v0.1.3", "0.2.0").is_err());
+        assert!(validate_tag(Some("v0.1.3"), "0.2.0", true).is_err());
     }
 
     #[test]
-    fn non_apache_license_is_rejected() {
-        assert!(validate_license_declaration("fixture", Some("MIT"), true).is_err());
+    fn missing_required_tag_is_rejected() {
+        assert!(validate_tag(None, "0.2.0", true).is_err());
+    }
+
+    #[test]
+    fn missing_preflight_tag_is_accepted() {
+        validate_tag(None, "0.2.0", false).unwrap();
+    }
+
+    #[test]
+    fn non_mit_license_is_rejected() {
+        assert!(validate_license_declaration("fixture", Some("Apache-2.0"), true).is_err());
     }
 
     #[test]
     fn redundant_license_file_is_rejected() {
-        assert!(validate_license_declaration("fixture", Some("Apache-2.0"), true).is_err());
+        assert!(validate_license_declaration("fixture", Some("MIT"), true).is_err());
     }
 
     #[test]

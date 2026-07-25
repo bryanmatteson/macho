@@ -1,8 +1,8 @@
 #![deny(missing_docs)]
 //! Process-free parsing, validation, and rendering for recovered headers.
 //!
-//! The crate deliberately owns only the non-serialized syntax model. Stable
-//! report identifiers and JSON projections belong to `macho-analysis`.
+//! The crate owns only the non-serialized syntax model. Stable report
+//! identifiers and JSON projections belong to `macho-analysis`.
 
 mod ast;
 mod parse;

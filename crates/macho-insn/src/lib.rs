@@ -123,8 +123,8 @@ impl Arch {
 /// The `writes_op0_reg` and `writes_implicit_gpr0` fields together form the
 /// minimum write-set surface that ABI inference needs to decide whether a
 /// register was clobbered mid-function. Consumers that need a full
-/// read/write register set should inspect the underlying decoder (bad64 on
-/// ARM64, iced on x86_64) directly; this struct intentionally stays small.
+/// read/write register set inspect the underlying decoder (bad64 on
+/// ARM64, iced on x86_64) directly; this struct stays small.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Insn {
     /// Byte offset into the input buffer where this instruction starts.

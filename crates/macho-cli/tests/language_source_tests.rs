@@ -1,4 +1,5 @@
 //! Borrowed byte-source contracts through the public façade.
+#![cfg(target_os = "macos")]
 
 use std::ops::Range;
 

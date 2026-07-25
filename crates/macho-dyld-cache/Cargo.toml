@@ -14,5 +14,5 @@ macho-dyld.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-macho-test-support.workspace = true
+macho-test-support = { path = "../macho-test-support" }
 thiserror.workspace = true

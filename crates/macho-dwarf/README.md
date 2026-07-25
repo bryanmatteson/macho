@@ -2,8 +2,7 @@
 
 DWARF section loading and typed function/type indexes for Mach-O images.
 
-Depend on this crate directly when you only need DWARF indexes. It does not
-require the `macho` façade.
+Depend on this crate for DWARF indexes without the `macho` façade.
 
 ```rust
 let bytes = std::fs::read("binary.dSYM/Contents/Resources/DWARF/binary")?;

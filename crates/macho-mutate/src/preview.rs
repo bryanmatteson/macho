@@ -42,8 +42,8 @@ pub enum SignatureOutcome {
     SignedAdHoc,
     /// The candidate carries a verified certificate-backed signature.
     SignedCertificate,
-    /// The candidate was signed by a provider that intentionally hides its
-    /// signing mechanism.
+    /// The candidate was signed by a provider that hides its signing
+    /// mechanism.
     SignedOpaque,
 }
 

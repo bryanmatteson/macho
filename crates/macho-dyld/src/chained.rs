@@ -210,8 +210,8 @@ fn walk_all_chains(
                 continue;
             }
             if page_start & DYLD_CHAINED_PTR_START_MULTI != 0 {
-                // Multi-start pages have an overflow table. Skip for now —
-                // these are rare and only occur on pages with many chains.
+                // Multi-start pages use an overflow table; those pages are
+                // not decoded.
                 continue;
             }
 

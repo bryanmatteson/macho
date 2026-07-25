@@ -1,3 +1,6 @@
+//! Symbol-table corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::format::relocations::relocations_for_section;
 use macho::model::symbol::{SymbolTable, SymbolType};
 

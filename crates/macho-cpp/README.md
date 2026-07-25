@@ -3,8 +3,7 @@
 C++ RTTI, vtable indexing, and architecture-aware ABI inference for Mach-O
 images.
 
-Depend on this crate directly when you only need C++ structure recovery. It does
-not require the `macho` façade.
+Depend on this crate for C++ structure recovery without the `macho` façade.
 
 ```rust
 let bytes = std::fs::read("libFoo.dylib")?;

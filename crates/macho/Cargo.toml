@@ -48,7 +48,7 @@ macho-header-syntax = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion.workspace = true
-macho-test-support.workspace = true
+macho-test-support = { path = "../macho-test-support" }
 
 [[bench]]
 name = "architecture"

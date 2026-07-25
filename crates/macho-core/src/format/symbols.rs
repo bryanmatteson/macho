@@ -241,7 +241,7 @@ mod tests {
         bytes.extend_from_slice(&string_offset.to_le_bytes());
         bytes.extend_from_slice(&(string_table.len() as u32).to_le_bytes());
 
-        // File order intentionally differs from lexical name order.
+        // File order differs from lexical name order.
         push_nlist64(&mut bytes, 8, 0x2000);
         push_nlist64(&mut bytes, second_name_offset, 0x1000);
         bytes.extend_from_slice(string_table);

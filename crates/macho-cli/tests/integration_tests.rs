@@ -1,3 +1,6 @@
+//! Integration checks against the host's Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::model::container::MachoContainer;
 use macho::model::header::{Bitness, FileType};
 use macho::model::load_command::LoadCommand;

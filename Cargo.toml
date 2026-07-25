@@ -5,7 +5,7 @@
 [workspace.package]
     edition      = "2024"
     homepage     = "https://github.com/bryanmatteson/macho"
-    license      = "Apache-2.0"
+    license      = "MIT"
     repository   = "https://github.com/bryanmatteson/macho.git"
     rust-version = "1.85"
     version      = "0.4.0"
@@ -31,7 +31,6 @@
     macho-patch        = { path = "crates/macho-patch", version = "0.4.0" }
     macho-swift        = { path = "crates/macho-swift", version = "0.4.0" }
     macho-symbols      = { path = "crates/macho-symbols", version = "0.4.0" }
-    macho-test-support = { path = "crates/macho-test-support", version = "0.4.0" }
     macho-workflow     = { path = "crates/macho-workflow", version = "0.4.0" }
 
     anyhow         = "1"
@@ -55,7 +54,7 @@ swift-demangler = "0.1.1"
     signature      = "2"
     syn            = { version = "2", features = ["full", "visit"] }
     tempfile       = "3"
-    termosaic      = { version = "0.2.0", git = "https://github.com/bryanmatteson/termosaic.git", rev = "9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314", default-features = false }
+    termosaic      = { version = "=0.2.0", default-features = false }
     thiserror      = "2"
     tree-sitter    = "0.26.11"
     tree-sitter-c  = "0.24.2"

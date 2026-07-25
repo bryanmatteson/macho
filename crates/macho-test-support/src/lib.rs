@@ -755,7 +755,7 @@ pub struct FuzzCorpusCase {
     pub bytes: Vec<u8>,
 }
 
-/// Return the complete valid/invalid seed corpus for every Plan 15 fuzz target.
+/// Return the complete valid/invalid seed corpus for every fuzz target.
 pub fn fuzz_corpus_cases() -> Vec<FuzzCorpusCase> {
     let thin = thin64_arm64(2);
     let fat = fat32(&[(CPU_TYPE_ARM64, 0, thin.clone())]);

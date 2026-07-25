@@ -232,8 +232,8 @@ impl<'macho> Metadata<'macho> {
     /// Retained labels whose VA is exactly `va`, in retained (sorted) order.
     ///
     /// Used by the streaming path to emit label lines inline before the record
-    /// at that VA. This is a point lookup and deliberately does not touch the
-    /// `label_range_queries` accounting, which counts per-region range scans.
+    /// at that VA. Point lookup only; does not touch `label_range_queries`
+    /// accounting, which counts per-region range scans.
     pub(crate) fn labels_at(&self, va: u64) -> Vec<DisassemblyLabel> {
         let first = self.retained.partition_point(|item| item.va < va);
         self.retained[first..]

@@ -23,13 +23,16 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Check workspace, CLI, changelog, lockfile, and exact-tag versions.
+    /// Check workspace, package, CLI, changelog, lockfile, and tag authorities.
     Release {
         /// Check release authorities without modifying them.
         #[arg(long)]
         check: bool,
+        /// Require clean version-bearing inputs and an exact matching release tag.
+        #[arg(long, requires = "check")]
+        require_tag: bool,
     },
-    /// Run the stable Plan 15 verification gate in contract order.
+    /// Run the stable verification gate in contract order.
     Verify,
     /// Build every fuzz target with a nightly Rust toolchain.
     VerifyFuzz,
@@ -40,15 +43,12 @@ fn main() -> Result<()> {
     match Args::parse().command {
         Command::Architecture => architecture::check(&root),
         Command::Docs { check } => {
-            anyhow::ensure!(
-                check,
-                "docs requires --check; generation is intentionally explicit"
-            );
+            anyhow::ensure!(check, "docs requires --check; generation is explicit");
             docs::check(&root)
         }
-        Command::Release { check } => {
+        Command::Release { check, require_tag } => {
             anyhow::ensure!(check, "release requires --check");
-            release::check(&root)
+            release::check(&root, require_tag)
         }
         Command::Verify => verify::run(&root),
         Command::VerifyFuzz => verify::run_fuzz(&root),

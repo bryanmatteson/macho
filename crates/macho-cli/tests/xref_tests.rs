@@ -1,3 +1,6 @@
+//! Cross-reference corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::analysis::xref::ranges::{CodeEntity, RangeSource, SymbolRangeIndex};
 use macho::analysis::xref::refs::{XrefIndex, XrefKind, XrefTarget};
 use macho::model::addr::types::Va;

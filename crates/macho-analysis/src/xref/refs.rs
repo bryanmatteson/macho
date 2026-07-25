@@ -141,9 +141,7 @@ impl XrefIndex {
 
     /// Find all xrefs whose target is the given internal VA.
     ///
-    /// NOTE: This performs an O(n) linear scan because refs are sorted by
-    /// source address, not target. For performance-sensitive callers that
-    /// need reverse lookups, consider building a secondary index externally.
+    /// Scans linearly: refs are sorted by source address, not target.
     pub fn refs_to(&self, target: Va) -> impl Iterator<Item = &Xref> {
         self.refs.iter().filter(move |r| match &r.target {
             XrefTarget::Internal { va } => *va == target,
@@ -473,9 +471,8 @@ fn collect_relocation_refs(
                     }
                 }
                 Relocation::Scattered(_) => {
-                    // Scattered relocations are 32-bit only and carry an
-                    // internal value field. Skip for now as they are rare
-                    // in modern binaries.
+                    // Scattered relocations are 32-bit-only and are not
+                    // converted into xrefs.
                 }
             }
         }

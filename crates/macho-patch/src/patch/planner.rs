@@ -244,9 +244,8 @@ impl MachoPatcher {
     /// a trampoline at `trampoline_va` containing the stolen bytes and a jump
     /// back to the original function body.
     ///
-    /// This is intended for local integration in `apply.rs`: the returned plan
-    /// is pure data, so callers can decide whether and where to materialize the
-    /// trampoline bytes.
+    /// Returns pure plan data. Callers materialize trampoline bytes where they
+    /// choose.
     pub fn plan_function_entry_hook(
         &self,
         arch: PatchArch,

@@ -1,3 +1,6 @@
+//! Swift metadata corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::metadata::swift::SwiftTypeIndex;
 use macho::metadata::swift::types::{
     SwiftType, SwiftTypeConfidence, SwiftTypeKind, SwiftTypeSource,

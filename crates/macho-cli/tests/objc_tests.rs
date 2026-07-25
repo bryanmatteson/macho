@@ -1,11 +1,16 @@
-use macho::metadata::objc::{ObjCMetadata, parse_objc_metadata};
+use macho::metadata::objc::parse_objc_metadata;
 
+#[cfg(target_os = "macos")]
+use macho::metadata::objc::ObjCMetadata;
+
+#[cfg(target_os = "macos")]
 fn load_plutil() -> memmap2::Mmap {
     let file = std::fs::File::open("/usr/bin/plutil").expect("failed to open /usr/bin/plutil");
     unsafe { memmap2::Mmap::map(&file).expect("failed to mmap") }
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn parse_objc_classes() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");
@@ -33,6 +38,7 @@ fn parse_objc_classes() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn class_has_superclass() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");
@@ -54,6 +60,7 @@ fn class_has_superclass() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn class_has_ivars() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");
@@ -74,6 +81,7 @@ fn class_has_ivars() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn class_has_properties() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");
@@ -94,6 +102,7 @@ fn class_has_properties() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn header_rendering() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");
@@ -160,6 +169,7 @@ fn no_objc_in_minimal_binary() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
 fn objc_metadata_via_ext_trait() {
     let mmap = load_plutil();
     let container = macho::parse(&mmap).expect("failed to parse");

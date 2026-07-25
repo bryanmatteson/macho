@@ -576,9 +576,9 @@ fn finalize_class_node(node: &mut ClassNode) {
 fn build_effective_methods(entries: &[MethodEntry]) -> Vec<MethodEntry> {
     let mut map = BTreeMap::new();
     for entry in entries {
-        // Static category folding is intentionally deterministic: class methods
-        // are inserted first, then category methods are appended in metadata
-        // traversal order, and the last definition for a selector wins.
+        // Static category folding is deterministic: class methods are inserted
+        // first, then category methods are appended in metadata traversal
+        // order, and the last definition for a selector wins.
         map.insert(entry.selector.clone(), entry.clone());
     }
     map.into_values().collect()

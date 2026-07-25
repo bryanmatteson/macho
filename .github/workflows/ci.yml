@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_BUILD_JOBS: 2
+
 jobs:
   verify:
     strategy:
@@ -18,9 +21,14 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify
-      - name: Real macOS adapter smoke
+      - name: Verify exact release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: cargo xtask release --check --require-tag
+      - name: Real macOS signing oracle
         if: runner.os == 'macOS'
-        run: cargo test -p macho-cli --test adapter_tests -- --ignored
+        run: >-
+          cargo test -p macho-cli --test patch_signing_tests
+          macos_codesign_oracle -- --ignored --exact --nocapture
       - name: Retain benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4

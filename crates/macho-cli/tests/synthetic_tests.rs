@@ -447,16 +447,27 @@ fn huge_sizeofcmds_overflow() {
 fn fat_arch_thin_offset_translation() {
     use macho::model::addr::{FatFileOffset, ThinFileOffset};
 
-    let mmap = load_true();
-    let container = macho::parse(&mmap).expect("failed to parse");
+    let bytes = macho_test_support::fat32(&[
+        (
+            macho_test_support::CPU_TYPE_X86_64,
+            3,
+            macho_test_support::thin64_x86_64(2),
+        ),
+        (
+            macho_test_support::CPU_TYPE_ARM64,
+            0,
+            macho_test_support::thin64_arm64(2),
+        ),
+    ]);
+    let container = macho::parse(&bytes).expect("failed to parse");
 
     if let MachoContainer::Fat(ref fat) = container {
         let arch = &fat.arches()[0];
-        let thin = ThinFileOffset(0x100);
+        let thin = ThinFileOffset(0x10);
         let fat_off = arch
             .thin_to_fat_offset(thin)
             .expect("thin offset should translate into the fat container");
-        assert_eq!(fat_off.0, arch.fat_offset().0 + 0x100);
+        assert_eq!(fat_off.0, arch.fat_offset().0 + 0x10);
 
         let back = arch.fat_to_thin_offset(fat_off).expect("round-trip failed");
         assert_eq!(back, thin);
@@ -465,9 +476,4 @@ fn fat_arch_thin_offset_translation() {
         let bad = FatFileOffset(0);
         assert!(arch.fat_to_thin_offset(bad).is_err());
     }
-}
-
-fn load_true() -> memmap2::Mmap {
-    let file = std::fs::File::open("/usr/bin/true").expect("failed to open /usr/bin/true");
-    unsafe { memmap2::Mmap::map(&file).expect("failed to mmap") }
 }

@@ -1,3 +1,6 @@
+//! Language-data corpus checks against Apple system binaries and toolchains.
+#![cfg(target_os = "macos")]
+
 use macho::analysis::strings::{StringRegionKind, StringRegions};
 use macho::analysis::vtables::VtableIndex;
 use macho::model::container::MachoContainer;

@@ -2,9 +2,8 @@
 
 Objective-C runtime metadata parsing for Mach-O images.
 
-Depend on this crate directly when you only need ObjC classes, categories,
-protocols, encodings, and method-implementation folding. It does not require the
-`macho` façade.
+Depend on this crate for ObjC classes, categories, protocols, encodings, and
+method-implementation folding without the `macho` façade.
 
 ```rust
 let bytes = std::fs::read("libFoo.dylib")?;

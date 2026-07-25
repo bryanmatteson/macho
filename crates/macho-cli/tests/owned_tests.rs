@@ -1,3 +1,6 @@
+//! Mutation checks against the host's Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::model::addr::ThinFileOffset;
 use macho::model::container::MachoContainer;
 use macho::mutate::AddSection;

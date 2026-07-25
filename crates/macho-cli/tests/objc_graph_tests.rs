@@ -1,3 +1,6 @@
+//! Objective-C corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use std::collections::BTreeMap;
 
 use macho::analysis::reconstruct::objc::graph::{

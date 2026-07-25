@@ -94,8 +94,8 @@ fn visit_export_trie(data: &[u8], visitor: &mut impl FnMut(Export) -> Result<()>
         return Ok(());
     }
 
-    // Validation is deliberately a separate pass. A single streaming pass
-    // cannot retract callback side effects if a later node is malformed.
+    // Validation is a separate pass. A single streaming pass cannot retract
+    // callback side effects if a later node is malformed.
     validate_export_trie(data)?;
 
     fold_export_trie(data, (), |_state, export| visitor(export)).map(drop)

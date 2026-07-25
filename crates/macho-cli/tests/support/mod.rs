@@ -68,6 +68,30 @@ pub fn copy_macho_fixture(source: &str, name: &str) -> TempBinaryFixture {
     TempBinaryFixture { path }
 }
 
+pub fn write_macho_fixture(bytes: &[u8], name: &str, executable: bool) -> TempBinaryFixture {
+    let path = temp_file_path(name);
+    std::fs::write(&path, bytes)
+        .unwrap_or_else(|err| panic!("failed to write fixture {}: {err}", path.display()));
+    #[cfg(unix)]
+    if executable {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut permissions = std::fs::metadata(&path)
+            .unwrap_or_else(|err| {
+                panic!("failed to read fixture metadata {}: {err}", path.display())
+            })
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap_or_else(|err| {
+            panic!(
+                "failed to set executable fixture permissions {}: {err}",
+                path.display()
+            )
+        });
+    }
+    TempBinaryFixture { path }
+}
+
 pub fn run_cli<I, S>(args: I) -> CliOutput
 where
     I: IntoIterator<Item = S>,

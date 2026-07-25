@@ -1,3 +1,7 @@
+//! Apple system-binary corpus checks. Portable signing fixtures are covered by
+//! the code-signing and patch-signing suites.
+#![cfg(target_os = "macos")]
+
 use macho::metadata::codesign::{HashType, parse_code_signature};
 
 fn load_true() -> memmap2::Mmap {

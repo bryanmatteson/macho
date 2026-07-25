@@ -1,9 +1,9 @@
 # macho
 
-`macho` is a Rust workspace for safe Mach-O parsing, selective analysis,
-structural mutation, and command-line inspection. Version 0.2 separates the
-byte-safe core, metadata leaves, analysis, mutation, semantic workflow, façade,
-and CLI so library users pay only for the capabilities they select.
+`macho` is a Rust workspace for Mach-O parsing, selective analysis, structural
+mutation, and command-line inspection. The workspace separates a byte-safe
+core, metadata leaves, analysis, mutation, semantic workflow, façade, and CLI.
+Library users depend only on the capabilities they select.
 
 ## Install and develop
 
@@ -13,12 +13,12 @@ mise run verify
 ```
 
 The CLI uses one flat command grammar. Every command accepts `--format text` or
-`--format json` and `--color auto|always|never`; `audit` additionally accepts
-`--format sarif`. JSON results use a versioned envelope, machine formats never
-contain ANSI escapes, and errors are written only to stderr. Human output uses
-color by default on interactive terminals and stays plain when redirected.
-Semantic roles and the compatibility color theme are resolved by the pinned
-Termosaic presentation library; reusable Mach-O crates remain output-neutral.
+`--format json` and `--color auto|always|never`; `audit` also accepts
+`--format sarif`. JSON results use a versioned envelope. Machine formats never
+contain ANSI escapes. Errors go only to stderr. Human output is colored on
+interactive terminals and plain when redirected. Semantic roles and the
+compatibility color theme come from the pinned Termosaic presentation library;
+reusable Mach-O crates stay output-neutral.
 
 ## Examples
 
@@ -49,9 +49,9 @@ macho cache <dyld-cache> --info
 ```
 
 Mach-O signing is performed and verified in process. It does not require Xcode,
-`xcrun`, or the macOS Keychain, and the same ad-hoc and PKCS#12 inputs work on
+`xcrun`, or the macOS Keychain. The same ad-hoc and PKCS#12 inputs work on
 macOS, Linux, and Windows. Passwords are accepted only through a file path so
-they do not appear in the command line.
+they do not appear on the command line.
 
 ## Command reference
 
@@ -95,12 +95,12 @@ Core parsing is always available. Feature-selected metadata, analysis,
 mutation, workflow, dyld-cache, and header-inference APIs are reexported by the
 `macho` façade; narrow consumers can depend on leaf crates directly.
 
-External transformation engines can admit one immutable selected image through
+External transformation engines admit one immutable selected image through
 `macho::evidence::SelectedImageEvidence` and consume strict language evidence
-without taking on Macho's report, workflow, mutation, or CLI policy. Swift ABI
-parsers and their syntax trees remain private to Macho leaves; external engines
-receive bounded, conserved Macho-owned evidence and own only their downstream
-semantic projection.
+without Macho's report, workflow, mutation, or CLI policy. Swift ABI parsers
+and their syntax trees stay private to Macho leaves. External engines receive
+bounded, conserved Macho-owned evidence and own only their downstream semantic
+projection.
 
 ```rust
 let bytes = std::fs::read("/usr/bin/true")?;
@@ -128,21 +128,21 @@ std::fs::write("MyApp.patched", rebuilt)?;
 
 File-backed additions extend only the final file-backed segment when its
 declared range ends exactly at the slice boundary. Load commands may grow only
-through existing zero-filled header slack; mutation never relocates existing
+through existing zero-filled header slack. Mutation never relocates existing
 payload, symbols, or fixups. Zero-fill additions extend virtual storage only.
 `AddSection::new` accepts any borrowed `AsRef<[u8]>`, including a raw byte slice,
 `Vec<u8>`, or caller-owned read-only `memmap2::Mmap`. It stores the payload as a
 slice, copies only the two fixed-width Mach-O names into inline storage, and
-performs no internal heap allocation. For a file, retain the mapping until the
+allocates no heap of its own. For a file, retain the mapping until the
 transaction has committed; a bare `File` cannot expose borrowed bytes.
 
 Injected `SignatureProvider` implementations may return a known ad-hoc or
-certificate kind. External providers can omit `kind()` and are represented as
-opaque without exposing credentials or provider-specific signing mechanics.
-Opaque providers own signature verification; the generic verifier intentionally
-accepts only the ad-hoc and certificate mechanisms it understands.
+certificate kind. External providers that omit `kind()` are opaque and do not
+expose credentials or provider-specific signing mechanics. Opaque providers own
+signature verification. The generic verifier accepts only the ad-hoc and
+certificate mechanisms it understands.
 
-For selective analysis, build an `AnalysisPlan` before execution. Snapshot
+Selective analysis builds an `AnalysisPlan` before execution. Snapshot
 documents use schema version 3 and preserve `not_requested`, `complete`,
 `unsupported`, and `failed` as distinct states.
 
@@ -150,7 +150,9 @@ documents use schema version 3 and preserve `not_requested`, `complete`,
 
 - `cargo xtask architecture` enforces dependency direction and source ownership.
 - `cargo xtask docs --check` binds this reference and diagnostic registry to code.
-- `cargo xtask release --check` binds workspace, CLI, changelog, lockfile, and tags.
+- `cargo xtask release --check` binds workspace packaging, CLI, changelog, and lockfiles.
+- `cargo xtask release --check --require-tag` additionally requires clean
+  version-bearing inputs and an exact matching `vX.Y.Z` tag.
 - `cargo xtask verify` runs the stable format, lint, docs, test, and benchmark gate.
 - `cargo xtask verify-fuzz` builds all fuzz targets and requires nightly Rust.
 - `mise run verify` composes both gates while scoping nightly to fuzzing only.
@@ -158,4 +160,4 @@ documents use schema version 3 and preserve `not_requested`, `complete`,
 See [CHANGELOG.md](CHANGELOG.md) for release history and
 [docs/diagnostic-codes.md](docs/diagnostic-codes.md) for stable machine codes.
 
-Macho is licensed under Apache-2.0.
+Macho is licensed under the MIT License.

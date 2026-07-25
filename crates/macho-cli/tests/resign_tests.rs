@@ -1,3 +1,6 @@
+//! Re-signing plan checks against signed Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::model::container::MachoContainer;
 use macho::mutate::resign::ResignPlan;
 use macho::mutate::transaction::PatchTransaction;

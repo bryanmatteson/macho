@@ -2,34 +2,32 @@
 
 ## 0.4.0
 
-- Standardized the complete workspace and published crate family on the
-  Apache-2.0 license.
-- Added opt-in strict RTTI leaves for Swift and Objective-C. Swift now retains
+- Licensed the complete workspace and published crate family under the MIT
+  License.
+- Added opt-in strict RTTI leaves for Swift and Objective-C. Swift retains
   emitted static metadata objects separately from accessors and decodes local
-  value-witness layouts without target execution. Objective-C now provides an
+  value-witness layouts without target execution. Objective-C provides an
   all-or-error conserved scan over runtime lists and strict method records.
-- Kept the strict C++ Itanium RTTI, vtable, fixup, and ABI surfaces available
-  through their closed existing feature set for downstream deterministic
-  runtime-type graph construction.
+- Exposed the strict C++ Itanium RTTI, vtable, fixup, and ABI surfaces through
+  their closed feature set for deterministic runtime-type graph construction.
 - Added `macho-evidence`, a policy-free selected-image composition seam for
-  strict Objective-C, Swift, C++, and shared pointer provenance. External
-  transformation engines no longer need to duplicate ABI decoding.
+  strict Objective-C, Swift, C++, and shared pointer provenance.
 
 ## 0.3.0
 
-- Added a bounded format probe for callers that need to identify Mach-O input
-  without accepting malformed containers.
+- Added a bounded format probe that identifies Mach-O input without accepting
+  malformed containers.
 - Isolated structural mutation from executable patch planning, instruction,
   dyld, analysis, workflow, and CLI dependencies. Hook and trampoline planning
-  now lives in the separate `macho-patch` leaf.
+  live in the separate `macho-patch` leaf.
 - Added a minimal external-signing feature whose dependency closure contains
   only the structural core, code-signature parsing, and digest support.
 - Isolated Objective-C fixup decoding behind the `fixups` feature while
   retaining strict chained and legacy pointer resolution for Splice.
 - Moved process-free Rust, C++, and Swift demangling into the independent
   `macho-demangle` leaf and removed lateral language-crate re-exports.
-- Kept `macho-cpp` ABI/body inference available behind explicit features while
-  removing its direct symbol-layer dependency.
+- Kept `macho-cpp` ABI/body inference behind explicit features and removed its
+  direct symbol-layer dependency.
 
 ## 0.2.0
 
@@ -47,35 +45,27 @@
   without copying or internally allocating.
 - Made injected external signing providers opaque by default while preserving
   explicit ad-hoc and certificate outcomes for the in-process provider. Opaque
-  providers retain responsibility for verifying their own output.
+  providers verify their own output.
 - Added explicit instruction decode errors and lossy gap reporting.
 - Added `macho disassemble`: streaming, line-oriented instruction disassembly
   with constant output memory — pretty text by default, or newline-delimited
-  JSON (one record per line) with `--format json`. Exact architecture, section,
-  symbol, and address selection; recovering or strict decoding (strict aborts on
-  the first invalid byte after streaming the valid prefix); typed gaps, labels,
-  targets, identities, and schema-version-1 records. The materialized
-  `disassemble()` library API is retained on the same decode core.
-- Help and usage text is now rendered through Macho's Termosaic theme instead of
-  Clap's independent palette, and obeys `--color`: previously Clap decided
-  colouring from its own terminal heuristic, ignoring the flag. Section headers,
-  literals, and placeholders resolve the same tokens as report output. Usage
-  errors stay plain because the diagnostic path sanitizes what it writes, which
-  would otherwise turn Clap's escapes into replacement characters; the `Error:`
-  label continues to carry the theme.
-- Added Termosaic syntax highlighting to `disassemble` text output through an
-  explicit three-stage pipeline: a lexer splits decoded instruction text into
-  lexical runs, each run is assigned a Termosaic `TokenId`, and the resulting
-  `Span` stream is resolved against the theme at render time. Mnemonics,
-  registers, immediates, operand punctuation, size/shift qualifiers, the raw
-  byte column, addresses, branch-target comments, and decode-gap codes each
-  carry their own token, and whole record and region-header lines are assembled
-  as span streams. Because classification is independent of colour, tokenization
-  is tested against token identities rather than escape sequences. Colour is
-  presentation only — stripping ANSI from `--color always` reproduces `--color
-  never` byte for byte, machine output is unaffected, and byte-column padding is
-  measured unstyled so records stay aligned in both modes. Target annotations are
-  now separated from the instruction by two spaces.
+  JSON with `--format json`. Exact architecture, section, symbol, and address
+  selection; recovering or strict decoding (strict aborts on the first invalid
+  byte after streaming the valid prefix); typed gaps, labels, targets,
+  identities, and schema-version-1 records. The materialized `disassemble()`
+  library API shares the same decode core.
+- Help and usage text render through Macho's Termosaic theme and obey `--color`.
+  Section headers, literals, and placeholders resolve the same tokens as report
+  output. Usage errors stay plain because the diagnostic path sanitizes writes;
+  the `Error:` label still carries the theme.
+- Added Termosaic syntax highlighting to `disassemble` text output: a lexer
+  splits decoded instruction text into lexical runs, each run receives a
+  Termosaic `TokenId`, and the `Span` stream resolves against the theme at
+  render time. Classification is independent of colour; tokenization is tested
+  against token identities. Stripping ANSI from `--color always` reproduces
+  `--color never` byte for byte. Machine output is unaffected. Byte-column
+  padding is measured unstyled so records stay aligned. Target annotations are
+  separated from the instruction by two spaces.
 - Added `disassemble --end-address` (exclusive range end for `--address`)
   selection and the text-display flags `--no-addresses`, `--no-bytes`,
   `--no-labels`, and `--no-targets` for diff-friendly output.
@@ -90,9 +80,8 @@
 - Fixed `objc` aborting with `duplicate Objective-C entity ID` on binaries whose
   `__objc_protolist`/`__objc_catlist`/`__objc_classlist` reference one runtime
   object through several pointer slots. Such slots share one entity identity and
-  are now collapsed to a single entity (each slot still retained individually as
-  an observation), while genuinely distinct same-named entities at different
-  addresses stay separate. This unblocks `objc` on large real-world images.
+  collapse to a single entity; each slot is retained individually as an
+  observation. Distinct same-named entities at different addresses stay separate.
 - Added fail-closed streaming export-trie traversal and centralized rejection
   of explicit color for machine-readable output.
 - Adopted pinned Termosaic semantic tokens, theme resolution, and human-text

@@ -2,8 +2,7 @@
 
 Swift type-metadata indexing for Mach-O images, with injectable demangling.
 
-Depend on this crate directly when you only need Swift type indexes. It does not
-require the `macho` façade.
+Depend on this crate for Swift type indexes without the `macho` façade.
 
 ```rust
 let bytes = std::fs::read("MyApp")?;

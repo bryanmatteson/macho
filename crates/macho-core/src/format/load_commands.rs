@@ -475,6 +475,12 @@ fn parse_linker_option(
     let raw: RawLinkerOptionCommand = pod::read_pod(cmd_data, 0)?;
     let count = endian.interpret_u32(raw.count) as usize;
     let payload = &cmd_data[size_of::<RawLinkerOptionCommand>()..];
+    if count > payload.len() {
+        return Err(Error::command(format!(
+            "LC_LINKER_OPTION claims {count} strings in a {}-byte payload",
+            payload.len()
+        )));
+    }
 
     let mut strings = Vec::with_capacity(count);
     let mut pos = 0;
@@ -623,5 +629,25 @@ impl<'limits> ParseBudget<'limits> {
             )));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::ParseErrorKind;
+
+    #[test]
+    fn linker_option_count_is_bounded_before_allocation() {
+        let mut command = Vec::new();
+        command.extend_from_slice(&LC_LINKER_OPTION.to_le_bytes());
+        command.extend_from_slice(&(size_of::<RawLinkerOptionCommand>() as u32).to_le_bytes());
+        command.extend_from_slice(&0xcafebabe_u32.to_le_bytes());
+
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let error = parse_linker_option(&command, Endian::Little, &mut budget).unwrap_err();
+
+        assert_eq!(error.kind, ParseErrorKind::InvalidLoadCommand);
     }
 }

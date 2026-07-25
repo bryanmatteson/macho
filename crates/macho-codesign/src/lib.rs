@@ -18,6 +18,8 @@ pub use error::{CodesignError, CodesignErrorKind, Result};
 pub mod codedir;
 /// The entitlements module.
 pub mod entitlements;
+/// Code-requirement set parsing.
+pub mod requirements;
 /// The superblob module.
 pub mod superblob;
 /// The types module.
@@ -37,6 +39,7 @@ pub struct CodeSignature<'data> {
     code_directories: Vec<CodeDirectory<'data>>,
     entitlements_xml: Option<&'data str>,
     entitlements_der: Option<&'data [u8]>,
+    designated_requirement: Option<&'data [u8]>,
 }
 
 impl<'data> MachoExt<'data> for CodeSignature<'data> {
@@ -79,12 +82,14 @@ pub fn parse_code_signature<'data>(macho: &MachoFile<'data>) -> Result<CodeSigna
 
     let entitlements_xml = entitlements::extract_entitlements_xml(&blobs);
     let entitlements_der = entitlements::extract_entitlements_der(&blobs);
+    let designated_requirement = requirements::extract_designated_requirement(&blobs)?;
 
     Ok(CodeSignature {
         blobs,
         code_directories,
         entitlements_xml,
         entitlements_der,
+        designated_requirement,
     })
 }
 
@@ -107,6 +112,14 @@ impl<'data> CodeSignature<'data> {
     /// Performs entitlements_der.
     pub fn entitlements_der(&self) -> Option<&'data [u8]> {
         self.entitlements_der
+    }
+
+    /// Return the complete canonical designated-requirement blob.
+    ///
+    /// The returned slice includes the `CSMAGIC_REQUIREMENT` magic and length
+    /// header. `None` means the signature has no designated requirement.
+    pub fn designated_requirement(&self) -> Option<&'data [u8]> {
+        self.designated_requirement
     }
 
     /// Performs identifier.
@@ -153,6 +166,7 @@ mod tests {
             code_directories: Vec::new(),
             entitlements_xml: None,
             entitlements_der: None,
+            designated_requirement: None,
         };
 
         assert!(!signature.cms_signature_present());

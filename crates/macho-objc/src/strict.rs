@@ -43,7 +43,7 @@ pub struct StrictObjCConservation {
     pub included: u64,
     /// Records whose meaning could not be established.
     pub unknown: u64,
-    /// Records deliberately excluded by the contract.
+    /// Records excluded by the contract.
     pub excluded: u64,
 }
 

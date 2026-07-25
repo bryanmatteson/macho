@@ -5,6 +5,8 @@ use std::fmt;
 pub const CSMAGIC_EMBEDDED_SIGNATURE: u32 = 0xFADE_0CC0;
 /// The CSMAGIC_CODEDIRECTORY constant.
 pub const CSMAGIC_CODEDIRECTORY: u32 = 0xFADE_0C02;
+/// The CSMAGIC_REQUIREMENT constant.
+pub const CSMAGIC_REQUIREMENT: u32 = 0xFADE_0C00;
 /// The CSMAGIC_REQUIREMENTS constant.
 pub const CSMAGIC_REQUIREMENTS: u32 = 0xFADE_0C01;
 /// The CSMAGIC_ENTITLEMENTS constant.
@@ -39,6 +41,9 @@ pub const CS_SLOT_LAUNCH_CONSTRAINTS: u32 = 8;
 pub const CS_SLOT_SIGNATURESLOT: u32 = 0x10000;
 /// The CS_SLOT_ALTERNATE_CODEDIRECTORIES constant.
 pub const CS_SLOT_ALTERNATE_CODEDIRECTORIES: u32 = 0x1000;
+
+/// Requirement-set entry type for the code's designated requirement.
+pub const CS_REQUIREMENT_TYPE_DESIGNATED: u32 = 3;
 
 // Hash types
 /// The CS_HASHTYPE_SHA1 constant.

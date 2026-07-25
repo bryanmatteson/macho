@@ -114,6 +114,16 @@ fn print_codesign(macho: &MachoFile<'_>, args: &CodesignArgs, out: &mut dyn Writ
         let _ = writeln!(out, "  Entitlements: none");
     }
 
+    if let Some(requirement) = sig.designated_requirement() {
+        let _ = writeln!(
+            out,
+            "  Designated requirement: present ({} bytes)",
+            requirement.len()
+        );
+    } else {
+        let _ = writeln!(out, "  Designated requirement: none");
+    }
+
     if sig.cms_signature_present() {
         let cms_size = sig
             .blobs()

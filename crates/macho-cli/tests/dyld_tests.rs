@@ -1,3 +1,6 @@
+//! Dyld metadata corpus checks against Apple system binaries.
+#![cfg(target_os = "macos")]
+
 use macho::metadata::dyld::chained::parse_chained_fixups;
 use macho::metadata::dyld::exports::{find_export, parse_exports};
 use macho::metadata::dyld::types::{ExportKind, FixupKind};

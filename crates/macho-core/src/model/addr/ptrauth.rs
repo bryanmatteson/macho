@@ -14,19 +14,16 @@
 
 /// Mask covering the 48 virtual-address bits used by iOS / macOS arm64e.
 ///
-/// The ARM architecture allows up to 52 bits of virtual address, but Apple
-/// silicon currently caps usable VAs at 48 bits and reserves bits 48..=63
-/// for pointer-auth metadata. We mask conservatively here: if a future
-/// Apple system widens the VA range we'll need to narrow this mask, but
-/// today any pointer with high bits set on arm64e has been signed.
+/// Apple silicon uses 48-bit usable VAs and reserves bits 48..=63 for
+/// pointer-auth metadata. Any arm64e pointer with those high bits set is
+/// signed; clearing them yields the VA.
 const PTRAUTH_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// Strip the pointer-authentication signature from an arm64e pointer.
 ///
-/// Returns the raw VA with all pointer-auth metadata cleared. On non-arm64e
-/// architectures callers should avoid this helper — a plain pointer value
-/// on x86_64 or arm64 may legitimately occupy the top bits and stripping
-/// would corrupt it.
+/// Returns the raw VA with all pointer-auth metadata cleared. Do not use on
+/// non-arm64e pointers: a plain value on x86_64 or arm64 may legitimately
+/// occupy the top bits, and stripping would corrupt it.
 #[inline]
 pub fn strip_ptrauth(raw: u64) -> u64 {
     raw & PTRAUTH_MASK

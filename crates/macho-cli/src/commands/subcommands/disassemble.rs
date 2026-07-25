@@ -515,7 +515,8 @@ impl<'a> NdjsonSink<'a> {
     }
 
     /// Emit the container/request header exactly once, before the first slice.
-    /// Deferring it keeps stdout empty when a pre-decode error aborts the run.
+    /// Leaving it until first emission keeps stdout empty when a pre-decode
+    /// error aborts the run.
     fn ensure_header(&mut self) -> Result<(), macho::analysis::disassembly::DisassemblyError> {
         if self.header_emitted {
             return Ok(());

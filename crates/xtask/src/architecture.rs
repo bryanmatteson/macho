@@ -8,8 +8,6 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
-const TERMOSAIC_SOURCE: &str = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314";
-
 const PRODUCT_CRATES: &[&str] = &[
     "macho-core",
     "macho-insn",
@@ -99,18 +97,16 @@ pub fn check(root: &Path) -> Result<()> {
                 ));
             }
             if dependency.name == "termosaic"
-                && (dependency.req.to_string() != "^0.2.0"
+                && (dependency.req.to_string() != "=0.2.0"
                     || dependency
                         .source
                         .as_ref()
-                        .map(ToString::to_string)
-                        .as_deref()
-                        != Some(TERMOSAIC_SOURCE)
+                        .is_none_or(|source| !source.is_crates_io())
                     || dependency.uses_default_features
                     || !dependency.features.is_empty())
             {
                 violations.push(format!(
-                    "macho-cli must pin termosaic 0.2.0 at the approved revision with default features disabled: {}",
+                    "macho-cli must pin crates.io termosaic =0.2.0 with default features disabled: {}",
                     package.name
                 ));
             }
@@ -226,9 +222,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
     if actual == expected {
         Ok(())
     } else {
-        bail!(
-            "macho feature authority differs from Plan 15\nexpected: {expected:?}\nactual: {actual:?}"
-        )
+        bail!("macho feature authority mismatch\nexpected: {expected:?}\nactual: {actual:?}")
     }
 }
 

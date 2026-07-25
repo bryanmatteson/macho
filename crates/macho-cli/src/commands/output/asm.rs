@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(token_of(arm, "sp"), tokens::SYNTAX_VARIABLE_BUILTIN);
         assert_eq!(token_of(arm, "0x10"), tokens::SYNTAX_NUMBER);
 
-        // A symbol operand is deliberately left unclassified.
+        // A symbol operand is left unclassified.
         assert_eq!(token_of("bl _objc_msgSend", "_objc_msgSend"), tokens::TEXT);
     }
 

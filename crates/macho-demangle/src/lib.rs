@@ -138,9 +138,9 @@ pub fn demangle_swift_symbol(name: &str) -> Option<String> {
 
 /// Decode the typed identity of an emitted Swift type-metadata symbol.
 ///
-/// This is intentionally narrower than display demangling: accessors,
-/// descriptors, protocols, functions, and unsupported future nominal kinds
-/// are not admitted as already-materialized type metadata.
+/// Narrower than display demangling: accessors, descriptors, protocols,
+/// functions, and unsupported nominal kinds are not admitted as
+/// already-materialized type metadata.
 pub fn swift_type_metadata_identity(name: &str) -> Option<SwiftTypeMetadataIdentity> {
     match classify_swift_type_metadata_symbol(name) {
         SwiftTypeMetadataSymbolEvidence::Metadata(identity) => Some(identity),
@@ -154,7 +154,7 @@ pub fn swift_type_metadata_identity(name: &str) -> Option<SwiftTypeMetadataIdent
 ///
 /// Only the `...N` value-metadata production is considered a candidate.
 /// Accessors (`...Ma`), descriptors (`...Mn`), functions, and unrelated Swift
-/// symbols are deliberately outside this evidence surface.
+/// symbols are outside this evidence surface.
 pub fn classify_swift_type_metadata_symbol(name: &str) -> SwiftTypeMetadataSymbolEvidence {
     let Some(candidate) = swift_candidate(name) else {
         return SwiftTypeMetadataSymbolEvidence::NotTypeMetadata;

@@ -4,8 +4,8 @@
 //! The session borrows an immutable parsed image, builds the shared
 //! pointer/fixup index used for cross-domain projection, and exposes lossless
 //! language-leaf batches. Each leaf remains responsible for its own strict
-//! validation. The session deliberately owns no semantic graph, capability,
-//! report, mutation, or orchestration policy.
+//! validation. The session owns no semantic graph, capability, report,
+//! mutation, or orchestration policy.
 
 use macho_core::MachoFile;
 use macho_dyld::resolve::PointerResolver;

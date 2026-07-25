@@ -237,9 +237,9 @@ pub fn validate_response(
     let projected_header = (!accepted_declarations.is_empty()).then(|| HeaderProjection {
         language: bundle.language(),
         declarations: accepted_declarations,
-        // The artifact schema deliberately identifies unresolved source gaps by
-        // stable ID rather than duplicating the source gap record.  A gap ID is
-        // not reversible to its field, so the hypothesis report keeps the exact
+        // The artifact schema identifies unresolved source gaps by stable ID
+        // rather than duplicating the source gap record. A gap ID is not
+        // reversible to its field, so the hypothesis report keeps the exact
         // IDs in `unresolved_gap_ids` instead of fabricating a HeaderGap field.
         unresolved: Vec::new(),
         diagnostics: Vec::new(),

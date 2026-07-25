@@ -31,8 +31,8 @@ pub use model::{SelectedImage, SelectionKey};
 
 /// Return whether the leading bytes identify a thin or universal Mach-O.
 ///
-/// This intentionally recognizes truncated inputs so callers can route them to
-/// strict Mach-O parsing and preserve fail-closed diagnostics.
+/// Recognizes truncated inputs so callers can route them to strict Mach-O
+/// parsing and preserve fail-closed diagnostics.
 pub fn probe(data: &[u8]) -> bool {
     let Some(magic) = data.get(..4) else {
         return false;

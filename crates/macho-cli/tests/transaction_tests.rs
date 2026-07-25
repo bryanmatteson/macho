@@ -1,3 +1,6 @@
+//! Transaction checks against signed Apple system binaries.
+#![cfg(target_os = "macos")]
+
 mod support;
 
 use macho::model::container::MachoContainer;

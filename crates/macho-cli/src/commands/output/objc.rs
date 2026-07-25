@@ -1,10 +1,10 @@
 //! Objective-C header presentation profile.
 //!
-//! Termosaic deliberately owns semantic tokens and theme resolution rather
-//! than a language parser.  This profile maps the generated, already-validated
-//! Objective-C header source to those tokens at the CLI presentation boundary.
-//! It is not involved in header recovery or validation: ANSI escapes never
-//! enter the source artifact.
+//! Termosaic owns semantic tokens and theme resolution, not a language
+//! parser. This profile maps the generated, already-validated Objective-C
+//! header source to those tokens at the CLI presentation boundary. It is not
+//! involved in header recovery or validation: ANSI escapes never enter the
+//! source artifact.
 
 use termosaic::{Span, TokenId, tokens};
 

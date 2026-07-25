@@ -587,7 +587,7 @@ fn direct_target(instruction: &Insn, va: u64, metadata: &Metadata) -> Option<Dir
         }
         // When the presentation index is truncated, an omitted owner may lie
         // between a retained start and the target. Exact-start annotations are
-        // still provable; non-zero offsets are deliberately left symbolic-free.
+        // still provable; non-zero offsets stay symbolic-free.
         if metadata.truncated && symbol.va != target {
             return None;
         }

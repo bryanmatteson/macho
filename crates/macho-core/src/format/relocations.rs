@@ -48,9 +48,9 @@ pub fn relocations_for_section(
             //   bits 28-29: r_length
             //   bit  30:    r_pcrel
             //   bit  31:    R_SCATTERED (already checked)
-            // Note: The r_type/r_length/r_pcrel bit layout shown above matches
-            // the Apple scattered_relocation_info on LE. On BE, the layout
-            // would be different. We only support LE for now.
+            // The r_type/r_length/r_pcrel bit layout matches Apple's
+            // scattered_relocation_info on little-endian hosts. Big-endian
+            // layouts are not decoded.
             let address = first_word & 0x00FF_FFFF;
             let reloc_type = ((first_word >> 24) & 0xF) as u8;
             let length = ((first_word >> 28) & 0x3) as u8;

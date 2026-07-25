@@ -1999,7 +1999,8 @@ dependencies = [
 [[package]]
 name = "laidout"
 version = "0.2.0"
-source = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314#9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3390c84581479b42f6070714281452861266b06fe92f6218cf41b3efae1adecb"
 dependencies = [
  "thiserror 2.0.18",
  "unicode-width",
@@ -3763,7 +3764,8 @@ dependencies = [
 [[package]]
 name = "termosaic"
 version = "0.2.0"
-source = "git+https://github.com/bryanmatteson/termosaic.git?rev=9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314#9452b2236dbdbcfe4a1ac8c6c074f1bf3f3e4314"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86ca87c8bab759c0d4366b4e9af9d6f11c2769f6f33b679957b2f8f5255d1c2e"
 dependencies = [
  "console 0.16.4",
  "laidout",

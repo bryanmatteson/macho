@@ -55,9 +55,8 @@ pub struct DwarfParameter {
 
 /// A type representation sufficient for ABI comparison.
 ///
-/// This intentionally does NOT recurse into struct/union fields — for ABI
-/// compatibility checking, we need shape (pointer depth, size, name identity)
-/// but not internal layout.
+/// Does not recurse into struct/union fields. ABI compatibility checking needs
+/// shape (pointer depth, size, name identity), not internal layout.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum DwarfType {
