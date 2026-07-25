@@ -2092,6 +2092,7 @@ dependencies = [
  "macho-dwarf",
  "macho-dyld",
  "macho-dyld-cache",
+ "macho-evidence",
  "macho-header-infer",
  "macho-header-syntax",
  "macho-insn",
@@ -2181,6 +2182,7 @@ version = "0.4.0"
 dependencies = [
  "cpp_demangle",
  "rustc-demangle",
+ "sha2",
  "swift-demangler",
 ]
 
@@ -2212,6 +2214,17 @@ dependencies = [
  "macho-test-support",
  "serde",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "macho-evidence"
+version = "0.4.0"
+dependencies = [
+ "macho-core",
+ "macho-cpp",
+ "macho-dyld",
+ "macho-objc",
+ "macho-swift",
 ]
 
 [[package]]
@@ -2287,8 +2300,10 @@ version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-demangle",
+ "macho-dyld",
  "macho-test-support",
  "serde",
+ "sha2",
  "thiserror 2.0.18",
 ]
 

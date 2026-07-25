@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: Apache-2.0
 // Mach-O specific patching operations and models.
 
 use std::collections::{BTreeMap, HashMap};

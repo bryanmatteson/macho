@@ -5,7 +5,7 @@
 [workspace.package]
     edition      = "2024"
     homepage     = "https://github.com/bryanmatteson/macho"
-    license      = "MIT OR Apache-2.0"
+    license      = "Apache-2.0"
     repository   = "https://github.com/bryanmatteson/macho.git"
     rust-version = "1.85"
     version      = "0.4.0"
@@ -17,10 +17,11 @@
     macho-cli          = { path = "crates/macho-cli", version = "0.4.0" }
     macho-codesign     = { path = "crates/macho-codesign", version = "0.4.0" }
     macho-core         = { path = "crates/macho-core", version = "0.4.0" }
-    macho-cpp          = { path = "crates/macho-cpp", version = "0.4.0" }
+    macho-cpp          = { path = "crates/macho-cpp", version = "0.4.0", default-features = false }
     macho-demangle     = { path = "crates/macho-demangle", version = "0.4.0" }
     macho-dwarf        = { path = "crates/macho-dwarf", version = "0.4.0" }
     macho-dyld         = { path = "crates/macho-dyld", version = "0.4.0" }
+    macho-evidence     = { path = "crates/macho-evidence", version = "0.4.0" }
     macho-dyld-cache   = { path = "crates/macho-dyld-cache", version = "0.4.0" }
     macho-header-infer = { path = "crates/macho-header-infer", version = "0.4.0" }
     macho-header-syntax = { path = "crates/macho-header-syntax", version = "0.4.0" }

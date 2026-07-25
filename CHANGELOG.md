@@ -2,6 +2,8 @@
 
 ## 0.4.0
 
+- Standardized the complete workspace and published crate family on the
+  Apache-2.0 license.
 - Added opt-in strict RTTI leaves for Swift and Objective-C. Swift now retains
   emitted static metadata objects separately from accessors and decodes local
   value-witness layouts without target execution. Objective-C now provides an
@@ -9,6 +11,9 @@
 - Kept the strict C++ Itanium RTTI, vtable, fixup, and ABI surfaces available
   through their closed existing feature set for downstream deterministic
   runtime-type graph construction.
+- Added `macho-evidence`, a policy-free selected-image composition seam for
+  strict Objective-C, Swift, C++, and shared pointer provenance. External
+  transformation engines no longer need to duplicate ABI decoding.
 
 ## 0.3.0
 

@@ -130,9 +130,10 @@ is true:
 
 This amended contract starts from the live 0.2.0 workspace, not the pre-workspace
 `src/` layout in plan 14 or the pre-implementation baseline previously recorded
-for plan 15. The amended target graph has 21 packages. Its three deliberately
+for plan 15. The amended target graph has 22 packages. Its three deliberately
 small new ownership leaves are `macho-header-syntax`, `macho-demangle`, and
-`macho-patch`; they replace cross-domain ownership rather than duplicating it.
+`macho-patch`; `macho-evidence` is the policy-free language-evidence composition
+seam. These packages replace cross-domain ownership rather than duplicating it.
 
 | Area | Verified live state | Required delta |
 | --- | --- | --- |
@@ -165,8 +166,9 @@ macho-symbols                  -> core, demangle
 macho-codesign                 -> core
 macho-dwarf                    -> core
 macho-objc                     -> core, dyld
-macho-swift                    -> core, demangle
+macho-swift                    -> core, demangle; feature-selected dyld
 macho-cpp                      -> core, demangle; feature-selected insn, dyld
+macho-evidence                 -> core, dyld, objc, swift, cpp
 macho-header-syntax            -> no workspace crates
 
 macho-analysis                 -> core, insn, symbols, dyld, codesign,
@@ -178,7 +180,7 @@ macho-header-infer             -> analysis, header-syntax
 macho-workflow                 -> core, analysis, mutate
 
 macho                          -> core; feature-selected insn, symbols, dyld,
-                                  codesign, dwarf, objc, swift, cpp, analysis,
+                                  codesign, dwarf, objc, swift, cpp, evidence, analysis,
                                   mutate, workflow, dyld-cache, header-infer
 macho-cli                      -> macho(full)
 xtask                          -> macho-cli
@@ -196,19 +198,20 @@ belong to `macho-cli`; cargo metadata/tooling dependencies belong to `xtask`.
 
 | Crate | Sole responsibility | Moves from the live tree | Forbidden content |
 | --- | --- | --- | --- |
-| `macho-core` | Byte-safe container/header/load-command/segment/section/symbol/relocation parsing, address types/maps, parse limits, structural validation, and diagnostics | Keep `format/`, structural `model/`, structural `ext`, and validation; reduce `lib.rs` | Serialization DTOs, domain metadata, analysis, mutation, CLI, process execution |
+| `macho-core` | Byte-safe container/header/load-command/segment/section/symbol/relocation parsing, exact container selection, mapped-image materialization with file/RVA provenance, address types/maps, parse limits, structural validation, and diagnostics | Keep `format/`, structural `model/`, structural `ext`, and validation; reduce `lib.rs` | Serialization DTOs, domain metadata, analysis, mutation, CLI, process execution |
 | `macho-insn` | Architecture-aware decode, encode, and relocation primitives | Existing crate | Mach-O parsing, analysis policy, silent decode recovery |
-| `macho-demangle` | Process-free Rust, C++, and Swift demangling, normalization, and caching | Demangler adapters formerly owned by `macho-symbols` | Mach-O parsing, metadata graphs, host processes |
+| `macho-demangle` | Process-free Rust, C++, and Swift demangling, owned callable-mangling and emitted-metadata evidence, parser-private Swift syntax trees, normalization, and caching | Demangler adapters formerly owned by `macho-symbols` | Mach-O parsing, metadata graphs, external semantic policy, host processes |
 | `macho-symbols` | Symbol-table helpers and presentation adapters | `core/symbols/` | Dyld traversal, host process execution, ObjC/Swift graphs |
-| `macho-dyld` | Bind/rebase/chained-fixup/import/export parsing, pointer resolution, and dyld value types | `core/dyld/`, `core/resolve/fixups.rs`, `core/resolve/pointers.rs`, former symbol import/export wrappers | Image compatibility policy, CLI paths, mutation |
+| `macho-dyld` | Bind/rebase/chained-fixup/import/export parsing, fail-closed pointer observations with encoding/authentication/target evidence, and dyld value types | `core/dyld/`, `core/resolve/fixups.rs`, `core/resolve/pointers.rs`, former symbol import/export wrappers | Image compatibility policy, CLI paths, mutation |
 | `macho-codesign` | Code-directory, superblob, entitlement, and signature parsing/types | `core/codesign/` | Signing mutation, audit policy, filesystem access |
 | `macho-dwarf` | DWARF section loading and typed function/type indexes | `core/dwarf/` | Compiler invocation, header output, filesystem writes |
-| `macho-objc` | ObjC metadata parsing, encoding, resolver, and owned metadata values | `core/objc/` | Swift enrichment, rendering, CLI filtering |
-| `macho-swift` | Native Swift metadata indexing with injected demangling | `core/swift/`; Objective-C enrichment is composed in analysis | Process-backed demangling, ObjC parsing/ownership |
+| `macho-objc` | ObjC metadata parsing, encoding, resolver, owned metadata values, and strict absent/complete/rejected batches with conservation and exact method-owner occurrences | `core/objc/` | Swift enrichment, rendering, CLI filtering |
+| `macho-swift` | Native Swift metadata indexing with injected demangling, strict bounded absent/complete/rejected descriptor and static-metadata batches, conservation, and feature-selected witness/pointer evidence | `core/swift/`; Objective-C enrichment is composed in analysis | Process-backed demangling, ObjC parsing/ownership, external semantic identities |
 | `macho-cpp` | RTTI/vtable parsing and feature-selected architecture-specific ABI/body inference | `core/rtti/` and pure ABI inference from `analysis/reconstruct/cpp/abi.rs` | Generic symbol ownership, header filesystem output, compiler invocation, generic diff/reporting |
+| `macho-evidence` | Closed immutable selected-image session that builds shared cross-domain pointer evidence and composes strict Objective-C, Swift, and C++ batches while each leaf retains strict validation | New composition seam for external transformation engines and Mach-O analysis | Semantic identities, report schemas, capabilities, mutation, orchestration, filesystem or process effects |
 | `macho-header-syntax` | Typed supported C/C++/Objective-C declaration ASTs, bundled in-process parsing, deterministic rendering, and syntax plus semantic validation | Consolidate header AST/parser/render/validation code split across reconstruction, ObjC rendering, and header inference | Mach-O evidence, runtime encodings, recovery facts, prompts, model hypotheses, process execution, filesystem access |
 | `macho-analysis` | Domain planning/execution, snapshots, diff, audit, dependency compatibility, strings/xrefs, container analysis, recovery facts, and safe header projection | Existing crate plus normalized `core/image.rs` and path/compatibility policy | Mutation, CLI arguments, host processes, filesystem writes, C-family parser implementation |
-| `macho-mutate` | Owned model, layout, structural patch application, process-free signing and verification, structural preview, and transactional validation | Existing crate without executable hook/trampoline planning | Instruction decoding, dyld traversal, analysis dependency/reexport, semantic diff, credential-file I/O, CLI concerns |
+| `macho-mutate` | Owned model, layout, exact-member thin/universal transformation and rebuild, structural patch application, process-free signing and verification, structural preview, and transactional validation | Existing crate without executable hook/trampoline planning | Instruction decoding, dyld traversal, analysis dependency/reexport, semantic diff, credential-file I/O, CLI concerns |
 | `macho-patch` | Executable hook planning, instruction relocation, trampoline construction, and byte patching | `macho-mutate/src/patch/` | Mach-O layout rebuilding, signing, semantic analysis, filesystem writes |
 | `macho-workflow` | Cross-layer patch workflow and semantic before/after preview | Semantic portions of `mutate/preview.rs` and transaction orchestration that consumes analysis | CLI parsing/rendering, low-level parsers |
 | `macho-dyld-cache` | Dyld shared-cache model, parsing, and extraction-bytes API | `macho/src/inputs/dyld_cache/` | Filesystem writes, CLI flags, text output |
@@ -246,6 +249,7 @@ default = ["analysis"]
 metadata = [
   "dep:macho-symbols", "dep:macho-dyld", "dep:macho-codesign",
   "dep:macho-dwarf", "dep:macho-objc", "dep:macho-swift", "dep:macho-cpp",
+  "dep:macho-evidence",
 ]
 analysis = ["metadata", "dep:macho-insn", "dep:macho-analysis"]
 mutation = [
@@ -706,6 +710,24 @@ references, and reflection strings from the selected image. In-process Swift
 demangling supplies supplementary symbol observations and display spellings; it
 cannot promote a symbol-only name into a metadata-defined type.
 
+The external seam exposes only Macho-owned evidence. `macho-demangle` keeps the
+underlying Swift parser AST private and returns closed callable or emitted
+metadata classifications. `macho-swift` applies explicit resource limits and
+returns conserved static-metadata batches; it never drops malformed candidates
+through a lossy iterator. Callers may project this evidence into their own
+semantic identities, but must not parse ABI manglings or reinterpret raw Mach-O
+metadata themselves.
+
+External transformation engines consume the language leaves through
+`macho-evidence::SelectedImageEvidence`. They select through `macho-core`, admit
+one immutable parsed image with shared cross-domain pointer evidence, consume strict language
+batches from `macho-objc`, `macho-swift`, and `macho-cpp`, and submit candidate
+bytes through `macho-mutate`. They do not
+depend on `macho-analysis` or `macho-workflow`, because report policy and
+standalone workflow sequencing belong to those callers. Conversely, Mach-O
+crates do not depend on an external engine's semantic identities, review model,
+capability registry, rollback policy, or report schema.
+
 The canonical `SwiftReport` records, per slice:
 
 ```rust
@@ -862,6 +884,8 @@ remain the CI authority when that private binary is absent.
   signing impact, and validation diagnostics without using analysis;
 - transaction application is all-or-nothing in memory;
 - output is strictly reparsed and validated before bytes are returned;
+- exact thin/universal member selection, replacement, fat-container rebuild,
+  and post-transform parse validation are one `macho-mutate` operation;
 - the crate never writes files or chooses backup paths; and
 - `macho-mutate` neither depends on nor reexports `macho-analysis`.
 

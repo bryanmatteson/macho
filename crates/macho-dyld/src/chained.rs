@@ -173,6 +173,11 @@ fn walk_all_chains(
             endian.interpret_u16(pod::read_pod::<u16>(fixup_data, seg_starts_base + 4)?);
         let pointer_format =
             endian.interpret_u16(pod::read_pod::<u16>(fixup_data, seg_starts_base + 6)?);
+        if !is_supported_pointer_format(pointer_format) {
+            return Err(Error::unsupported(format!(
+                "unsupported chained pointer format {pointer_format}"
+            )));
+        }
         let segment_offset =
             endian.interpret_u64(pod::read_pod::<u64>(fixup_data, seg_starts_base + 8)?);
         let _max_valid_pointer =
@@ -252,6 +257,17 @@ fn is_32bit_format(format: u16) -> bool {
     matches!(
         format,
         DYLD_CHAINED_PTR_32 | DYLD_CHAINED_PTR_32_CACHE | DYLD_CHAINED_PTR_32_FIRMWARE
+    )
+}
+
+fn is_supported_pointer_format(format: u16) -> bool {
+    matches!(
+        format,
+        DYLD_CHAINED_PTR_ARM64E
+            | DYLD_CHAINED_PTR_ARM64E_USERLAND
+            | DYLD_CHAINED_PTR_ARM64E_USERLAND24
+            | DYLD_CHAINED_PTR_64
+            | DYLD_CHAINED_PTR_64_OFFSET
     )
 }
 
@@ -419,6 +435,8 @@ fn decode_chain_entry(raw: u64, format: u16) -> Result<(FixupKind, u16)> {
                 ))
             }
         }
-        _ => Ok((FixupKind::Rebase { target: raw }, 0)),
+        _ => Err(Error::unsupported(format!(
+            "unsupported chained pointer format {format}"
+        ))),
     }
 }

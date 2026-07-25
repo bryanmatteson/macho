@@ -21,6 +21,7 @@ const PRODUCT_CRATES: &[&str] = &[
     "macho-objc",
     "macho-swift",
     "macho-cpp",
+    "macho-evidence",
     "macho-analysis",
     "macho-mutate",
     "macho-patch",
@@ -181,6 +182,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
                 "dep:macho-cpp",
                 "dep:macho-dwarf",
                 "dep:macho-dyld",
+                "dep:macho-evidence",
                 "dep:macho-objc",
                 "dep:macho-swift",
                 "dep:macho-symbols",
@@ -241,10 +243,23 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
         ("macho-codesign", &["macho-core"]),
         ("macho-dwarf", &["macho-core"]),
         ("macho-objc", &["macho-core", "macho-dyld"]),
-        ("macho-swift", &["macho-core", "macho-demangle"]),
+        (
+            "macho-swift",
+            &["macho-core", "macho-demangle", "macho-dyld"],
+        ),
         (
             "macho-cpp",
             &["macho-core", "macho-insn", "macho-demangle", "macho-dyld"],
+        ),
+        (
+            "macho-evidence",
+            &[
+                "macho-core",
+                "macho-dyld",
+                "macho-objc",
+                "macho-swift",
+                "macho-cpp",
+            ],
         ),
         (
             "macho-analysis",
@@ -284,6 +299,7 @@ fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
                 "macho-objc",
                 "macho-swift",
                 "macho-cpp",
+                "macho-evidence",
                 "macho-analysis",
                 "macho-mutate",
                 "macho-patch",

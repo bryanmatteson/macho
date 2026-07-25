@@ -128,6 +128,7 @@ impl ObjCProperty {
 }
 
 // ObjC class_ro_t flags
+pub(crate) const CLASS_DATA_POINTER_MASK: u64 = !7;
 /// The RO_META constant.
 pub const RO_META: u32 = 1 << 0;
 /// The RO_ROOT constant.

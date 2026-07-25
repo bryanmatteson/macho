@@ -9,6 +9,7 @@ pub mod ext {
 }
 /// The format module.
 pub mod format;
+mod mapped;
 /// The model module.
 pub mod model;
 
@@ -18,10 +19,15 @@ pub use crate::format::{
 };
 
 pub use format::load_commands::parse_load_commands;
+pub use mapped::{
+    FileRvaMapping, MappedImageReader, MaterializationLimits, MaterializedImage,
+    materialize_mapped_image,
+};
 pub use model::load_command::{LoadCommand, format_uuid};
 pub use model::macho_file::MachoFile;
 pub use model::section::Section;
 pub use model::symbol::{Symbol, SymbolTable};
+pub use model::{SelectedImage, SelectionKey};
 
 /// Return whether the leading bytes identify a thin or universal Mach-O.
 ///

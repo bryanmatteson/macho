@@ -23,7 +23,7 @@ pub fn parse_class(resolver: &ObjCResolver<'_>, class_va: Va) -> Result<ObjCClas
         }
     };
     let is_swift = raw_data_ptr.0 & 1 != 0;
-    let data_va = Va(raw_data_ptr.0 & !1); // clear low bit
+    let data_va = Va(raw_data_ptr.0 & crate::types::CLASS_DATA_POINTER_MASK);
 
     // Parse class_ro_t
     let ro_offset = resolver.va_to_offset(data_va)?;
@@ -121,7 +121,7 @@ pub(crate) fn resolve_class_name_from_va(
     // data field is at +32 in objc_class, with bit 0 used for the Swift flag.
     let data_ptr_offset = class_offset.as_usize() as u64 + 32;
     let data_va = resolver.read_pointer_at_offset(data_ptr_offset).ok()??;
-    let data_va = Va(data_va.0 & !1);
+    let data_va = Va(data_va.0 & crate::types::CLASS_DATA_POINTER_MASK);
     let ro_offset = resolver.va_to_offset(data_va).ok()?;
 
     // name field is at +24 in class_ro_t.
@@ -138,7 +138,7 @@ fn parse_metaclass_surface(
 
     let data_ptr_offset = meta_offset.as_usize() as u64 + 32;
     let data_va = match resolver.read_pointer_at_offset(data_ptr_offset)? {
-        Some(va) => Va(va.0 & !1),
+        Some(va) => Va(va.0 & crate::types::CLASS_DATA_POINTER_MASK),
         None => return Ok((Vec::new(), Vec::new())),
     };
 

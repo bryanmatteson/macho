@@ -79,6 +79,8 @@ pub struct ObjCRecordObservation {
     pub ordinal: usize,
     /// File offset of the pointer-list entry.
     pub pointer_file_offset: u64,
+    /// Exact on-disk mechanism that supplied the runtime pointer.
+    pub pointer_provenance: ObjCPointerProvenance,
     /// Resolved runtime object address, when readable.
     pub runtime_address: Option<u64>,
     /// Parsed entity name, when the record was decoded.
@@ -166,6 +168,8 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
                         kind,
                         ordinal,
                         pointer_file_offset,
+                        pointer_provenance: resolver
+                            .pointer_provenance_at_offset(pointer_file_offset),
                         runtime_address: None,
                         parsed_name: None,
                         error: Some("runtime pointer is null or unresolved".to_owned()),
@@ -178,6 +182,8 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
                         kind,
                         ordinal,
                         pointer_file_offset,
+                        pointer_provenance: resolver
+                            .pointer_provenance_at_offset(pointer_file_offset),
                         runtime_address: None,
                         parsed_name: None,
                         error: Some(error.to_string()),
@@ -223,6 +229,7 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
                     kind,
                     ordinal,
                     pointer_file_offset,
+                    pointer_provenance: resolver.pointer_provenance_at_offset(pointer_file_offset),
                     runtime_address: Some(runtime_address.0),
                     parsed_name: Some(parsed_name),
                     error: None,
@@ -232,6 +239,7 @@ pub fn scan_objc_metadata(macho: &MachoFile<'_>) -> Result<ObjCMetadataScan> {
                     kind,
                     ordinal,
                     pointer_file_offset,
+                    pointer_provenance: resolver.pointer_provenance_at_offset(pointer_file_offset),
                     runtime_address: Some(runtime_address.0),
                     parsed_name: None,
                     error: Some(error.to_string()),

@@ -16,6 +16,9 @@ Parsing and index construction still allocate their result models. Source
 helpers accept one thin image; parse universal binaries with `macho_core::parse`,
 select an architecture, and call `SwiftTypeIndex::build`.
 
-Requires `macho-core` and the dependency-free `macho-demangle` leaf. Objective-C
-runtime enrichment is composed by `macho-analysis`; the Swift parser does not
-depend on an Objective-C parser.
+Requires `macho-core` and the process-free `macho-demangle` leaf. With
+`strict-rtti`, callers can request bounded, conserved descriptor and
+already-materialized metadata batches. Swift parser ASTs remain private to
+`macho-demangle`; this crate consumes only Macho-owned classifications.
+Objective-C runtime enrichment is composed by `macho-analysis`; the Swift
+parser does not depend on an Objective-C parser.

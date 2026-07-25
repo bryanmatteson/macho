@@ -11,6 +11,9 @@ pub use macho_core::{ext, model};
 pub mod error;
 pub use error::{Result, SwiftError, SwiftErrorKind};
 mod context_descriptors;
+/// Strict, lossless Swift ABI evidence.
+#[cfg(feature = "strict-rtti")]
+pub mod evidence;
 /// The types module.
 pub mod types;
 
@@ -21,7 +24,9 @@ pub mod strict;
 use crate::ext::MachoExt;
 use crate::model::macho_file::MachoFile;
 use crate::model::symbol::SymbolTable;
-use macho_demangle::demangle_swift_symbol;
+use macho_demangle::{
+    SwiftNominalMetadataKind, demangle_swift_symbol, swift_type_metadata_identity,
+};
 
 /// Injectable Swift symbol demangler.
 pub trait SwiftDemangler: Send + Sync {
@@ -219,6 +224,24 @@ fn sort_types(types: &mut [types::SwiftType]) {
 }
 
 fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<types::SwiftType> {
+    if let Some(metadata) = swift_type_metadata_identity(mangled) {
+        let kind = match metadata.kind {
+            SwiftNominalMetadataKind::Class => types::SwiftTypeKind::Class,
+            SwiftNominalMetadataKind::Struct => types::SwiftTypeKind::Struct,
+            SwiftNominalMetadataKind::Enum => types::SwiftTypeKind::Enum,
+        };
+        return Some(types::SwiftType {
+            name: metadata.name,
+            kind,
+            mangled_name: Some(mangled.to_string()),
+            address: None,
+            metadata_address: Some(address),
+            source: types::SwiftTypeSource::DemangledSymbol,
+            confidence: types::SwiftTypeConfidence::High,
+            fields: None,
+        });
+    }
+
     // Prioritize descriptors (they give accurate kind) over metadata accessors.
     // Protocol conformance descriptors describe a type's conformance, not a
     // protocol definition — skip them (the type is found via its own descriptor).

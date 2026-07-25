@@ -3,6 +3,54 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use swift_demangler::raw::{Node, NodeKind};
+use swift_demangler::{Context, MetadataKind, Symbol, TypeKind};
+
+/// Owned, process-free Swift mangling evidence.
+pub mod swift_evidence;
+
+/// Closed nominal kinds carried by an emitted Swift type-metadata symbol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SwiftNominalMetadataKind {
+    /// Class metadata.
+    Class,
+    /// Structure metadata.
+    Struct,
+    /// Enumeration metadata.
+    Enum,
+}
+
+/// Typed identity carried by an emitted Swift type-metadata symbol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwiftTypeMetadataIdentity {
+    /// Fully-qualified nominal type name.
+    pub name: String,
+    /// Nominal ABI kind.
+    pub kind: SwiftNominalMetadataKind,
+}
+
+/// Strict classification of one possible emitted Swift type-metadata symbol.
+///
+/// The parser's third-party syntax tree remains private to this crate. Callers
+/// receive only Macho-owned, forward-closed evidence and cannot accidentally
+/// couple policy code to parser implementation details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SwiftTypeMetadataSymbolEvidence {
+    /// The name is not an emitted type-metadata symbol.
+    NotTypeMetadata,
+    /// The name carries one supported, already-materialized nominal identity.
+    Metadata(SwiftTypeMetadataIdentity),
+    /// The symbol is structurally metadata, but its nominal kind is unsupported.
+    Unsupported {
+        /// Stable, non-sensitive rejection detail.
+        detail: String,
+    },
+    /// The name has the emitted-metadata shape but cannot be decoded.
+    Malformed {
+        /// Stable, non-sensitive rejection detail.
+        detail: String,
+    },
+}
 
 /// Cached demangler for symbol-heavy CLI output.
 #[derive(Debug, Default)]
@@ -86,6 +134,93 @@ pub fn demangle_cpp_symbol_without_return_type(name: &str) -> Option<String> {
 pub fn demangle_swift_symbol(name: &str) -> Option<String> {
     let candidate = swift_candidate(name)?;
     swift_demangler::demangle(candidate).or_else(|| demangle_legacy_swift_runtime_name(candidate))
+}
+
+/// Decode the typed identity of an emitted Swift type-metadata symbol.
+///
+/// This is intentionally narrower than display demangling: accessors,
+/// descriptors, protocols, functions, and unsupported future nominal kinds
+/// are not admitted as already-materialized type metadata.
+pub fn swift_type_metadata_identity(name: &str) -> Option<SwiftTypeMetadataIdentity> {
+    match classify_swift_type_metadata_symbol(name) {
+        SwiftTypeMetadataSymbolEvidence::Metadata(identity) => Some(identity),
+        SwiftTypeMetadataSymbolEvidence::NotTypeMetadata
+        | SwiftTypeMetadataSymbolEvidence::Unsupported { .. }
+        | SwiftTypeMetadataSymbolEvidence::Malformed { .. } => None,
+    }
+}
+
+/// Strictly classify an emitted Swift type-metadata symbol.
+///
+/// Only the `...N` value-metadata production is considered a candidate.
+/// Accessors (`...Ma`), descriptors (`...Mn`), functions, and unrelated Swift
+/// symbols are deliberately outside this evidence surface.
+pub fn classify_swift_type_metadata_symbol(name: &str) -> SwiftTypeMetadataSymbolEvidence {
+    let Some(candidate) = swift_candidate(name) else {
+        return SwiftTypeMetadataSymbolEvidence::NotTypeMetadata;
+    };
+    if !candidate.ends_with('N') {
+        return SwiftTypeMetadataSymbolEvidence::NotTypeMetadata;
+    }
+    let context = Context::new();
+    let Some(root) = Node::parse(&context, candidate) else {
+        return SwiftTypeMetadataSymbolEvidence::Malformed {
+            detail: "Swift emitted type-metadata mangling is malformed".into(),
+        };
+    };
+    let Some(symbol) = Symbol::from_node(root) else {
+        return SwiftTypeMetadataSymbolEvidence::Malformed {
+            detail: "Swift emitted type-metadata mangling has no typed symbol".into(),
+        };
+    };
+    let Symbol::Metadata(metadata) = symbol else {
+        return SwiftTypeMetadataSymbolEvidence::Malformed {
+            detail: "Swift emitted type-metadata mangling decoded as a different symbol kind"
+                .into(),
+        };
+    };
+    if metadata.kind() != MetadataKind::Type {
+        return SwiftTypeMetadataSymbolEvidence::Unsupported {
+            detail: "Swift emitted metadata is not type metadata".into(),
+        };
+    }
+    let Some(metadata_type) = metadata.metadata_type() else {
+        return SwiftTypeMetadataSymbolEvidence::Malformed {
+            detail: "Swift emitted type metadata has no metadata type".into(),
+        };
+    };
+    let TypeKind::Named(named) = metadata_type.kind() else {
+        return SwiftTypeMetadataSymbolEvidence::Unsupported {
+            detail: "Swift emitted type metadata is not a named nominal type".into(),
+        };
+    };
+    let kind = match named.raw().kind() {
+        NodeKind::Class => SwiftNominalMetadataKind::Class,
+        NodeKind::Structure => SwiftNominalMetadataKind::Struct,
+        NodeKind::Enum => SwiftNominalMetadataKind::Enum,
+        _ => {
+            return SwiftTypeMetadataSymbolEvidence::Unsupported {
+                detail: "Swift emitted type metadata has an unsupported nominal kind".into(),
+            };
+        }
+    };
+    let full_name = named.full_name();
+    let name = if full_name.starts_with('(') {
+        let Some(boundary) = full_name.find("):") else {
+            return SwiftTypeMetadataSymbolEvidence::Malformed {
+                detail: "Swift extension metadata identity has no declaration boundary".into(),
+            };
+        };
+        full_name[boundary + 2..].to_owned()
+    } else {
+        full_name
+    };
+    if name.is_empty() || name.chars().any(char::is_whitespace) {
+        return SwiftTypeMetadataSymbolEvidence::Malformed {
+            detail: "Swift emitted type metadata has an invalid qualified name".into(),
+        };
+    }
+    SwiftTypeMetadataSymbolEvidence::Metadata(SwiftTypeMetadataIdentity { name, kind })
 }
 
 fn demangle_legacy_swift_runtime_name(name: &str) -> Option<String> {
@@ -634,8 +769,9 @@ fn simplify_virtual_override_thunk(inner: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SymbolDemangler, demangle_swift_symbol, demangle_symbol, format_symbol,
-        simplify_cpp_demangled,
+        SwiftNominalMetadataKind, SwiftTypeMetadataSymbolEvidence, SymbolDemangler,
+        classify_swift_type_metadata_symbol, demangle_swift_symbol, demangle_symbol, format_symbol,
+        simplify_cpp_demangled, swift_type_metadata_identity,
     };
 
     #[test]
@@ -682,6 +818,30 @@ mod tests {
             demangle_swift_symbol("_$s4Demo6WidgetCMn").as_deref(),
             Some("nominal type descriptor for Demo.Widget")
         );
+    }
+
+    #[test]
+    fn retains_typed_swift_metadata_identity() {
+        let identity = swift_type_metadata_identity("_$s4Demo6WidgetVN")
+            .expect("expected emitted structure metadata");
+        assert_eq!(identity.name, "Demo.Widget");
+        assert_eq!(identity.kind, SwiftNominalMetadataKind::Struct);
+        assert!(swift_type_metadata_identity("_$s4Demo6WidgetVMa").is_none());
+        assert!(matches!(
+            classify_swift_type_metadata_symbol("_$s4Demo6WidgetVMa"),
+            SwiftTypeMetadataSymbolEvidence::NotTypeMetadata
+        ));
+        assert!(matches!(
+            classify_swift_type_metadata_symbol("_$s4Demo6WidgetVN"),
+            SwiftTypeMetadataSymbolEvidence::Metadata(_)
+        ));
+        assert!(matches!(
+            classify_swift_type_metadata_symbol("_$s4Demo6WidgetVxN"),
+            SwiftTypeMetadataSymbolEvidence::Malformed { .. }
+        ));
+        let extension = swift_type_metadata_identity("_$sSo8NSNumberC6plutilE15BetterSwiftTypeON")
+            .expect("expected metadata nested in an extension");
+        assert_eq!(extension.name, "__C.NSNumber.BetterSwiftType");
     }
 
     #[test]

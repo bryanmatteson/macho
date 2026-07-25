@@ -1807,7 +1807,7 @@ dependencies = [
 
 [[package]]
 name = "macho-codesign"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "thiserror 2.0.18",
@@ -1815,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "macho-core"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "bitflags 2.13.1",
  "zerocopy",
@@ -1823,15 +1823,16 @@ dependencies = [
 
 [[package]]
 name = "macho-dyld"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
+ "serde",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "macho-dyld-cache"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "macho-core",
  "macho-dyld",
@@ -1853,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "macho-insn"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "bad64",
  "iced-x86",
@@ -1861,17 +1862,19 @@ dependencies = [
 
 [[package]]
 name = "macho-mutate"
-version = "0.2.0"
+version = "0.4.0"
 dependencies = [
  "apple-codesign",
+ "bytes",
  "macho-codesign",
  "macho-core",
- "macho-dyld",
- "macho-insn",
  "serde",
+ "sha2",
+ "signature",
  "thiserror 2.0.18",
  "x509-certificate",
  "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

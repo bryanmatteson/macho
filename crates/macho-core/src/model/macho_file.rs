@@ -141,6 +141,17 @@ impl<'data> MachoFile<'data> {
         self.load_commands.iter().find(|lc| pred(&lc.kind))
     }
 
+    /// Return the exact numeric command word retained in the input.
+    pub fn load_command_code(&self, command: &ParsedLoadCommand) -> Result<u32> {
+        let start = command.file_offset().as_usize();
+        let raw: [u8; 4] = self
+            .bytes
+            .get(start..start.saturating_add(4))
+            .and_then(|bytes| bytes.try_into().ok())
+            .ok_or_else(|| Error::bounds(start as u64, 4, self.bytes.len() as u64))?;
+        Ok(self.endian.read_u32(raw))
+    }
+
     /// Performs address_map.
     pub fn address_map(&self) -> &AddressMap {
         &self.derived().address_map

@@ -23,8 +23,8 @@ pub(crate) mod names;
 /// The relocation module.
 pub mod relocation;
 
-pub use container::{FatArch, FatBinary, MachoContainer};
-pub use header::{Bitness, CpuSubtype, CpuType, FileType, MachoHeader, MagicNumber};
+pub use container::{FatArch, FatBinary, MachoContainer, SelectedImage, SelectionKey};
+pub use header::{ArchSpec, Bitness, CpuSubtype, CpuType, FileType, MachoHeader, MagicNumber};
 pub use load_command::{LoadCommand, ParsedLoadCommand};
 pub use macho_file::MachoFile;
 pub use section::{Section, SectionType};

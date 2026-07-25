@@ -24,6 +24,8 @@ pub use macho_dwarf as dwarf;
 pub use macho_dyld as dyld;
 #[cfg(feature = "dyld-cache")]
 pub use macho_dyld_cache as dyld_cache;
+#[cfg(feature = "metadata")]
+pub use macho_evidence as evidence;
 #[cfg(feature = "header-infer")]
 pub use macho_header_infer as header_infer;
 #[cfg(feature = "metadata")]
@@ -50,6 +52,7 @@ pub mod metadata {
     pub use macho_analysis::image;
     pub use macho_codesign as codesign;
     pub use macho_dyld as dyld;
+    pub use macho_evidence as evidence;
     pub use macho_objc as objc;
     pub use macho_swift as swift;
 }

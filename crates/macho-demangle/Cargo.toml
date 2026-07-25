@@ -12,4 +12,5 @@ readme = "README.md"
 [dependencies]
 cpp_demangle.workspace = true
 rustc-demangle.workspace = true
+sha2.workspace = true
 swift-demangler.workspace = true

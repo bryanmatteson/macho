@@ -79,6 +79,8 @@ pub enum ObjCRelativeSelectorEncoding {
 /// One parsed Objective-C method record with exact storage provenance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjCMethodRecord {
+    /// Runtime address of the owning class, metaclass, or category record.
+    pub owner_va: Va,
     /// Owning class name.
     pub class_name: String,
     /// Owning category name, when the method comes from a category.
@@ -257,7 +259,9 @@ fn fold_class<State>(
         checked_field_offset(class_offset, 32, "class data")?,
         "class data",
     )?;
-    let ro_offset = resolver.va_to_offset(Va(data_va.0 & !1))?.0;
+    let ro_offset = resolver
+        .va_to_offset(Va(data_va.0 & crate::types::CLASS_DATA_POINTER_MASK))?
+        .0;
     let _: RawClassRoT64 = pod::read_pod(resolver.macho().bytes(), ro_offset as usize)?;
     let class_name = required_cstring_pointer(
         resolver,
@@ -268,6 +272,7 @@ fn fold_class<State>(
     fold_optional_method_list(
         resolver,
         checked_field_offset(ro_offset, 32, "class methods")?,
+        class_va,
         &class_name,
         None,
         ObjCMethodKind::Instance,
@@ -281,11 +286,14 @@ fn fold_class<State>(
             checked_field_offset(meta_offset, 32, "metaclass data")?,
             "metaclass data",
         )?;
-        let meta_ro_offset = resolver.va_to_offset(Va(meta_data.0 & !1))?.0;
+        let meta_ro_offset = resolver
+            .va_to_offset(Va(meta_data.0 & crate::types::CLASS_DATA_POINTER_MASK))?
+            .0;
         let _: RawClassRoT64 = pod::read_pod(resolver.macho().bytes(), meta_ro_offset as usize)?;
         fold_optional_method_list(
             resolver,
             checked_field_offset(meta_ro_offset, 32, "metaclass methods")?,
+            meta_va,
             &class_name,
             None,
             ObjCMethodKind::Class,
@@ -309,6 +317,7 @@ fn fold_category<State>(
     fold_optional_method_list(
         resolver,
         checked_field_offset(offset, 16, "category instance methods")?,
+        category_va,
         &class_name,
         Some(&category_name),
         ObjCMethodKind::Instance,
@@ -318,6 +327,7 @@ fn fold_category<State>(
     fold_optional_method_list(
         resolver,
         checked_field_offset(offset, 24, "category class methods")?,
+        category_va,
         &class_name,
         Some(&category_name),
         ObjCMethodKind::Class,
@@ -330,6 +340,7 @@ fn fold_category<State>(
 fn fold_optional_method_list<State>(
     resolver: &ObjCResolver<'_>,
     pointer_offset: u64,
+    owner_va: Va,
     class_name: &str,
     category_name: Option<&str>,
     kind: ObjCMethodKind,
@@ -346,6 +357,7 @@ fn fold_optional_method_list<State>(
         folder(
             state,
             ObjCMethodRecord {
+                owner_va,
                 class_name: class_name.to_owned(),
                 category_name: category_name.map(str::to_owned),
                 method_name: record.method_name,
@@ -548,7 +560,9 @@ fn strict_class_ref_name(resolver: &ObjCResolver<'_>, pointer_offset: u64) -> Re
         checked_field_offset(class_offset, 32, "category class data")?,
         "category class data",
     )?;
-    let ro_offset = resolver.va_to_offset(Va(data_va.0 & !1))?.0;
+    let ro_offset = resolver
+        .va_to_offset(Va(data_va.0 & crate::types::CLASS_DATA_POINTER_MASK))?
+        .0;
     required_cstring_pointer(
         resolver,
         checked_field_offset(ro_offset, 24, "category class name")?,

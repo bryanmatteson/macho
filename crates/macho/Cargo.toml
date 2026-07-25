@@ -15,7 +15,7 @@ default = ["analysis"]
 metadata = [
   "dep:macho-symbols", "dep:macho-dyld", "dep:macho-codesign",
   "dep:macho-dwarf", "dep:macho-objc", "dep:macho-swift", "dep:macho-cpp",
-  "dep:macho-header-syntax",
+  "dep:macho-evidence", "dep:macho-header-syntax",
 ]
 analysis = ["metadata", "dep:macho-insn", "dep:macho-analysis"]
 mutation = [
@@ -36,7 +36,8 @@ macho-codesign = { workspace = true, optional = true }
 macho-dwarf = { workspace = true, optional = true }
 macho-objc = { workspace = true, optional = true }
 macho-swift = { workspace = true, optional = true }
-macho-cpp = { workspace = true, optional = true }
+macho-cpp = { workspace = true, optional = true, features = ["abi", "fixups", "itanium-rtti"] }
+macho-evidence = { workspace = true, optional = true }
 macho-analysis = { workspace = true, optional = true }
 macho-mutate = { workspace = true, optional = true }
 macho-patch = { workspace = true, optional = true }

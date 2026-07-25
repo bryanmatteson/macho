@@ -11,12 +11,14 @@ readme = "README.md"
 
 [features]
 default = []
-strict-rtti = []
+strict-rtti = ["dep:macho-dyld"]
 
 [dependencies]
 macho-core.workspace = true
 macho-demangle.workspace = true
+macho-dyld = { workspace = true, optional = true }
 serde.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

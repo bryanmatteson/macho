@@ -95,6 +95,13 @@ Core parsing is always available. Feature-selected metadata, analysis,
 mutation, workflow, dyld-cache, and header-inference APIs are reexported by the
 `macho` façade; narrow consumers can depend on leaf crates directly.
 
+External transformation engines can admit one immutable selected image through
+`macho::evidence::SelectedImageEvidence` and consume strict language evidence
+without taking on Macho's report, workflow, mutation, or CLI policy. Swift ABI
+parsers and their syntax trees remain private to Macho leaves; external engines
+receive bounded, conserved Macho-owned evidence and own only their downstream
+semantic projection.
+
 ```rust
 let bytes = std::fs::read("/usr/bin/true")?;
 let container = macho::parse(&bytes)?;
@@ -150,3 +157,5 @@ documents use schema version 3 and preserve `not_requested`, `complete`,
 
 See [CHANGELOG.md](CHANGELOG.md) for release history and
 [docs/diagnostic-codes.md](docs/diagnostic-codes.md) for stable machine codes.
+
+Macho is licensed under Apache-2.0.

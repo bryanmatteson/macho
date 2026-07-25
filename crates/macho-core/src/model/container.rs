@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ops::Range;
 
 use crate::error::{Error, Result};
 use crate::model::addr::{FatFileOffset, ThinFileOffset};
@@ -239,6 +240,26 @@ pub enum MachoContainer<'data> {
     Fat(FatBinary<'data>),
 }
 
+/// Stable identity for exactly one image in a thin or universal container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectionKey {
+    /// Zero-based member index. Thin images always use index zero.
+    pub container_index: usize,
+    /// Exact CPU type and masked subtype expected at that index.
+    pub architecture: ArchSpec,
+}
+
+/// One image selected from a validated container together with its byte range.
+#[derive(Debug, Clone)]
+pub struct SelectedImage<'container, 'data> {
+    /// Exact identity used for selection.
+    pub key: SelectionKey,
+    /// Container-relative byte range occupied by the selected image.
+    pub container_range: Range<u64>,
+    /// Parsed image borrowed from the validated container.
+    pub image: &'container MachoFile<'data>,
+}
+
 impl<'data> MachoContainer<'data> {
     /// Complete bytes of the original thin or universal Mach-O input.
     pub fn bytes(&self) -> &'data [u8] {
@@ -306,6 +327,54 @@ impl<'data> MachoContainer<'data> {
                 .map(FatArch::macho),
         }
     }
+
+    /// Select exactly one image by table index and architecture.
+    ///
+    /// This is the canonical selection boundary for consumers that retain an
+    /// image identity across parse, inspection, and mutation. Both fields are
+    /// checked so a stale index cannot silently retarget after container drift.
+    pub fn select_exact(&self, key: SelectionKey) -> Result<SelectedImage<'_, 'data>> {
+        let (image, start, size) = match self {
+            Self::Thin(image) if key.container_index == 0 => (image, 0, image.file_size() as u64),
+            Self::Thin(_) => {
+                return Err(Error::address(format!(
+                    "thin Mach-O has no member at index {}",
+                    key.container_index
+                )));
+            }
+            Self::Fat(fat) => {
+                let arch = fat.arches.get(key.container_index).ok_or_else(|| {
+                    Error::address(format!(
+                        "fat Mach-O has no member at index {}",
+                        key.container_index
+                    ))
+                })?;
+                (arch.macho(), arch.fat_offset.0, arch.size)
+            }
+        };
+        let actual = ArchSpec {
+            cpu_type: image.header().cpu_type(),
+            cpu_subtype: image.header().cpu_subtype(),
+        };
+        if actual.cpu_type != key.architecture.cpu_type
+            || actual.cpu_subtype.masked() != key.architecture.cpu_subtype.masked()
+        {
+            return Err(Error::validation(format!(
+                "Mach-O member {} is {}, not {}",
+                key.container_index,
+                actual.name(),
+                key.architecture.name()
+            )));
+        }
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| Error::address("selected Mach-O range overflows"))?;
+        Ok(SelectedImage {
+            key,
+            container_range: start..end,
+            image,
+        })
+    }
 }
 
 /// Zero-allocation iterator over images in a [`MachoContainer`].
@@ -362,5 +431,51 @@ impl std::fmt::Debug for MachoContainer<'_> {
             Self::Thin(macho) => formatter.debug_tuple("Thin").field(macho).finish(),
             Self::Fat(fat) => formatter.debug_tuple("Fat").field(fat).finish(),
         }
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use crate::format::parse;
+
+    fn thin64() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 32];
+        bytes[0..4].copy_from_slice(&0xfeed_facfu32.to_le_bytes());
+        bytes[4..8].copy_from_slice(&0x0100_0007i32.to_le_bytes());
+        bytes[8..12].copy_from_slice(&3_i32.to_le_bytes());
+        bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn exact_selection_rejects_stale_identity() {
+        let bytes = thin64();
+        let container = parse(&bytes).expect("thin fixture");
+        let key = SelectionKey {
+            container_index: 0,
+            architecture: ArchSpec {
+                cpu_type: CpuType(0x0100_0007),
+                cpu_subtype: CpuSubtype(3),
+            },
+        };
+        assert_eq!(
+            container
+                .select_exact(key)
+                .expect("selection")
+                .container_range,
+            0..32
+        );
+        assert!(
+            container
+                .select_exact(SelectionKey {
+                    architecture: ArchSpec {
+                        cpu_type: CpuType(0x0100_000c),
+                        cpu_subtype: CpuSubtype(0),
+                    },
+                    ..key
+                })
+                .is_err()
+        );
     }
 }

@@ -1,0 +1,16 @@
+[package]
+name = "macho-evidence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Policy-free selected-image evidence composition for Mach-O"
+
+[dependencies]
+macho-core.workspace = true
+macho-cpp = { workspace = true, features = ["fixups", "itanium-rtti"] }
+macho-dyld.workspace = true
+macho-objc = { workspace = true, features = ["strict-rtti"] }
+macho-swift = { workspace = true, features = ["strict-rtti"] }

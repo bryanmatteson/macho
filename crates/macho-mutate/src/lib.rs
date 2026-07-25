@@ -7,6 +7,10 @@ pub use macho_core::{format, model};
 pub mod error;
 pub(crate) use error::Error;
 pub use error::{MutationError, MutationErrorKind, MutationOperation, Result};
+mod container;
+pub use container::{
+    ContainerEditResult, ContainerMemberResult, ContainerTarget, transform_container,
+};
 
 /// The metadata module.
 pub mod metadata {

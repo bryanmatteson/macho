@@ -12,6 +12,7 @@ pub fn check(root: &Path) -> Result<()> {
         .no_deps()
         .exec()
         .context("cargo metadata failed")?;
+    check_license_contract(root, &metadata)?;
     let workspace_versions: BTreeSet<_> = metadata
         .packages
         .iter()
@@ -44,33 +45,87 @@ pub fn check(root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn check_license_contract(root: &Path, metadata: &cargo_metadata::Metadata) -> Result<()> {
+    anyhow::ensure!(root.join("LICENSE").is_file(), "root LICENSE is absent");
+    for package in metadata
+        .packages
+        .iter()
+        .filter(|package| metadata.workspace_members.contains(&package.id))
+    {
+        validate_license_declaration(
+            &package.name,
+            package.license.as_deref(),
+            package.license_file.is_some(),
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_license_declaration(
+    package: &str,
+    license: Option<&str>,
+    has_license_file: bool,
+) -> Result<()> {
+    if license != Some("Apache-2.0") {
+        bail!("workspace package {package} license is not Apache-2.0");
+    }
+    if has_license_file {
+        bail!("workspace package {package} declares redundant license-file");
+    }
+    Ok(())
+}
+
 fn check_lockfile(root: &Path, version: &str) -> Result<()> {
-    let lock = fs::read_to_string(root.join("Cargo.lock")).context("read Cargo.lock")?;
-    for name in [
-        "macho-core",
-        "macho-insn",
-        "macho-dyld",
-        "macho-demangle",
-        "macho-symbols",
-        "macho-codesign",
-        "macho-dwarf",
-        "macho-objc",
-        "macho-swift",
-        "macho-cpp",
-        "macho-analysis",
-        "macho-mutate",
-        "macho-patch",
-        "macho-dyld-cache",
-        "macho-header-infer",
-        "macho-workflow",
-        "macho",
-        "macho-cli",
-        "macho-test-support",
-        "xtask",
-    ] {
+    check_lockfile_packages(
+        &root.join("Cargo.lock"),
+        version,
+        &[
+            "macho-core",
+            "macho-insn",
+            "macho-dyld",
+            "macho-evidence",
+            "macho-demangle",
+            "macho-symbols",
+            "macho-codesign",
+            "macho-dwarf",
+            "macho-objc",
+            "macho-swift",
+            "macho-cpp",
+            "macho-analysis",
+            "macho-mutate",
+            "macho-patch",
+            "macho-dyld-cache",
+            "macho-header-infer",
+            "macho-workflow",
+            "macho",
+            "macho-cli",
+            "macho-test-support",
+            "xtask",
+        ],
+    )?;
+    check_lockfile_packages(
+        &root.join("fuzz/Cargo.lock"),
+        version,
+        &[
+            "macho-codesign",
+            "macho-core",
+            "macho-dyld",
+            "macho-dyld-cache",
+            "macho-insn",
+            "macho-mutate",
+        ],
+    )
+}
+
+fn check_lockfile_packages(path: &Path, version: &str, names: &[&str]) -> Result<()> {
+    let lock = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    for name in names {
         let package = format!("name = \"{name}\"\nversion = \"{version}\"");
         if !lock.contains(&package) {
-            bail!("Cargo.lock does not contain {name} at workspace version {version}");
+            bail!(
+                "{} does not contain {name} at workspace version {version}",
+                path.display()
+            );
         }
     }
     Ok(())
@@ -123,5 +178,27 @@ mod tests {
     #[test]
     fn mismatched_tag_is_rejected() {
         assert!(validate_tag("v0.1.3", "0.2.0").is_err());
+    }
+
+    #[test]
+    fn non_apache_license_is_rejected() {
+        assert!(validate_license_declaration("fixture", Some("MIT"), true).is_err());
+    }
+
+    #[test]
+    fn redundant_license_file_is_rejected() {
+        assert!(validate_license_declaration("fixture", Some("Apache-2.0"), true).is_err());
+    }
+
+    #[test]
+    fn stale_auxiliary_lockfile_is_rejected() {
+        let temporary = tempfile::tempdir().unwrap();
+        let lock = temporary.path().join("Cargo.lock");
+        fs::write(
+            &lock,
+            "[[package]]\nname = \"macho-core\"\nversion = \"0.2.0\"\n",
+        )
+        .unwrap();
+        assert!(check_lockfile_packages(&lock, "0.4.0", &["macho-core"]).is_err());
     }
 }
