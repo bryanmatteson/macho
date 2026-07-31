@@ -40,6 +40,22 @@ enum ObjCPresenceArg {
     Partial,
 }
 
+impl ObjCFilterArgs {
+    /// Whether the caller narrowed the selection.
+    ///
+    /// This is the question a listing actually needs, so it is answered from the
+    /// arguments rather than inferred by comparing a selected count against a
+    /// total, which cannot distinguish "no filter" from "a filter that retained
+    /// everything".
+    pub(super) fn is_active(&self) -> bool {
+        self.class.is_some()
+            || self.name.is_some()
+            || !self.kinds.is_empty()
+            || !self.presences.is_empty()
+            || !self.selectors.is_empty()
+    }
+}
+
 pub(super) fn apply_filters(report: &mut ObjCReport, filters: &ObjCFilterArgs) {
     for slice in report.slices.as_mut_slice() {
         let entities = &slice.entities;

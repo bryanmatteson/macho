@@ -1,7 +1,8 @@
 use crate::analysis::deps::compat::{CompatReport, CompatSeverity};
 use crate::analysis::deps::graph::{DepGraph, ImportProvider};
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::output::layout;
+use crate::commands::output::{Options as OutputOptions, Style};
 use crate::commands::subcommands::common::map_input;
 use crate::model::container::MachoContainer;
 use crate::model::macho_file::MachoFile;
@@ -286,19 +287,19 @@ fn linked_dylib_lines(graph: &DepGraph, style: Style) -> Vec<String> {
         .iter()
         .map(|dylib| {
             vec![
-                style.muted(&format!("  {:>ordinal_width$}", dylib.ordinal)),
-                style.info(&dylib.name),
-                style.enum_value(&dylib.kind.to_string()),
-                style.property("compat", &dylib.compat_version),
-                style.property("current", &dylib.current_version),
-                style.property(
+                style.muted_cell(&format!("  {:>ordinal_width$}", dylib.ordinal)),
+                style.info_cell(&dylib.name),
+                style.enum_value_cell(&dylib.kind.to_string()),
+                style.property_cell("compat", &dylib.compat_version),
+                style.property_cell("current", &dylib.current_version),
+                style.property_cell(
                     "imports",
                     &graph.imports_from(dylib.ordinal).len().to_string(),
                 ),
             ]
         })
         .collect::<Vec<_>>();
-    columns::align(&rows)
+    layout::align(&rows, style)
 }
 
 #[cfg(test)]

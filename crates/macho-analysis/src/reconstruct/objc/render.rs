@@ -24,9 +24,13 @@ pub fn render_class_header(class: &ObjCClass) -> String {
                 .parsed_type()
                 .map(|ty| ty.render_named(&ivar.name))
                 .unwrap_or_else(|| format!("id {}", ivar.name));
+            let offset = ivar
+                .offset
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "?".to_owned());
             out.push_str(&format!(
                 "    {ty}; // +{off}, {sz} bytes\n",
-                off = ivar.offset,
+                off = offset,
                 sz = ivar.size
             ));
         }
@@ -341,8 +345,8 @@ mod tests {
             class_methods: Vec::new(),
             ivars: vec![ObjCIvar {
                 name: "_title".into(),
-                type_encoding: "@\"NSString\"".into(),
-                offset: 8,
+                type_encoding: Some("@\"NSString\"".to_owned()),
+                offset: Some(8),
                 size: 8,
                 alignment: 3,
             }],

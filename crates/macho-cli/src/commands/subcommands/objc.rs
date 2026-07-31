@@ -16,7 +16,8 @@ use macho::core::model::symbol::{SymbolTable, SymbolType};
 use serde::Serialize;
 
 use crate::commands::args::{ArchitectureArgs, InputArgs, OptionalInputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns, objc};
+use crate::commands::output::layout::{self, Cell};
+use crate::commands::output::{Options as OutputOptions, Style, objc};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
@@ -147,23 +148,48 @@ fn run_surface(
                     .header
                     .as_ref()
                     .expect("header projection requested for every selected slice");
-                out.write_all(objc::render_header(output.style(), &header.source).as_bytes())?;
-                if !header.unresolved.is_empty() {
+                if header.declarations.is_empty() {
+                    // An image with no projectable Objective-C metadata renders
+                    // as empty source. Emitting nothing would be
+                    // indistinguishable from the command failing, so the empty
+                    // result is stated as a comment the output can still carry.
                     writeln!(
                         out,
-                        "/* {} declaration(s) omitted; inspect --format json for the unresolved ledger. */",
-                        header.unresolved.len()
+                        "/* No Objective-C declarations projected for {}. */",
+                        architecture_name(slice)
+                    )?;
+                    continue;
+                }
+                out.write_all(objc::render_header(output.style(), &header.source).as_bytes())?;
+                if !header.unresolved.is_empty() {
+                    // The ledger records member gaps as well as whole
+                    // declarations, so report the two separately rather than
+                    // calling every entry a dropped declaration.
+                    let declarations = header
+                        .unresolved
+                        .iter()
+                        .filter(|gap| gap.member_id.is_none())
+                        .count();
+                    let members = header.unresolved.len() - declarations;
+                    writeln!(
+                        out,
+                        "/* {declarations} declaration(s) and {members} member(s) omitted; inspect --format json for the unresolved ledger. */"
                     )?;
                 }
             }
         }
-        OutputFormat::Text => print_surface(&report, output.style(), out),
+        OutputFormat::Text => print_surface(&report, filters.is_active(), output.style(), out),
         OutputFormat::Sarif => unreachable!("rejected above"),
     }
     Ok(())
 }
 
-fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
+fn print_surface(
+    report: &ObjCReport,
+    selection_is_filtered: bool,
+    style: Style,
+    out: &mut dyn Write,
+) {
     let _ = writeln!(out, "{}", style.title("Objective-C runtime recovery"));
     for slice in report.slices.as_slice() {
         let selected = slice
@@ -203,10 +229,8 @@ fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
                 .iter()
                 .map(|entity| entity_row(entity, style))
                 .collect::<Vec<_>>();
-            for row in columns::align(&rows) {
+            for (entity, row) in entities.into_iter().zip(layout::align(&rows, style)) {
                 let _ = writeln!(out, "    {row}");
-            }
-            for entity in entities {
                 print_members(entity, style, out);
             }
         }
@@ -218,6 +242,17 @@ fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
             );
         }
         for diagnostic in &slice.diagnostics {
+            // A filtered listing drops the diagnostics belonging to entities the
+            // caller excluded. A diagnostic with no entity describes a record
+            // that never decoded into one, so it belongs to the image rather
+            // than to any selection and a filter cannot make it irrelevant.
+            let diagnostic_is_selected = match &diagnostic.entity_id {
+                None => true,
+                Some(entity_id) => selected.contains(entity_id.as_str()),
+            };
+            if selection_is_filtered && !diagnostic_is_selected {
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "  {}  {}",
@@ -228,7 +263,7 @@ fn print_surface(report: &ObjCReport, style: Style, out: &mut dyn Write) {
     }
 }
 
-fn entity_row(entity: &ObjCEntity, style: Style) -> Vec<String> {
+fn entity_row(entity: &ObjCEntity, style: Style) -> Vec<Cell> {
     let common = entity.common();
     let name = known(&common.name)
         .map(|name| macho::symbols::demangle::demangle_swift_symbol(name).unwrap_or(name.clone()))
@@ -263,30 +298,23 @@ fn entity_row(entity: &ObjCEntity, style: Style) -> Vec<String> {
         ),
     };
     vec![
-        style.enum_value(kind),
-        style.accent(&name),
-        style.enum_property("presence", presence_name(common.presence)),
-        style.property("members", &members.to_string()),
+        style.enum_value_cell(kind),
+        style.accent_cell(&name),
+        style.enum_property_cell("presence", presence_name(common.presence)),
+        style.property_cell("members", &members.to_string()),
         detail
             .split_once('=')
-            .map(|(key, value)| style.property(key, value))
-            .unwrap_or_else(|| style.muted(&detail)),
-        style.muted(&format!("id={}", &common.id.as_str()[..12])),
+            .map(|(key, value)| style.property_cell(key, value))
+            .unwrap_or_else(|| style.muted_cell(&detail)),
+        style.muted_cell(&format!("id={}", &common.id.as_str()[..12])),
     ]
 }
 
 fn print_members(entity: &ObjCEntity, style: Style, out: &mut dyn Write) {
-    let mut rows = Vec::new();
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
     match entity {
         ObjCEntity::Class(value) => {
-            rows.extend(value.ivars.iter().map(|ivar| {
-                vec![
-                    style.enum_value("ivar"),
-                    style.accent(known(&ivar.name).map_or("<unknown>", String::as_str)),
-                    style.property("offset", &value_u64(&ivar.offset)),
-                    style.enum_property("type", value_state(&ivar.parsed_type)),
-                ]
-            }));
+            rows.extend(value.ivars.iter().map(|value| ivar_row(value, style)));
             rows.extend(
                 value
                     .properties
@@ -349,12 +377,12 @@ fn print_members(entity: &ObjCEntity, style: Style, out: &mut dyn Write) {
             );
         }
     }
-    for row in columns::align(&rows) {
+    for row in layout::align(&rows, style) {
         let _ = writeln!(out, "      {row}");
     }
 }
 
-fn method_row(value: &ObjCMethod, style: Style) -> Vec<String> {
+fn method_row(value: &ObjCMethod, style: Style) -> Vec<Cell> {
     let selector = known(&value.selector)
         .map(|value| value.spelling.as_str())
         .unwrap_or("<unknown>");
@@ -363,22 +391,56 @@ fn method_row(value: &ObjCMethod, style: Style) -> Vec<String> {
         .map(|value| format!("0x{:016x}", value.virtual_address))
         .unwrap_or_else(|| "-".to_owned());
     vec![
-        style.enum_value(match value.kind {
+        style.enum_value_cell(match value.kind {
             ObjCMethodKind::Instance => "method -",
             ObjCMethodKind::Class => "method +",
         }),
-        style.accent(selector),
-        style.enum_property("signature", value_state(&value.signature)),
-        style.property("imp", &implementation),
+        style.accent_cell(selector),
+        display_cell(
+            value_display(&value.signature, method_signature_text),
+            style,
+        ),
+        style.property_cell("imp", &implementation),
     ]
 }
 
-fn property_row(value: &macho::analysis::report::ObjCProperty, style: Style) -> Vec<String> {
+fn property_row(value: &macho::analysis::report::ObjCProperty, style: Style) -> Vec<Cell> {
     vec![
-        style.enum_value("property"),
-        style.accent(known(&value.name).map_or("<unknown>", String::as_str)),
-        style.enum_property("attributes", value_state(&value.parsed_attributes)),
+        style.enum_value_cell("property"),
+        style.accent_cell(known(&value.name).map_or("<unknown>", String::as_str)),
+        display_cell(
+            value_display(&value.parsed_attributes, |value| {
+                encoded_type_text(&value.r#type)
+            }),
+            style,
+        ),
+        display_cell(
+            value_display(&value.parsed_attributes, property_attributes_text),
+            style,
+        ),
     ]
+}
+
+fn ivar_row(value: &macho::analysis::report::ObjCIvar, style: Style) -> Vec<Cell> {
+    vec![
+        style.enum_value_cell("ivar"),
+        style.accent_cell(known(&value.name).map_or("<unknown>", String::as_str)),
+        display_cell(value_display(&value.parsed_type, encoded_type_text), style),
+        layout::join_cells([
+            style.property_cell("offset", &value_u64(&value.offset)),
+            layout::plain_cell("  "),
+            style.property_cell("size", &value_u64(&value.size)),
+        ]),
+    ]
+}
+
+/// Style a prepared value, keeping absent values visually distinct from
+/// recovered ones.
+fn display_cell(value: ValueDisplay, style: Style) -> Cell {
+    match value {
+        ValueDisplay::Known(text) => style.accent_cell(&text),
+        ValueDisplay::Absent(text) => style.muted_cell(&text),
+    }
 }
 
 fn run_graph(
@@ -560,20 +622,20 @@ fn run_selectors(
         .iter()
         .map(|view| {
             vec![
-                output.style().enum_value(&view.method_kind),
-                output.style().accent(&view.selector),
-                output.style().property(
+                output.style().enum_value_cell(&view.method_kind),
+                output.style().accent_cell(&view.selector),
+                output.style().property_cell(
                     "owner",
                     view.effective_owner.as_deref().unwrap_or("ambiguous"),
                 ),
                 output
                     .style()
-                    .property("candidates", &view.candidates.len().to_string()),
-                output.style().enum_property("arch", &view.arch),
+                    .property_cell("candidates", &view.candidates.len().to_string()),
+                output.style().enum_property_cell("arch", &view.arch),
             ]
         })
         .collect::<Vec<_>>();
-    for row in columns::align(&rows) {
+    for row in layout::align(&rows, output.style()) {
         writeln!(out, "  {row}")?;
     }
     for view in &views {
@@ -682,22 +744,24 @@ fn run_xrefs(
         .iter()
         .map(|view| {
             vec![
-                output.style().enum_value(&view.status),
-                output.style().enum_value(&view.method_kind),
+                output.style().enum_value_cell(&view.status),
+                output.style().enum_value_cell(&view.method_kind),
                 output
                     .style()
-                    .accent(&format!("[{} {}]", view.origin, view.selector)),
+                    .accent_cell(&format!("[{} {}]", view.origin, view.selector)),
                 output
                     .style()
-                    .address(&format!("0x{:016x}", view.implementation)),
-                output.style().property("symbols", &view.symbols.join(",")),
+                    .address_cell(&format!("0x{:016x}", view.implementation)),
                 output
                     .style()
-                    .property("callers", &view.references.len().to_string()),
+                    .property_cell("symbols", &view.symbols.join(",")),
+                output
+                    .style()
+                    .property_cell("callers", &view.references.len().to_string()),
             ]
         })
         .collect::<Vec<_>>();
-    for row in columns::align(&rows) {
+    for row in layout::align(&rows, output.style()) {
         writeln!(out, "  {row}")?;
     }
     Ok(())

@@ -20,6 +20,12 @@ const MAX_FIELD_RECORDS: usize = 1_000_000;
 const MAX_ASSOCIATED_TYPE_RECORDS: usize = 1_000_000;
 const FIELD_DESCRIPTOR_HEADER_SIZE: u64 = 16;
 const MIN_FIELD_RECORD_SIZE: usize = 12;
+/// Offset of a class descriptor's superclass type reference.
+///
+/// Every type context descriptor opens with flags, parent, name, access
+/// function, and field descriptor, each a 4-byte field, so a class descriptor's
+/// first kind-specific field begins at 20.
+const SUPERCLASS_TYPE_OFFSET: u64 = 20;
 
 pub(crate) fn discover(macho: &MachoFile<'_>, demangler: &dyn SwiftDemangler) -> Vec<SwiftType> {
     let mut types = discover_section(macho, "__swift5_types", None, demangler);
@@ -251,8 +257,38 @@ fn parse_type_descriptor(
         metadata_address: None,
         source: SwiftTypeSource::SwiftMetadata,
         confidence: SwiftTypeConfidence::High,
-        fields: parse_fields(macho, descriptor, demangler),
+        fields: kind_has_nominal_field_descriptor(kind)
+            .then(|| parse_fields(macho, descriptor, demangler))
+            .flatten(),
+        superclass: (kind == SwiftTypeKind::Class)
+            .then(|| parse_superclass(macho, descriptor, demangler))
+            .flatten(),
     })
+}
+
+fn kind_has_nominal_field_descriptor(kind: SwiftTypeKind) -> bool {
+    matches!(
+        kind,
+        SwiftTypeKind::Class | SwiftTypeKind::Struct | SwiftTypeKind::Enum
+    )
+}
+
+/// Resolve a class descriptor's superclass type reference.
+///
+/// The reference is a signed 32-bit relative pointer to a mangled type name,
+/// and it only exists on a class descriptor: the field sits immediately after
+/// the shared prefix (flags, parent, name, access function, fields), so it is at
+/// `descriptor + SUPERCLASS_TYPE_OFFSET`. A null reference means the class is a
+/// root class and carries no superclass, which is not an error.
+fn parse_superclass(
+    macho: &MachoFile<'_>,
+    descriptor: Va,
+    demangler: &dyn SwiftDemangler,
+) -> Option<String> {
+    let field = add_unsigned(descriptor, SUPERCLASS_TYPE_OFFSET)?;
+    let relative = read_i32(macho, field).filter(|relative| *relative != 0)?;
+    let reference = add_signed(field, relative)?;
+    resolve_mangled_nominal(macho, reference, demangler)
 }
 
 fn parse_fields(
@@ -520,7 +556,7 @@ fn add_signed(address: Va, offset: i32) -> Option<Va> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Va, add_signed, swift_type_kind};
+    use super::{Va, add_signed, kind_has_nominal_field_descriptor, swift_type_kind};
     use crate::types::SwiftTypeKind;
 
     #[test]
@@ -537,5 +573,30 @@ mod tests {
         assert_eq!(add_signed(Va(0x1000), 0x20), Some(Va(0x1020)));
         assert_eq!(add_signed(Va(0x1000), -0x20), Some(Va(0x0fe0)));
         assert_eq!(add_signed(Va(0), -1), None);
+    }
+
+    #[test]
+    fn only_nominal_types_admit_field_descriptors() {
+        assert!(kind_has_nominal_field_descriptor(SwiftTypeKind::Class));
+        assert!(kind_has_nominal_field_descriptor(SwiftTypeKind::Struct));
+        assert!(kind_has_nominal_field_descriptor(SwiftTypeKind::Enum));
+        assert!(!kind_has_nominal_field_descriptor(SwiftTypeKind::Protocol));
+        assert!(!kind_has_nominal_field_descriptor(SwiftTypeKind::Unknown));
+    }
+
+    #[test]
+    fn the_superclass_reference_follows_the_shared_descriptor_prefix() {
+        // Flags, parent, name, access function, and field descriptor are each a
+        // 4-byte field shared by every type context descriptor, so a class
+        // descriptor's superclass reference is the first word after them. A
+        // struct or enum stores its own count there instead, which is why
+        // `parse_superclass` is reached only for a class: reading this offset
+        // unconditionally reports a field count as a superclass name.
+        assert_eq!(super::SUPERCLASS_TYPE_OFFSET, 20);
+        assert_eq!(
+            super::SUPERCLASS_TYPE_OFFSET,
+            4 * 5,
+            "the reference sits immediately after the five shared prefix words"
+        );
     }
 }

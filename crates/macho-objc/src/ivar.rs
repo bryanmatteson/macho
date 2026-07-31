@@ -36,28 +36,36 @@ pub fn parse_ivar_list(resolver: &ObjCResolver<'_>, va: Va) -> Result<Vec<ObjCIv
         let size = endian.interpret_u32(raw.size);
 
         // Read the ivar offset value (offset_ptr points to a u32)
-        let ivar_offset = match resolver.read_pointer_at_offset(entry_offset as u64) {
-            Ok(Some(va)) => match resolver.va_to_offset(va) {
-                Ok(off) => pod::read_pod::<u32>(data, off.as_usize())
-                    .map(|v| endian.interpret_u32(v))
-                    .unwrap_or(0),
-                Err(_) => 0,
-            },
-            _ => 0,
-        };
+        let ivar_offset = resolver
+            .read_pointer_at_offset(entry_offset as u64)
+            .ok()
+            .flatten()
+            .and_then(|va| resolver.va_to_offset(va).ok())
+            .and_then(|offset| pod::read_pod::<u32>(data, offset.as_usize()).ok())
+            .map(|value| endian.interpret_u32(value));
 
         let name = match name_ptr {
             Some(va) => resolver.read_cstring(va).unwrap_or("<invalid>"),
             None => "<null>",
         };
+        // `read_pointer_at_offset` reports a null slot and a bind it cannot
+        // resolve identically, so the raw slot decides between them: a zero slot
+        // means the ivar carries no type encoding, which is how a Swift stored
+        // property appears, while a non-zero slot that did not resolve is a
+        // reference this image cannot follow. Reporting either as a malformed
+        // encoding would blame the metadata for a claim it never made.
+        let type_slot = pod::read_pod::<u64>(data, entry_offset + 16)
+            .map(|value| endian.interpret_u64(value))
+            .unwrap_or(0);
         let type_encoding = match type_ptr {
-            Some(va) => resolver.read_cstring(va).unwrap_or(""),
-            None => "",
+            Some(va) => resolver.read_cstring(va).ok().map(str::to_owned),
+            None if type_slot == 0 => Some(String::new()),
+            None => None,
         };
 
         ivars.push(ObjCIvar {
             name: name.to_string(),
-            type_encoding: type_encoding.to_string(),
+            type_encoding,
             offset: ivar_offset,
             size,
             alignment: 1u32.wrapping_shl(alignment),

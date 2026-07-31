@@ -2,6 +2,8 @@ use std::sync::OnceLock;
 
 use termosaic::{AnsiColor, Color, HumanText, Span, Theme, TokenId, TokenStyle, tokens};
 
+use super::layout::{self, Cell};
+
 const RESET: &str = "\u{1b}[0m";
 
 const SEGMENT_NAME: TokenId = TokenId::from_static("entity.identifier.segment");
@@ -140,6 +142,76 @@ impl Style {
     /// Render a warning label.
     pub fn warning(&self, text: &str) -> String {
         self.paint(&tokens::DIAGNOSTIC_WARNING, text)
+    }
+
+    /// Render a typed enum value as a layout cell.
+    pub fn enum_value_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::DATA_FORMAT, text)
+    }
+
+    /// Render language or runtime metadata as a layout cell.
+    pub fn accent_cell(&self, text: &str) -> Cell {
+        layout::cell(&SYMBOL, text)
+    }
+
+    /// Render a scalar property value as a layout cell.
+    pub fn value_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::DATA_NUMBER, text)
+    }
+
+    /// Render secondary metadata as a layout cell.
+    pub fn muted_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::TEXT_MUTED, text)
+    }
+
+    /// Render an address or other location value as a layout cell.
+    pub fn address_cell(&self, text: &str) -> Cell {
+        layout::cell(&ADDRESS, text)
+    }
+
+    /// Render a raw encoded-byte column as a layout cell.
+    pub fn raw_bytes_cell(&self, text: &str) -> Cell {
+        layout::cell(&RAW_BYTES, text)
+    }
+
+    /// Render a warning label as a layout cell.
+    pub fn warning_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::DIAGNOSTIC_WARNING, text)
+    }
+
+    /// Render an error label as a layout cell.
+    pub fn error_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::DIAGNOSTIC_ERROR, text)
+    }
+
+    /// Render informational metadata as a layout cell.
+    pub fn info_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::STATUS_INFO, text)
+    }
+
+    /// Render successful or exported metadata as a layout cell.
+    pub fn success_cell(&self, text: &str) -> Cell {
+        layout::cell(&tokens::STATUS_SUCCESS, text)
+    }
+
+    /// Render a nested section name as a layout cell.
+    pub fn section_name_cell(&self, text: &str) -> Cell {
+        layout::cell(&SECTION_NAME, text)
+    }
+
+    /// Render a top-level segment name as a layout cell.
+    pub fn segment_name_cell(&self, text: &str) -> Cell {
+        layout::cell(&SEGMENT_NAME, text)
+    }
+
+    /// Render a `key=value` scalar property as a layout cell.
+    pub fn property_cell(&self, key: &str, value: &str) -> Cell {
+        layout::property_cell(&tokens::TEXT_MUTED, key, &tokens::DATA_NUMBER, value)
+    }
+
+    /// Render a `key=value` property whose value is an enum, as a layout cell.
+    pub fn enum_property_cell(&self, key: &str, value: &str) -> Cell {
+        layout::property_cell(&tokens::TEXT_MUTED, key, &tokens::DATA_FORMAT, value)
     }
 
     fn paint(&self, token: &TokenId, text: &str) -> String {

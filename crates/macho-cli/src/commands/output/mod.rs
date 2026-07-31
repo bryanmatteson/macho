@@ -8,9 +8,10 @@ mod style;
 /// Syntax highlighting for decoded instruction text.
 pub mod asm;
 /// Column alignment for human-readable output.
-pub mod columns;
 /// JSON serialization helpers for machine output.
 pub mod json;
+/// Column layout backed by the laidout kernel.
+pub mod layout;
 /// Objective-C semantic profile for recovered header presentation.
 pub mod objc;
 /// SARIF rendering for audit output.

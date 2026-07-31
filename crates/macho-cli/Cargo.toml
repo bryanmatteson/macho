@@ -17,6 +17,7 @@ doc = false
 [dependencies]
 macho = { workspace = true, default-features = false, features = ["full"] }
 clap.workspace = true
+laidout.workspace = true
 memmap2.workspace = true
 anyhow.workspace = true
 serde.workspace = true

@@ -2007,6 +2007,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "laidout"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d9753fd4e88ad53d426fd50d2373a3df330a742a9a5785be471ed163ff08ead"
+dependencies = [
+ "thiserror 2.0.18",
+ "unicode-width",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2109,6 +2119,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "clap",
+ "laidout 0.3.0",
  "macho-lib",
  "macho-test-support",
  "memmap2",
@@ -3746,7 +3757,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3768,7 +3779,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "86ca87c8bab759c0d4366b4e9af9d6f11c2769f6f33b679957b2f8f5255d1c2e"
 dependencies = [
  "console 0.16.4",
- "laidout",
+ "laidout 0.2.0",
  "thiserror 2.0.18",
  "unicode-segmentation",
  "unicode-width",

@@ -144,7 +144,7 @@ pub(super) fn ivar(
     evidence_id: &ObjCEvidenceId,
 ) -> ObjCIvar {
     let id = member_id(&format!(
-        "ivar|{origin}|{}|{}|{ordinal}",
+        "ivar|{origin}|{}|{:?}|{ordinal}",
         value.name, value.offset
     ));
     let known = || evidence(evidence_id);
@@ -154,20 +154,43 @@ pub(super) fn ivar(
             value: value.name.clone(),
             evidence: known(),
         },
-        raw_encoding: HexBytes::from_bytes(value.type_encoding.as_bytes()),
-        parsed_type: value.parsed_type().map_or(
-            ObjCValue::Unavailable {
-                reason: ObjCUnavailableReason::MalformedEncoding,
+        raw_encoding: HexBytes::from_bytes(
+            value
+                .type_encoding
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ),
+        // Only an encoding that exists and fails to parse is malformed. An
+        // absent one was never written, and an unreadable pointer is an
+        // unresolved reference; reporting either as malformed would blame the
+        // metadata for a fact it never claimed.
+        parsed_type: match value.type_encoding.as_deref() {
+            None => ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::UnresolvedReference,
             },
-            |ty| ObjCValue::Known {
-                value: qualified_type(&ty),
+            Some("") => ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::NotEncoded,
+            },
+            Some(_) => value.parsed_type().map_or(
+                ObjCValue::Unavailable {
+                    reason: ObjCUnavailableReason::MalformedEncoding,
+                },
+                |ty| ObjCValue::Known {
+                    value: qualified_type(&ty),
+                    evidence: known(),
+                },
+            ),
+        },
+        offset: value.offset.map_or(
+            ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::UnresolvedReference,
+            },
+            |offset| ObjCValue::Known {
+                value: offset as u64,
                 evidence: known(),
             },
         ),
-        offset: ObjCValue::Known {
-            value: value.offset as u64,
-            evidence: known(),
-        },
         size: ObjCValue::Known {
             value: value.size as u64,
             evidence: known(),
@@ -302,5 +325,86 @@ fn diagnostic(
         observation_id: None,
         entity_id: Some(entity_id.clone()),
         evidence_ids: vec![evidence_id.clone()],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unresolved_ivar_offsets_are_not_reported_as_zero() {
+        let origin = ObjCEntityId::new("0".repeat(64)).expect("valid entity ID");
+        let evidence_id = ObjCEvidenceId::new("1".repeat(64)).expect("valid evidence ID");
+        let value = macho_objc::ObjCIvar {
+            name: "_value".to_owned(),
+            type_encoding: Some("i".to_owned()),
+            offset: None,
+            size: 4,
+            alignment: 4,
+        };
+
+        let recovered = ivar(&value, 0, &origin, &evidence_id);
+
+        assert_eq!(
+            recovered.offset,
+            ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::UnresolvedReference,
+            }
+        );
+    }
+
+    fn ivar_with_encoding(type_encoding: Option<&str>) -> ObjCIvar {
+        let origin = ObjCEntityId::new("0".repeat(64)).expect("valid entity ID");
+        let evidence_id = ObjCEvidenceId::new("1".repeat(64)).expect("valid evidence ID");
+        let value = macho_objc::ObjCIvar {
+            name: "_value".to_owned(),
+            type_encoding: type_encoding.map(str::to_owned),
+            offset: Some(8),
+            size: 8,
+            alignment: 8,
+        };
+        ivar(&value, 0, &origin, &evidence_id)
+    }
+
+    #[test]
+    fn an_absent_type_encoding_is_not_reported_as_malformed() {
+        // Swift stored properties surface as Objective-C ivars carrying no type
+        // encoding at all. Calling that malformed blames the metadata for a
+        // claim it never made.
+        assert_eq!(
+            ivar_with_encoding(Some("")).parsed_type,
+            ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::NotEncoded,
+            }
+        );
+    }
+
+    #[test]
+    fn an_unreadable_type_pointer_is_an_unresolved_reference() {
+        assert_eq!(
+            ivar_with_encoding(None).parsed_type,
+            ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::UnresolvedReference,
+            }
+        );
+    }
+
+    #[test]
+    fn an_encoding_that_exists_but_does_not_parse_is_malformed() {
+        assert_eq!(
+            ivar_with_encoding(Some("\u{7f}not-an-encoding")).parsed_type,
+            ObjCValue::Unavailable {
+                reason: ObjCUnavailableReason::MalformedEncoding,
+            }
+        );
+    }
+
+    #[test]
+    fn a_well_formed_encoding_still_decodes() {
+        assert!(matches!(
+            ivar_with_encoding(Some("i")).parsed_type,
+            ObjCValue::Known { .. }
+        ));
     }
 }

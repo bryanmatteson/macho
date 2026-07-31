@@ -92,10 +92,12 @@ impl ObjCMethod {
 pub struct ObjCIvar {
     /// The name field.
     pub name: String,
-    /// The type_encoding field.
-    pub type_encoding: String,
-    /// The offset field.
-    pub offset: u32,
+    /// The decoded type encoding, or `None` when its pointer cannot be
+    /// resolved. An empty encoding means the ivar carries none, which is how
+    /// Swift stored properties appear.
+    pub type_encoding: Option<String>,
+    /// The decoded runtime offset, or `None` when its pointer cannot be resolved.
+    pub offset: Option<u32>,
     /// The size field.
     pub size: u32,
     /// The alignment field.
@@ -105,7 +107,7 @@ pub struct ObjCIvar {
 impl ObjCIvar {
     /// Performs parsed_type.
     pub fn parsed_type(&self) -> Option<ObjCQualifiedType> {
-        ObjCQualifiedType::parse(&self.type_encoding).ok()
+        ObjCQualifiedType::parse(self.type_encoding.as_deref()?).ok()
     }
 }
 

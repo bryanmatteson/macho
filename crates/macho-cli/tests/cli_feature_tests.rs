@@ -505,6 +505,197 @@ fn swift_name_state_and_repeatable_kind_filters_compose() {
 
 #[test]
 #[cfg(target_os = "macos")]
+fn swift_declarations_emit_a_filtered_source_projection() {
+    let fixture = copy_macho_fixture("/usr/bin/plutil", "swift-declarations");
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    let data = std::fs::read(fixture.path()).expect("read fixture");
+    let container = macho::parse(&data).expect("parse fixture");
+    let fat = match &container {
+        MachoContainer::Fat(fat) if !fat.arches().is_empty() => fat,
+        _ => return,
+    };
+    let selected_arch = fat.arches()[0].spec().name();
+    let Some(swift_type) = SwiftTypeIndex::build(fat.arches()[0].macho())
+        .types
+        .into_iter()
+        .find(|value| {
+            matches!(
+                value.kind,
+                macho::metadata::swift::types::SwiftTypeKind::Class
+                    | macho::metadata::swift::types::SwiftTypeKind::Struct
+                    | macho::metadata::swift::types::SwiftTypeKind::Enum
+                    | macho::metadata::swift::types::SwiftTypeKind::Protocol
+            )
+            // `__C` holds Objective-C declarations imported into Swift; the
+            // projection does not declare types this image does not own.
+            && !value.name.starts_with("__C.")
+        })
+    else {
+        return;
+    };
+
+    let output = run_cli([
+        "swift",
+        fixture_path,
+        "--arch",
+        &selected_arch,
+        "--name",
+        &swift_type.name,
+        "--exact",
+        "--declarations",
+    ]);
+
+    assert!(
+        output.status.success(),
+        "Swift declarations failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("// Recovered Swift declarations."));
+    assert!(stdout.contains(&format!("// {}", swift_type.name)));
+    assert!(!stdout.contains("Swift recovery\n"));
+}
+
+#[test]
+fn report_arch_selectors_accept_qualified_slice_names() {
+    // The universal fixture is x86_64 plus arm64e. `arm64e` is the name a fat
+    // listing and the disassembler print for that slice, so the report
+    // commands must accept it alongside the CPU-type name `arm64`.
+    let fixture = write_macho_fixture(
+        &macho_test_support::disassembly_fat(),
+        "report-qualified-arch",
+        false,
+    );
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+    const CPU_TYPE_ARM64: i64 = 0x0100_000c;
+    const CPU_SUBTYPE_ARM64E: i64 = 2;
+
+    for command in ["swift", "objc"] {
+        for selector in ["arm64e", "arm64"] {
+            let output = run_cli([
+                command,
+                fixture_path,
+                "--arch",
+                selector,
+                "--format",
+                "json",
+            ]);
+            assert!(
+                output.status.success(),
+                "{command} --arch {selector} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let envelope: serde_json::Value =
+                serde_json::from_slice(&output.stdout).expect("valid JSON output");
+            let slices = envelope["data"]["slices"]
+                .as_array()
+                .expect("report slices");
+            assert_eq!(
+                slices.len(),
+                1,
+                "{command} --arch {selector} selects one slice"
+            );
+            assert_eq!(
+                slices[0]["architecture"]["cpu_type"],
+                serde_json::json!(CPU_TYPE_ARM64),
+                "{command} --arch {selector} selects the arm64e slice"
+            );
+            assert_eq!(
+                slices[0]["architecture"]["cpu_subtype"],
+                serde_json::json!(CPU_SUBTYPE_ARM64E),
+                "{command} --arch {selector} selects the arm64e slice"
+            );
+        }
+
+        let output = run_cli([
+            command,
+            fixture_path,
+            "--arch",
+            "definitely_not_real",
+            "--format",
+            "json",
+        ]);
+        assert!(
+            !output.status.success(),
+            "{command} accepted an unknown architecture"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("no architecture matching `definitely_not_real` found"),
+            "unexpected {command} stderr: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_qualified_arch_selector_narrows_rather_than_widens() {
+    // The disconfirming case for accepting two spellings: a container holding
+    // both a plain arm64 slice and an arm64e one. `arm64` is the CPU-type name
+    // of both and must keep selecting both; `arm64e` names only the second, so
+    // accepting it must not widen the selection to its sibling.
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::disassembly_arm64(),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                macho_test_support::CPU_SUBTYPE_ARM64E,
+                macho_test_support::disassembly_arm64e(),
+            ),
+        ]),
+        "report-arch-sibling-subtypes",
+        false,
+    );
+    let fixture_path = fixture.path().to_str().expect("utf8 path");
+
+    let selected_subtypes = |command: &str, selector: &str| -> Vec<i64> {
+        let output = run_cli([
+            command,
+            fixture_path,
+            "--arch",
+            selector,
+            "--format",
+            "json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{command} --arch {selector} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid JSON output");
+        envelope["data"]["slices"]
+            .as_array()
+            .expect("report slices")
+            .iter()
+            .map(|slice| {
+                slice["architecture"]["cpu_subtype"]
+                    .as_i64()
+                    .expect("cpu subtype")
+                    & 0xffff_ffff
+            })
+            .collect()
+    };
+
+    for command in ["swift", "objc"] {
+        assert_eq!(
+            selected_subtypes(command, "arm64e"),
+            vec![i64::from(macho_test_support::CPU_SUBTYPE_ARM64E)],
+            "{command} --arch arm64e must select only the arm64e slice"
+        );
+        assert_eq!(
+            selected_subtypes(command, "arm64").len(),
+            2,
+            "{command} --arch arm64 names the CPU type, so it still selects both"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
 fn objc_kind_presence_and_name_filters_compose() {
     let fixture = copy_macho_fixture("/usr/bin/plutil", "objc-composed-filters");
     let fixture_path = fixture.path().to_str().expect("utf8 path");

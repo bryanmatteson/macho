@@ -3,7 +3,10 @@
 #![allow(missing_docs)]
 
 mod enrich;
+mod header;
 mod validate;
+
+pub use header::project_swift_headers;
 
 use macho_core::model::container::MachoContainer;
 use macho_core::{MachoFile, Section};
@@ -228,6 +231,12 @@ pub struct SwiftEntity {
     pub parent: SwiftValue<SwiftEntityRef>,
     pub fields_or_cases: SwiftValue<Vec<SwiftField>>,
     pub conformances: SwiftValue<Vec<SwiftConformanceRef>>,
+    /// The resolved superclass name.
+    ///
+    /// `Unavailable { NotEncoded }` covers both a kind that carries no such
+    /// field and a class whose superclass reference is null — a root class.
+    /// Only a class descriptor encodes one.
+    pub superclass: SwiftValue<String>,
     pub raw_linkages: Vec<String>,
     pub observation_ids: NonEmpty<SwiftObservationId>,
     pub gaps: Vec<SwiftGap>,
@@ -290,8 +299,64 @@ pub struct SwiftSliceReport {
     pub evidence: Vec<SwiftEvidence>,
     pub entities: Vec<SwiftEntity>,
     pub selection: SwiftSelectionResult,
+    pub header: Option<SwiftHeaderProjection>,
     pub diagnostics: Vec<SwiftDiagnostic>,
     pub executions: NonEmpty<SwiftCollectorExecution>,
+}
+
+/// How a projected member binds its name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwiftDeclBinding {
+    Var,
+    Let,
+    Case,
+    IndirectCase,
+}
+
+/// One stored property or enum case in a projected declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwiftDeclMember {
+    pub name: String,
+    pub binding: SwiftDeclBinding,
+    /// The resolved Swift type, or `None` when the report could not resolve one.
+    pub type_name: Option<String>,
+    pub artificial: bool,
+}
+
+/// One projected nominal declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwiftDecl {
+    pub entity_id: SwiftEntityId,
+    pub kind: SwiftTypeKind,
+    pub state: SwiftEntityState,
+    pub name: String,
+    /// The superclass, when the class descriptor named one. Absent for a root
+    /// class and for every non-class kind.
+    pub superclass: Option<String>,
+    pub conformances: Vec<String>,
+    pub members: Vec<SwiftDeclMember>,
+}
+
+/// A declaration or member the projection could not state completely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwiftHeaderGap {
+    pub entity_id: SwiftEntityId,
+    /// The member name, or `None` when the gap concerns the declaration itself.
+    pub member: Option<String>,
+    pub reason: SwiftUnavailableReason,
+}
+
+/// The Swift declaration projection for one slice.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SwiftHeaderProjection {
+    pub declarations: Vec<SwiftDecl>,
+    pub unresolved: Vec<SwiftHeaderGap>,
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,7 +377,7 @@ pub fn recover_swift_container(
     let mut slices = Vec::new();
     for (index, macho) in container.macho_files().enumerate() {
         if selected_architecture
-            .is_some_and(|selected| selected != macho.header().cpu_type().name())
+            .is_some_and(|selected| !slice_matches_architecture(macho, selected))
         {
             continue;
         }
@@ -322,7 +387,10 @@ pub fn recover_swift_container(
         slices.push(slice);
     }
     if slices.is_empty() {
-        return Err(crate::AnalysisError::invalid("no selected Mach-O slices"));
+        return Err(crate::AnalysisError::invalid(match selected_architecture {
+            Some(arch) => format!("no architecture matching `{arch}` found"),
+            None => "no selected Mach-O slices".to_owned(),
+        }));
     }
     let report = SwiftReport {
         schema_version: SwiftReportVersion::CURRENT,
@@ -581,6 +649,15 @@ pub fn recover_swift_surface(macho: &MachoFile<'_>) -> crate::Result<SwiftReport
             conformances: SwiftValue::Unavailable {
                 reason: SwiftUnavailableReason::NotEncoded,
             },
+            superclass: match &swift_type.superclass {
+                Some(name) => SwiftValue::Known {
+                    value: name.clone(),
+                    evidence: NonEmpty::new(vec![evidence_id.clone()]).unwrap(),
+                },
+                None => SwiftValue::Unavailable {
+                    reason: SwiftUnavailableReason::NotEncoded,
+                },
+            },
             raw_linkages: swift_type.mangled_name.iter().cloned().collect(),
             observation_ids: NonEmpty::new(vec![observation_id]).unwrap(),
             gaps,
@@ -639,6 +716,7 @@ pub fn recover_swift_surface(macho: &MachoFile<'_>) -> crate::Result<SwiftReport
             selected_entity_ids,
             totals,
         },
+        header: None,
         diagnostics,
         executions: NonEmpty::new(vec![
             SwiftCollectorExecution {

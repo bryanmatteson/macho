@@ -22,8 +22,9 @@ pub fn recover_symbol_container(
     };
     let mut slices = Vec::new();
     for (index, macho) in container.macho_files().enumerate() {
-        let arch_name = macho.header().cpu_type().name();
-        if selected_architecture.is_some_and(|selected| selected != arch_name) {
+        if selected_architecture
+            .is_some_and(|selected| !slice_matches_architecture(macho, selected))
+        {
             continue;
         }
         let report = recover_symbol_surface(macho, language)?;

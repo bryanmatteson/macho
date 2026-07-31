@@ -24,7 +24,8 @@ use macho::header_syntax::{
 };
 
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::output::layout;
+use crate::commands::output::{Options as OutputOptions, Style};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
@@ -606,19 +607,19 @@ fn print_surface(
                     .map(|value| format!("0x{value:016x}"))
                     .unwrap_or_else(|| "-".to_owned());
                 let mut row = vec![
-                    style.address(&address),
-                    style.enum_value(presence_name(entity_presence(entity))),
-                    style.enum_value(role_name(entity)),
-                    entity_name(entity),
-                    style.property("gaps", &entity.gaps.len().to_string()),
+                    style.address_cell(&address),
+                    style.enum_value_cell(presence_name(entity_presence(entity))),
+                    style.enum_value_cell(role_name(entity)),
+                    layout::plain_cell(&entity_name(entity)),
+                    style.property_cell("gaps", &entity.gaps.len().to_string()),
                 ];
                 if evidence == EvidenceArg::Sources {
-                    row.push(style.enum_property("source", "nlist"));
+                    row.push(style.enum_property_cell("source", "nlist"));
                 }
                 row
             })
             .collect::<Vec<_>>();
-        for line in columns::align(&rows) {
+        for line in layout::align(&rows, style) {
             let _ = writeln!(out, "  {line}");
         }
     }

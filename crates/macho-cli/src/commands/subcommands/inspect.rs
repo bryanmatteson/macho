@@ -8,7 +8,8 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Style, columns};
+use crate::commands::output::Style;
+use crate::commands::output::layout::{self, Cell};
 use crate::commands::subcommands::common::{arch_name_for_mach, map_input};
 use crate::commands::{CliWarning, input_message};
 
@@ -186,47 +187,49 @@ fn print_header(macho: &MachoFile<'_>, style: Style, out: &mut dyn Write) {
     let _ = writeln!(out, "{}", style.heading("Header:"));
     let mut rows = vec![
         vec![
-            style.muted("  CPU:"),
-            format!(
-                "{} ({} {})",
-                style.enum_value(&h.cpu_type().to_string()),
-                style.muted("subtype:"),
-                style.value(h.cpu_subtype().name(h.cpu_type()))
-            ),
+            style.muted_cell("  CPU:"),
+            layout::join_cells([
+                style.enum_value_cell(&h.cpu_type().to_string()),
+                layout::plain_cell(" ("),
+                style.muted_cell("subtype:"),
+                layout::plain_cell(" "),
+                style.value_cell(h.cpu_subtype().name(h.cpu_type())),
+                layout::plain_cell(")"),
+            ]),
         ],
         vec![
-            style.muted("  File type:"),
-            style.enum_value(h.file_type().name()),
+            style.muted_cell("  File type:"),
+            style.enum_value_cell(h.file_type().name()),
         ],
         vec![
-            style.muted("  Bitness:"),
-            style.value(&macho.bitness().to_string()),
+            style.muted_cell("  Bitness:"),
+            style.value_cell(&macho.bitness().to_string()),
         ],
         vec![
-            style.muted("  Endian:"),
-            style.enum_value(&format!("{:?}", macho.endian())),
+            style.muted_cell("  Endian:"),
+            style.enum_value_cell(&format!("{:?}", macho.endian())),
         ],
         vec![
-            style.muted("  Commands:"),
-            style.value(&h.load_command_count().to_string()),
+            style.muted_cell("  Commands:"),
+            style.value_cell(&h.load_command_count().to_string()),
         ],
         vec![
-            style.muted("  Cmd size:"),
-            style.value(&format!("{:#x}", h.load_commands_size())),
+            style.muted_cell("  Cmd size:"),
+            style.value_cell(&format!("{:#x}", h.load_commands_size())),
         ],
         vec![
-            style.muted("  Flags:"),
-            style.enum_value(&format!("{:?}", h.flags())),
+            style.muted_cell("  Flags:"),
+            style.enum_value_cell(&format!("{:?}", h.flags())),
         ],
     ];
 
     if let Some(uuid) = macho.uuid() {
         rows.push(vec![
-            style.muted("  UUID:"),
-            style.address(&format_uuid(uuid)),
+            style.muted_cell("  UUID:"),
+            style.address_cell(&format_uuid(uuid)),
         ]);
     }
-    for line in columns::align(&rows) {
+    for line in layout::align(&rows, style) {
         let _ = writeln!(out, "{line}");
     }
 }
@@ -243,7 +246,7 @@ fn print_segments(
         .iter()
         .map(|segment| format_segment_row(segment, style))
         .collect::<Vec<_>>();
-    let segment_lines = columns::align(&segment_rows);
+    let segment_lines = layout::align(&segment_rows, style);
     let section_rows = macho
         .segments()
         .iter()
@@ -254,7 +257,7 @@ fn print_segments(
                 .map(|section| format_nested_section_row(section, style))
         })
         .collect::<Vec<_>>();
-    let section_lines = columns::align(&section_rows);
+    let section_lines = layout::align(&section_rows, style);
     let mut section_index = 0;
 
     for (segment, line) in macho.segments().iter().zip(segment_lines) {
@@ -281,7 +284,7 @@ fn print_sections(macho: &MachoFile<'_>, style: Style, out: &mut dyn Write) {
                 .map(|section| format_section_row(segment, section, style))
         })
         .collect::<Vec<_>>();
-    for line in columns::align(&rows) {
+    for line in layout::align(&rows, style) {
         let _ = writeln!(out, "{line}");
     }
 }
@@ -301,50 +304,52 @@ fn print_load_commands(macho: &MachoFile<'_>, style: Style, out: &mut dyn Write)
         .enumerate()
         .map(|(index, command)| {
             vec![
-                style.muted(&format!("  {index:>index_width$}")),
-                style.enum_value(command.kind().name()),
-                style.property("off", &format!("{:#010x}", command.file_offset().0)),
-                style.property("size", &format!("{:#x}", command.raw_size())),
+                style.muted_cell(&format!("  {index:>index_width$}")),
+                style.enum_value_cell(command.kind().name()),
+                style.property_cell("off", &format!("{:#010x}", command.file_offset().0)),
+                style.property_cell("size", &format!("{:#x}", command.raw_size())),
                 style_summary(&command.kind().summary(), style),
             ]
         })
         .collect::<Vec<_>>();
-    for line in columns::align(&rows) {
+    for line in layout::align(&rows, style) {
         let _ = writeln!(out, "{line}");
     }
 }
 
-fn format_segment_row(segment: &crate::model::segment::Segment, style: Style) -> Vec<String> {
+fn format_segment_row(segment: &crate::model::segment::Segment, style: Style) -> Vec<Cell> {
     vec![
-        format!(
-            "  {}",
-            style.segment_name(segment.name().as_str_lossy().as_ref())
-        ),
-        style.muted("VM"),
-        style.address(&format!("{:#018x}", segment.vm_addr().0)),
-        format!("({})", style.muted(&format!("{:#x}", segment.vm_size()))),
-        style.muted("File"),
-        style.address(&format!("{:#010x}", segment.file_offset().0)),
-        format!("({})", style.muted(&format!("{:#x}", segment.file_size()))),
-        style.property("maxprot", &format_prot(segment.max_prot())),
-        style.property("initprot", &format_prot(segment.init_prot())),
+        layout::join_cells([
+            layout::plain_cell("  "),
+            style.segment_name_cell(segment.name().as_str_lossy().as_ref()),
+        ]),
+        style.muted_cell("VM"),
+        style.address_cell(&format!("{:#018x}", segment.vm_addr().0)),
+        parenthesized(style.muted_cell(&format!("{:#x}", segment.vm_size()))),
+        style.muted_cell("File"),
+        style.address_cell(&format!("{:#010x}", segment.file_offset().0)),
+        parenthesized(style.muted_cell(&format!("{:#x}", segment.file_size()))),
+        style.property_cell("maxprot", &format_prot(segment.max_prot())),
+        style.property_cell("initprot", &format_prot(segment.init_prot())),
         if segment.flags().is_empty() {
-            String::new()
+            layout::plain_cell("")
         } else {
-            style.enum_property("flags", &format!("{:?}", segment.flags()))
+            style.enum_property_cell("flags", &format!("{:?}", segment.flags()))
         },
     ]
 }
 
-fn format_nested_section_row(
-    section: &crate::model::section::Section,
-    style: Style,
-) -> Vec<String> {
+/// Wrap a cell in parentheses without letting them take a column of their own.
+fn parenthesized(inner: Cell) -> Cell {
+    layout::join_cells([layout::plain_cell("("), inner, layout::plain_cell(")")])
+}
+
+fn format_nested_section_row(section: &crate::model::section::Section, style: Style) -> Vec<Cell> {
     format_section_cells(
-        format!(
-            "    {}",
-            style.section_name(section.section_name().as_str_lossy().as_ref())
-        ),
+        layout::join_cells([
+            layout::plain_cell("    "),
+            style.section_name_cell(section.section_name().as_str_lossy().as_ref()),
+        ]),
         section,
         style,
     )
@@ -354,45 +359,49 @@ fn format_section_row(
     segment: &crate::model::segment::Segment,
     section: &crate::model::section::Section,
     style: Style,
-) -> Vec<String> {
+) -> Vec<Cell> {
     format_section_cells(
-        format!(
-            "  {},{}",
-            style.segment_name(segment.name().as_str_lossy().as_ref()),
-            style.section_name(section.section_name().as_str_lossy().as_ref())
-        ),
+        layout::join_cells([
+            layout::plain_cell("  "),
+            style.segment_name_cell(segment.name().as_str_lossy().as_ref()),
+            layout::plain_cell(","),
+            style.section_name_cell(section.section_name().as_str_lossy().as_ref()),
+        ]),
         section,
         style,
     )
 }
 
 fn format_section_cells(
-    name: String,
+    name: Cell,
     section: &crate::model::section::Section,
     style: Style,
-) -> Vec<String> {
+) -> Vec<Cell> {
     vec![
         name,
-        style.address(&format!("{:#018x}", section.addr().0)),
-        format!("({})", style.muted(&format!("{:#x}", section.size()))),
-        style.property("off", &format!("{:#010x}", section.offset().0)),
-        style.property("align", &format!("2^{}", section.align())),
-        style.enum_value(section.section_type().name()),
+        style.address_cell(&format!("{:#018x}", section.addr().0)),
+        parenthesized(style.muted_cell(&format!("{:#x}", section.size()))),
+        style.property_cell("off", &format!("{:#010x}", section.offset().0)),
+        style.property_cell("align", &format!("2^{}", section.align())),
+        style.enum_value_cell(section.section_type().name()),
         format_section_extras(section, style),
     ]
 }
 
-fn style_summary(summary: &str, style: Style) -> String {
-    summary
-        .split_ascii_whitespace()
-        .map(|token| match token.split_once('=') {
+fn style_summary(summary: &str, style: Style) -> Cell {
+    let mut cells = Vec::new();
+    for token in summary.split_ascii_whitespace() {
+        if !cells.is_empty() {
+            cells.push(layout::plain_cell(" "));
+        }
+        cells.push(match token.split_once('=') {
             Some((key, value)) if !key.is_empty() && !value.is_empty() => {
-                style.property(key, value)
+                style.property_cell(key, value)
             }
-            _ => token.to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            _ => layout::plain_cell(token),
+        });
+    }
+    layout::join_cells(cells)
 }
 
 fn print_summary(macho: &MachoFile<'_>, style: Style, out: &mut dyn Write) {
@@ -470,15 +479,15 @@ fn format_prot(prot: VmProtection) -> String {
     prot.rwx_string()
 }
 
-fn format_section_extras(sect: &crate::model::section::Section, style: Style) -> String {
+fn format_section_extras(sect: &crate::model::section::Section, style: Style) -> Cell {
     use crate::model::section::SectionType;
     match sect.section_type() {
         SectionType::SymbolStubs if sect.reserved2() > 0 => {
-            style.property("stub_size", &sect.reserved2().to_string())
+            style.property_cell("stub_size", &sect.reserved2().to_string())
         }
         SectionType::NonLazySymbolPointers | SectionType::LazySymbolPointers => {
-            style.property("indirect_idx", &sect.reserved1().to_string())
+            style.property_cell("indirect_idx", &sect.reserved1().to_string())
         }
-        _ => String::new(),
+        _ => layout::plain_cell(""),
     }
 }

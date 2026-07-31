@@ -31,16 +31,20 @@ pub(crate) fn parse_type(text: &str, language: Language) -> Result<Type, ParseEr
             kind: crate::ReferenceKind::Lvalue,
         });
     }
+    // Objective-C object types are matched before the pointer suffix is
+    // stripped: `NSObject<Proto> *` is one protocol-qualified object type, and
+    // splitting the `*` off first would leave `NSObject<Proto>` to be parsed as
+    // a template instantiation instead.
+    if language == Language::ObjectiveC {
+        if let Some(ty) = parse_objc_object_type(text, qualifiers)? {
+            return Ok(ty);
+        }
+    }
     if let Some(base) = text.strip_suffix('*') {
         return Ok(Type::Pointer {
             pointee: Box::new(parse_type(base, language)?),
             qualifiers,
         });
-    }
-    if language == Language::ObjectiveC {
-        if let Some(ty) = parse_objc_object_type(text, qualifiers)? {
-            return Ok(ty);
-        }
     }
     if let Some(builtin) = builtin_type(text) {
         return Ok(Type::Builtin(builtin));

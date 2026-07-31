@@ -46,6 +46,7 @@
     criterion      = "0.7"
     gimli          = { version = "0.34.0", features = ["read"] }
     iced-x86       = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info", "intel"] }
+    laidout        = "0.3"
     memmap2        = "0.9"
     proc-macro2    = { version = "1", features = ["span-locations"] }
 rustc-demangle = "0.1"

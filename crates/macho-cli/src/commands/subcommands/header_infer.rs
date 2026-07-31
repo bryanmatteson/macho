@@ -12,7 +12,8 @@ use macho::header_infer::{
     build_prompt, export_bundle, validate_response,
 };
 
-use crate::commands::output::{ColorChoice, Format, Options as OutputOptions, columns};
+use crate::commands::output::layout;
+use crate::commands::output::{ColorChoice, Format, Options as OutputOptions};
 use crate::commands::subcommands::common::read_input_string;
 use crate::commands::{input_message, input_result, usage_message};
 
@@ -284,10 +285,10 @@ fn print_bundle(
         .flat_map(|target| {
             target.gap_ids.as_slice().iter().map(|gap| {
                 vec![
-                    output.style().enum_value("target"),
-                    output.style().accent(&target.entity_id.as_str()[..12]),
-                    output.style().property("gap", &gap.as_str()[..12]),
-                    output.style().property(
+                    output.style().enum_value_cell("target"),
+                    output.style().accent_cell(&target.entity_id.as_str()[..12]),
+                    output.style().property_cell("gap", &gap.as_str()[..12]),
+                    output.style().property_cell(
                         "operations",
                         &target
                             .allowed_operations
@@ -301,7 +302,7 @@ fn print_bundle(
             })
         })
         .collect::<Vec<_>>();
-    for row in columns::align(&rows) {
+    for row in layout::align(&rows, output.style()) {
         writeln!(out, "  {row}")?;
     }
     Ok(())
@@ -317,25 +318,27 @@ fn print_report(
         .iter()
         .map(|result| {
             vec![
-                output.style().enum_value(match result.disposition {
+                output.style().enum_value_cell(match result.disposition {
                     HypothesisDisposition::Accepted => "accepted",
                     HypothesisDisposition::Rejected => "rejected",
                     HypothesisDisposition::Unresolved => "unresolved",
                 }),
-                output.style().accent(&result.hypothesis_id.as_str()[..12]),
                 output
                     .style()
-                    .property("entity", &result.entity_id.as_str()[..12]),
+                    .accent_cell(&result.hypothesis_id.as_str()[..12]),
                 output
                     .style()
-                    .property("gap", &result.gap_id.as_str()[..12]),
+                    .property_cell("entity", &result.entity_id.as_str()[..12]),
                 output
                     .style()
-                    .property("diagnostics", &result.diagnostics.len().to_string()),
+                    .property_cell("gap", &result.gap_id.as_str()[..12]),
+                output
+                    .style()
+                    .property_cell("diagnostics", &result.diagnostics.len().to_string()),
             ]
         })
         .collect::<Vec<_>>();
-    for row in columns::align(&rows) {
+    for row in layout::align(&rows, output.style()) {
         writeln!(out, "  {row}")?;
     }
     writeln!(

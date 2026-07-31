@@ -6,3 +6,5 @@ pub mod c;
 pub mod cpp;
 /// Objective-C compatibility graph helpers.
 pub mod objc;
+/// Evidence-honest Swift source declaration projection.
+pub mod swift;

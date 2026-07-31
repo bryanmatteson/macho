@@ -205,6 +205,7 @@ fn swift_type_from_objc_runtime_name(
         source: types::SwiftTypeSource::ObjCMetadata,
         confidence: types::SwiftTypeConfidence::High,
         fields: None,
+        superclass: None,
     })
 }
 
@@ -239,6 +240,7 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
             source: types::SwiftTypeSource::DemangledSymbol,
             confidence: types::SwiftTypeConfidence::High,
             fields: None,
+            superclass: None,
         });
     }
 
@@ -290,6 +292,7 @@ fn extract_swift_type(demangled: &str, mangled: &str, address: u64) -> Option<ty
             types::SwiftTypeConfidence::High
         },
         fields: None,
+        superclass: None,
     })
 }
 
@@ -425,6 +428,13 @@ fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -
     let address = existing.address.or(candidate.address);
     let metadata_address = existing.metadata_address.or(candidate.metadata_address);
     let fields = existing.fields.clone().or_else(|| candidate.fields.clone());
+    // Only a class descriptor carries a superclass, so an observation that
+    // resolved one holds a fact no symbol-derived candidate can supply. It
+    // survives the merge for the same reason `fields` does.
+    let superclass = existing
+        .superclass
+        .clone()
+        .or_else(|| candidate.superclass.clone());
     let mut preferred = if candidate_rank > existing_rank
         || (candidate_rank == existing_rank
             && existing.kind == types::SwiftTypeKind::Unknown
@@ -442,6 +452,7 @@ fn merge_swift_types(existing: &types::SwiftType, candidate: types::SwiftType) -
     preferred.address = address;
     preferred.metadata_address = metadata_address;
     preferred.fields = fields;
+    preferred.superclass = superclass;
     preferred
 }
 
@@ -498,6 +509,7 @@ mod tests {
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
                 fields: None,
+                superclass: None,
             },
         );
         insert_swift_type(
@@ -511,6 +523,7 @@ mod tests {
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
 
@@ -539,6 +552,7 @@ mod tests {
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::Partial,
                 fields: None,
+                superclass: None,
             },
         );
         insert_swift_type(
@@ -552,6 +566,7 @@ mod tests {
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
 
@@ -580,6 +595,7 @@ mod tests {
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
         insert_swift_type(
@@ -593,6 +609,7 @@ mod tests {
                 source: types::SwiftTypeSource::DemangledSymbol,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
 
@@ -619,6 +636,7 @@ mod tests {
                 source: types::SwiftTypeSource::SwiftMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
         insert_swift_type(
@@ -632,6 +650,7 @@ mod tests {
                 source: types::SwiftTypeSource::ObjCMetadata,
                 confidence: types::SwiftTypeConfidence::High,
                 fields: None,
+                superclass: None,
             },
         );
 
@@ -661,6 +680,7 @@ mod tests {
                     source: types::SwiftTypeSource::SwiftMetadata,
                     confidence: types::SwiftTypeConfidence::High,
                     fields: None,
+                    superclass: None,
                 },
             );
         }

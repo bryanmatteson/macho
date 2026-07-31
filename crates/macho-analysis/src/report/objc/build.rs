@@ -23,7 +23,7 @@ pub fn recover_objc_container(
     let mut slices = Vec::new();
     for (index, macho) in container.macho_files().enumerate() {
         if selected_architecture
-            .is_some_and(|selected| selected != macho.header().cpu_type().name())
+            .is_some_and(|selected| !slice_matches_architecture(macho, selected))
         {
             continue;
         }
@@ -33,7 +33,10 @@ pub fn recover_objc_container(
         slices.push(slice);
     }
     if slices.is_empty() {
-        return Err(crate::AnalysisError::invalid("no selected Mach-O slices"));
+        return Err(crate::AnalysisError::invalid(match selected_architecture {
+            Some(arch) => format!("no architecture matching `{arch}` found"),
+            None => "no selected Mach-O slices".to_owned(),
+        }));
     }
     Ok(ObjCReport {
         schema_version: ObjCReportVersion::CURRENT,

@@ -3,17 +3,19 @@ use std::io::Write;
 
 use anyhow::{Context, Result};
 use macho::analysis::report::{
-    SwiftEntity, SwiftEntityState, SwiftReport, SwiftTypeKind, SwiftValue, recover_swift_container,
+    SwiftEntity, SwiftEntityState, SwiftField, SwiftReport, SwiftTypeKind, SwiftUnavailableReason,
+    SwiftValue, project_swift_headers, recover_swift_container,
 };
 
 use crate::commands::args::{ArchitectureArgs, InputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::output::layout;
+use crate::commands::output::{Options as OutputOptions, Style};
 use crate::commands::subcommands::common::map_input;
 use crate::commands::{OutputFormat, usage_message};
 
 #[derive(clap::Args)]
 #[command(
-    after_help = "Examples:\n  macho swift app --kind class --state metadata-defined\n  macho swift app --name Module.Type --exact\n  macho swift app --kind struct --kind enum --format json"
+    after_help = "Examples:\n  macho swift app --kind class --state metadata-defined\n  macho swift app --name Module.Type --exact\n  macho swift app --arch arm64 --name Module.Type --exact --headers\n  macho swift app --kind struct --kind enum --format json"
 )]
 /// Evidence-accountable Swift metadata recovery.
 pub struct SwiftArgs {
@@ -35,6 +37,9 @@ pub struct SwiftArgs {
     /// Match --name exactly instead of by substring.
     #[arg(long, requires = "name")]
     exact: bool,
+    /// Render the validated Swift declaration projection.
+    #[arg(long, visible_alias = "declarations")]
+    headers: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -74,12 +79,67 @@ pub fn run(args: SwiftArgs, output: OutputOptions, out: &mut dyn Write) -> Resul
         args.exact,
     );
 
+    if args.headers {
+        if report.slices.as_slice().len() > 1 && args.selection.arch.is_none() {
+            return Err(usage_message(
+                "fat Swift declaration output requires --arch",
+            ));
+        }
+        project_swift_headers(&mut report)?;
+    }
+
     match output.format() {
         OutputFormat::Json => crate::commands::output::json::write_pretty(out, &report)?,
-        OutputFormat::Text => print_swift_text(&report, output.style(), out),
+        OutputFormat::Text if args.headers => {
+            for slice in report.slices.as_slice() {
+                let header = slice
+                    .header
+                    .as_ref()
+                    .expect("header projection requested for every selected slice");
+                out.write_all(header.source.as_bytes())?;
+                if header.declarations.is_empty() {
+                    // The banner alone leaves "no Swift metadata here" looking
+                    // like a truncated run, so the empty result is stated.
+                    writeln!(
+                        out,
+                        "// No Swift declarations projected for {}.",
+                        architecture_name(slice.architecture)
+                    )?;
+                }
+                if !header.unresolved.is_empty() {
+                    // The ledger records member gaps as well as whole
+                    // declarations, so report the two separately rather than
+                    // calling every entry a declaration.
+                    let declarations = header
+                        .unresolved
+                        .iter()
+                        .filter(|gap| gap.member.is_none())
+                        .count();
+                    let members = header.unresolved.len() - declarations;
+                    writeln!(
+                        out,
+                        "// {declarations} declaration(s) and {members} member(s) unresolved; inspect --format json for the ledger."
+                    )?;
+                }
+            }
+        }
+        OutputFormat::Text => {
+            print_swift_text(&report, args.selection_is_filtered(), output.style(), out)
+        }
         OutputFormat::Sarif => unreachable!("rejected above"),
     }
     Ok(())
+}
+
+impl SwiftArgs {
+    /// Whether the caller narrowed the selection.
+    ///
+    /// Answered from the arguments rather than inferred by comparing a selected
+    /// count against a total, which cannot tell "no filter" apart from "a filter
+    /// that retained everything".
+    fn selection_is_filtered(&self) -> bool {
+        !self.kinds.is_empty() || !self.states.is_empty() || self.name.is_some()
+    }
 }
 
 impl SwiftTypeKindArg {
@@ -152,7 +212,12 @@ fn known_swift<T>(value: &SwiftValue<T>) -> Option<&T> {
     }
 }
 
-fn print_swift_text(report: &SwiftReport, style: Style, out: &mut dyn Write) {
+fn print_swift_text(
+    report: &SwiftReport,
+    selection_is_filtered: bool,
+    style: Style,
+    out: &mut dyn Write,
+) {
     let _ = writeln!(out, "{}", style.title("Swift recovery"));
     for slice in report.slices.as_slice() {
         let selected_ids = slice
@@ -203,24 +268,38 @@ fn print_swift_text(report: &SwiftReport, style: Style, out: &mut dyn Write) {
             }
             let _ = writeln!(out, "  {}", style.heading(state_heading(state)));
             let rows = entities
-                .into_iter()
+                .iter()
                 .map(|entity| {
                     vec![
-                        style.enum_value(kind_name(entity_kind(entity))),
-                        style.accent(&entity_name(entity)),
+                        style.enum_value_cell(kind_name(entity_kind(entity))),
+                        style.accent_cell(&entity_name(entity)),
                         entity_address(entity)
-                            .map(|address| style.address(&format!("0x{address:016x}")))
-                            .unwrap_or_else(|| style.muted("-")),
-                        style.property("fields", &entity_field_count(entity).to_string()),
-                        style.property("gaps", &entity.gaps.len().to_string()),
+                            .map(|address| style.address_cell(&format!("0x{address:016x}")))
+                            .unwrap_or_else(|| style.muted_cell("-")),
+                        style.property_cell(
+                            "fields",
+                            &entity_field_summary(&entity.fields_or_cases),
+                        ),
+                        style.property_cell("gaps", &entity.gaps.len().to_string()),
                     ]
                 })
                 .collect::<Vec<_>>();
-            for row in columns::align(&rows) {
+            for (entity, row) in entities.into_iter().zip(layout::align(&rows, style)) {
                 let _ = writeln!(out, "    {row}");
+                print_swift_fields(entity, style, out);
             }
         }
         for diagnostic in &slice.diagnostics {
+            // A diagnostic with no entity describes a record that never decoded
+            // into one, so it belongs to the image rather than to any selection
+            // and a filter cannot make it irrelevant.
+            let diagnostic_is_selected = match &diagnostic.entity_id {
+                None => true,
+                Some(entity_id) => selected_ids.contains(entity_id.as_str()),
+            };
+            if selection_is_filtered && !diagnostic_is_selected {
+                continue;
+            }
             let _ = writeln!(
                 out,
                 "  {}  {}",
@@ -252,10 +331,60 @@ fn entity_address(entity: &SwiftEntity) -> Option<u64> {
     }
 }
 
-fn entity_field_count(entity: &SwiftEntity) -> usize {
-    match &entity.fields_or_cases {
-        SwiftValue::Known { value, .. } => value.len(),
-        _ => 0,
+fn entity_field_summary(fields: &SwiftValue<Vec<SwiftField>>) -> String {
+    match fields {
+        SwiftValue::Known { value, .. } => value.len().to_string(),
+        SwiftValue::Conflicted { .. } => "conflicted".to_owned(),
+        SwiftValue::Unavailable { reason } => {
+            format!("unavailable:{}", unavailable_reason_name(*reason))
+        }
+    }
+}
+
+fn print_swift_fields(entity: &SwiftEntity, style: Style, out: &mut dyn Write) {
+    let SwiftValue::Known { value: fields, .. } = &entity.fields_or_cases else {
+        return;
+    };
+    let rows = fields
+        .iter()
+        .map(|field| {
+            let name = field.name.as_deref().unwrap_or("<unknown>");
+            let type_name = match (field_type_text(field), field.type_name.is_some()) {
+                (Some(value), true) => style.accent_cell(value),
+                (Some(value), false) => {
+                    layout::join_cells([style.muted_cell("mangled="), style.raw_bytes_cell(value)])
+                }
+                (None, _) => style.muted_cell("<type unavailable>"),
+            };
+            vec![
+                style.enum_value_cell("field"),
+                style.accent_cell(name),
+                type_name,
+            ]
+        })
+        .collect::<Vec<_>>();
+    for row in layout::align(&rows, style) {
+        let _ = writeln!(out, "      {row}");
+    }
+}
+
+fn field_type_text(field: &SwiftField) -> Option<&str> {
+    field
+        .type_name
+        .as_deref()
+        .or_else(|| field.mangled_type.as_ref().map(|value| value.as_str()))
+}
+
+fn unavailable_reason_name(reason: SwiftUnavailableReason) -> &'static str {
+    match reason {
+        SwiftUnavailableReason::NotEncoded => "not-encoded",
+        SwiftUnavailableReason::MalformedDescriptor => "malformed-descriptor",
+        SwiftUnavailableReason::UnsupportedDescriptor => "unsupported-descriptor",
+        SwiftUnavailableReason::UnsupportedMangling => "unsupported-mangling",
+        SwiftUnavailableReason::UnresolvedReference => "unresolved-reference",
+        SwiftUnavailableReason::AmbiguousIdentity => "ambiguous-identity",
+        SwiftUnavailableReason::CollectorFailed => "collector-failed",
+        SwiftUnavailableReason::Truncated => "truncated",
     }
 }
 
@@ -290,11 +419,51 @@ fn architecture_name(architecture: macho::analysis::report::Architecture) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use macho::analysis::report::{HexBytes, NonEmpty, SwiftEvidenceId};
 
     #[test]
     fn kind_filter_is_closed() {
         assert!(SwiftTypeKindArg::Class.matches(SwiftTypeKind::Class));
         assert!(!SwiftTypeKindArg::Class.matches(SwiftTypeKind::Protocol));
         assert!(SwiftEntityStateArg::SymbolOnly.matches(SwiftEntityState::SymbolOnly));
+    }
+
+    #[test]
+    fn field_summary_distinguishes_empty_from_unavailable() {
+        let evidence = NonEmpty::new(vec![
+            SwiftEvidenceId::new("0".repeat(64)).expect("valid evidence ID"),
+        ])
+        .expect("one evidence ID");
+        assert_eq!(
+            entity_field_summary(&SwiftValue::Known {
+                value: Vec::new(),
+                evidence,
+            }),
+            "0"
+        );
+        assert_eq!(
+            entity_field_summary(&SwiftValue::Unavailable {
+                reason: SwiftUnavailableReason::NotEncoded,
+            }),
+            "unavailable:not-encoded"
+        );
+    }
+
+    #[test]
+    fn field_rows_prefer_resolved_types_and_preserve_raw_manglings() {
+        let resolved = SwiftField {
+            name: Some("store".to_owned()),
+            mangled_type: Some(HexBytes::from_bytes(b"ignored")),
+            type_name: Some("Passwords.Store".to_owned()),
+            flags: 0,
+        };
+        let raw = SwiftField {
+            name: Some("body".to_owned()),
+            mangled_type: Some(HexBytes::from_bytes(b"raw")),
+            type_name: None,
+            flags: 0,
+        };
+        assert_eq!(field_type_text(&resolved), Some("Passwords.Store"));
+        assert_eq!(field_type_text(&raw), Some("726177"));
     }
 }

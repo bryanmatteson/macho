@@ -85,6 +85,14 @@ pub struct SwiftType {
     pub confidence: SwiftTypeConfidence,
     /// Stored properties or enum cases decoded from the nominal field descriptor.
     pub fields: Option<Vec<SwiftFieldInfo>>,
+    /// Resolved superclass name from the class descriptor's superclass type
+    /// reference.
+    ///
+    /// `None` covers three cases the descriptor cannot distinguish for us: the
+    /// kind carries no such field, the reference is null (a root class), or the
+    /// mangled reference did not resolve. Callers that need the distinction read
+    /// [`Self::kind`] alongside it.
+    pub superclass: Option<String>,
 }
 
 /// One record from a Swift nominal field descriptor.

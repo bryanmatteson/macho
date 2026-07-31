@@ -739,6 +739,7 @@ pub(super) fn split_top_level(text: &str, separator: char) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Type;
 
     #[test]
     fn parses_c_function_and_record() {
@@ -784,5 +785,76 @@ mod tests {
             unit.declarations.as_slice(),
             [Decl::ObjectiveCInterface { .. }]
         ));
+    }
+
+    #[test]
+    fn protocol_qualified_class_type_is_an_object_not_a_template() {
+        // `NSObject<Proto> *` is one protocol-qualified Objective-C object.
+        // Parsing the `*` off first would leave `NSObject<Proto>`, which reads
+        // as a C++ template instantiation and makes the protocol name resolve
+        // against record tags instead of declared protocols.
+        let unit = TreeSitterHeaderParser
+            .parse(
+                Language::ObjectiveC,
+                "@protocol Proto;\n@class NSObject;\n@interface Widget : NSObject\n{\n@protected\n    NSObject<Proto> * _delegate;\n}\n@end",
+            )
+            .unwrap();
+        let [_, _, Decl::ObjectiveCInterface { ivars, .. }] = unit.declarations.as_slice() else {
+            panic!("expected an interface: {:?}", unit.declarations);
+        };
+        let Type::ObjectiveCObject {
+            name, protocols, ..
+        } = &ivars[0].ty
+        else {
+            panic!("expected an Objective-C object type: {:?}", ivars[0].ty);
+        };
+        assert_eq!(
+            name.as_ref().map(ToString::to_string).as_deref(),
+            Some("NSObject")
+        );
+        assert_eq!(
+            protocols
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["Proto".to_owned()]
+        );
+    }
+
+    #[test]
+    fn protocol_qualified_object_types_pass_semantic_validation() {
+        for source in [
+            "@protocol P;\n@class NSObject;\n@interface X : NSObject\n@property (readwrite, weak, atomic) NSObject<P> * d;\n@end\n",
+            "@protocol P;\n@class NSObject;\n@interface X : NSObject\n@property (readwrite, strong, atomic) id<P> d;\n@end\n",
+        ] {
+            let unit = TreeSitterHeaderParser
+                .parse(Language::ObjectiveC, source)
+                .expect("parses");
+            let validation =
+                crate::validate(&unit, crate::ValidationLimits::default()).expect("validates");
+            assert!(
+                validation.semantic_valid,
+                "expected semantic validity for {source:?}: {:?}",
+                validation.diagnostics
+            );
+        }
+    }
+
+    #[test]
+    fn plain_object_pointers_remain_pointers() {
+        let unit = TreeSitterHeaderParser
+            .parse(
+                Language::ObjectiveC,
+                "@class NSString;\n@interface Widget\n{\n@protected\n    NSString * _name;\n}\n@end",
+            )
+            .unwrap();
+        let [_, Decl::ObjectiveCInterface { ivars, .. }] = unit.declarations.as_slice() else {
+            panic!("expected an interface: {:?}", unit.declarations);
+        };
+        assert!(
+            matches!(ivars[0].ty, Type::Pointer { .. }),
+            "unqualified class pointers keep their pointer shape: {:?}",
+            ivars[0].ty
+        );
     }
 }

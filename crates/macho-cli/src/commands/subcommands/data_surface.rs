@@ -11,7 +11,8 @@ use crate::analysis::xref::refs::{Xref, XrefKind, XrefTarget};
 use crate::analysis::{AnalysisDomain, AnalysisLimits};
 use crate::commands::OutputFormat;
 use crate::commands::args::{AnalysisLimitArgs, ArchitectureArgs, InputArgs};
-use crate::commands::output::{Options as OutputOptions, Style, columns};
+use crate::commands::output::layout::{self, Cell};
+use crate::commands::output::{Options as OutputOptions, Style};
 use crate::commands::subcommands::common::read_input as read_input_bytes;
 use crate::commands::subcommands::common::{analyze_selected_domain, write_selected_json};
 use crate::model::addr::Va;
@@ -337,30 +338,34 @@ pub fn run_ranges(args: RangesArgs, output: OutputOptions, out: &mut dyn Write) 
             .into_iter()
             .map(|range| format_range_row(&range, args.demangle, style))
             .collect::<Vec<_>>();
-        for line in columns::align(&rows) {
+        for line in layout::align(&rows, style) {
             writeln!(out, "{line}")?;
         }
     }
     Ok(())
 }
 
-fn format_range_row(range: &RangeEntry, demangle: bool, style: Style) -> Vec<String> {
-    let start = style.address(&format!("{:#018x}", range.start.0));
-    let end = style.address(&format!("{:#018x}", range.end.0));
-    let size = style.muted(&format!("{:#x}", range.end.0 - range.start.0));
-    let source = format!("[{}]", format_source(range.source));
+fn format_range_row(range: &RangeEntry, demangle: bool, style: Style) -> Vec<Cell> {
+    let span = layout::join_cells([
+        layout::plain_cell("  "),
+        style.address_cell(&format!("{:#018x}", range.start.0)),
+        layout::plain_cell(".."),
+        style.address_cell(&format!("{:#018x}", range.end.0)),
+    ]);
+    let size = style.muted_cell(&format!("{:#x}", range.end.0 - range.start.0));
+    let text = format!("[{}]", format_source(range.source));
     let source = match range.source {
-        RangeSource::Nlist => style.info(&source),
-        RangeSource::ExportTrie => style.success(&source),
-        RangeSource::ObjCMetadata => style.accent(&source),
-        RangeSource::Inferred => style.warning(&source),
-        _ => style.muted(&source),
+        RangeSource::Nlist => style.info_cell(&text),
+        RangeSource::ExportTrie => style.success_cell(&text),
+        RangeSource::ObjCMetadata => style.accent_cell(&text),
+        RangeSource::Inferred => style.warning_cell(&text),
+        _ => style.muted_cell(&text),
     };
     vec![
-        format!("  {start}..{end}"),
+        span,
         size,
         source,
-        format_entity(&range.entity, demangle),
+        layout::plain_cell(&format_entity(&range.entity, demangle)),
     ]
 }
 

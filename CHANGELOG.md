@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+- Fixed `macho objc --headers` failing semantic validation on any image with a
+  protocol-qualified object type. The header parser stripped a pointer suffix
+  before its Objective-C check, so `NSObject<Proto> *` re-parsed as a C++
+  template instantiation and its protocol resolved against record tags instead
+  of declared protocols.
+- Nested Objective-C members under the entity that declares them, and rendered
+  their recovered types, property attributes, and method signatures instead of
+  the state label `known`. Values the recovery could not establish stay visually
+  distinct from values it did.
+- Added `macho swift --headers`, which attaches a Swift declaration projection
+  to each report slice. Unlike the former text-only path, the projection carries
+  structured declarations and an unresolved ledger through `--format json`.
+  `--declarations` remains as an alias.
+- Declared each Swift nominal type once. A type exposed to Objective-C is
+  observed twice, and the projection previously emitted one declaration per
+  observation. Displaced observations that hold conflicting evidence are
+  recorded in the unresolved ledger.
+- Stopped reporting an absent Objective-C ivar type encoding as malformed. A
+  null encoding pointer is now `not-encoded` and an unresolvable one is
+  `unresolved-reference`, which separates Swift stored properties from genuine
+  metadata damage.
+- Reported header omissions as separate declaration and member counts rather
+  than describing every ledger entry as a dropped declaration.
+- Kept diagnostics that belong to no entity visible under a filter. A record
+  that never decoded into an entity describes the image, so narrowing a
+  selection no longer hides malformed metadata.
+- Recovered Swift generic parameters nested inside type arguments and behind
+  dependent member types, so a type whose only mention of a placeholder is
+  `Swift.Optional<A>` or `Swift.Range<A.Swift.Collection.Index>` declares `<A>`.
+  A placeholder is recognized by position — a lone uppercase letter that is a
+  whole segment or the root of a dotted path — so `Module.A` stays a real type.
+  In `libswiftCreateML.dylib`, 10 of 363 rendered declarations previously
+  referenced a parameter they never declared.
+- Reported header omissions as separate declaration and member counts on the
+  Swift projection too, matching the Objective-C footer.
+- Accepted qualified slice names in `--arch` for `swift`, `objc`, and the
+  symbol-recovery commands. `arm64e` is the name a fat listing and the
+  disassembler print for that slice, but the report commands compared it against
+  the CPU-type name alone, so `--arch arm64e` selected nothing and failed with
+  `no selected Mach-O slices`. An unmatched selector now names itself.
+- Escaped Swift reserved words in rendered declarations. `/usr/bin/plutil`
+  declares an enum whose cases are named `true` and `false`, which rendered as
+  invalid Swift; keywords in declaration position are now backtick-escaped.
+- Stated an empty header projection instead of emitting nothing. `macho objc
+  --headers` on an image with no Objective-C metadata wrote zero bytes, which was
+  indistinguishable from the command failing.
+- Recovered a Swift class's superclass from its context descriptor, so a derived
+  class declares `class Derived: Base` instead of `class Derived`. The reference
+  is read only for a class kind: a struct or enum stores a field count at that
+  same offset, so reading it ungated reports a small integer as a base type.
+  A null reference is a root class, which is a complete fact rather than a gap —
+  native Swift classes inherit from nothing unless declared. The name reaches
+  `--format json` as `superclass` on each declaration, and joins the inheritance
+  clause ahead of any protocol conformances.
+- Carried a resolved superclass through Swift type merging. A descriptor-derived
+  observation holds facts no symbol-derived candidate can supply, so it now
+  survives a merge for the same reason `fields` already did.
+- Added a ground-truth test that compiles a known class hierarchy with the host
+  `swiftc` and asserts the recovered inheritance against the source it was built
+  from, including the struct and enum cases that catch an ungated read. Every
+  other Swift test checks metadata whose original source is unavailable, where a
+  wrong descriptor offset yields a plausible name and passes.
+- Replaced ad-hoc column alignment with the `laidout` layout kernel. Cells carry
+  their theme token as a layout annotation and are laid out as unstyled text, so
+  ANSI escapes never count toward a column and every run is measured by its
+  Unicode display width.
+
 ## 0.4.0
 
 - Licensed the complete workspace and published crate family under the MIT
