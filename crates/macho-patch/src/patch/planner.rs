@@ -1,7 +1,7 @@
 /// Operates on a mutable in-memory copy of a Mach-O binary.
 ///
 /// All mutations go through `write_bytes`, which returns the original content
-/// so that callers can feed it into the rollback store.
+/// so callers can retain exact inverse bytes in their own recovery policy.
 #[derive(Debug)]
 pub struct MachoPatcher {
     data: Vec<u8>,

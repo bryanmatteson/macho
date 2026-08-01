@@ -31,7 +31,7 @@ impl MachoContainerExt for MachoContainer<'_> {
     fn inspect_fileset_entry(&self, entry_id: &str) -> Vec<FilesetEntryInspection> {
         match self {
             Self::Thin(macho) => {
-                inspect_fileset_entry_in_macho(macho, macho.header().cpu_type().name(), entry_id)
+                inspect_fileset_entry_in_macho(macho, &macho.header().arch_spec().name(), entry_id)
             }
             Self::Fat(fat) => fat.inspect_fileset_entry(entry_id),
         }

@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+## 0.5.0
+
+- Replaced raw dyld-cache text slicing with validated offline cache-family
+  reconstruction. The library resolves legacy and modern subcache names,
+  verifies sibling UUIDs, architectures, VM bases, mappings, and exact image
+  paths, then compacts mapped segments and only image-referenced `__LINKEDIT`
+  evidence into an owned Mach-O that must pass a strict core reparse. It
+  rewrites segment, section, symbol, dyld, relocation, note, and entry-point
+  file coordinates; rebuilds per-image nlists and their string pool instead of
+  copying the shared cache pool; clears `MH_DYLIB_IN_CACHE`; and rejects the
+  cache-resident code-signature claim. `macho cache` now has distinct
+  list/search/info/extract JSON operations, exact or uniquely matched image
+  selection, atomic output, no-clobber by default, and a typed completeness
+  ledger for segments, linkedit, symbols, exports, imports, fixups, local
+  symbols, and signatures.
+- Exposed safe section and executable mutation through `macho patch`.
+  File-backed and zero-fill additions name an existing segment, retain payload
+  bytes through preparation, validate alignment and placement, and report the
+  final section address, offset, size, and type. Architecture-aware function
+  entry detours use `macho-patch` planning and an exact original-byte
+  precondition, require one exact architecture for fat inputs, reject
+  non-executable or unmappable windows, strictly prove the overwrite is a
+  complete sequence of instructions, and disclose its instruction count,
+  encoding, and bytes in JSON previews. Raw `--bytes` writes now also require expected original
+  bytes. Dry runs, atomic output/in-place replacement, permission preservation,
+  signature invalidation, stripping, and verified in-process re-signing share
+  the same reparsed transaction path. The lower-level in-memory workflow now
+  rejects an unselected universal container instead of returning one patched
+  thin slice and dropping its siblings.
+- Expanded semantic diff coverage to relocations, strings, code ranges,
+  cross-reference relationships, dependency summaries, audit findings, and
+  recovered C, C++, Objective-C-header, and Swift surfaces. Findings now use
+  dedicated structured domains and stable semantic identities, ignore
+  reorder/address-only evidence churn where possible, and distinguish complete,
+  unsupported, failed, and unrequested analysis states. `macho diff` accepts
+  the JSON envelope emitted by `macho snapshot`, and applies `--arch` equally
+  to saved snapshots and live binaries.
 - Fixed `macho objc --headers` failing semantic validation on any image with a
   protocol-qualified object type. The header parser stripped a pointer suffix
   before its Objective-C check, so `NSObject<Proto> *` re-parsed as a C++
@@ -37,11 +74,20 @@
   referenced a parameter they never declared.
 - Reported header omissions as separate declaration and member counts on the
   Swift projection too, matching the Objective-C footer.
-- Accepted qualified slice names in `--arch` for `swift`, `objc`, and the
-  symbol-recovery commands. `arm64e` is the name a fat listing and the
-  disassembler print for that slice, but the report commands compared it against
-  the CPU-type name alone, so `--arch arm64e` selected nothing and failed with
-  `no selected Mach-O slices`. An unmatched selector now names itself.
+- Unified `--arch` selection across inspection, dependency, patching,
+  disassembly, and language-recovery commands. A CPU-family selector such as
+  `arm64` retains every matching subtype, while a qualified selector such as
+  `arm64e` or `x86_64h` retains exactly that subtype; every requested selector
+  must resolve. Recovery and disassembly reports now use schema version 2 and
+  record the resolved selection as `all`, exact `one`, or ordered exact `many`
+  architectures. This is an intentional wire cutover: version-1 recovery and
+  disassembly artifacts are rejected and must be regenerated, and consumers
+  must update to the version-2 request shape.
+- Added closed typed access to schema-v3 analysis domains. Library callers pass
+  a `domain_reports` key to `SliceSnapshot::report` and receive the existing
+  public Rust report type while retaining not-requested, complete-with-issues,
+  unsupported, and failed-with-issues states. The snapshot wire shape and
+  per-domain `report_schema: 1` payload envelope are unchanged.
 - Escaped Swift reserved words in rendered declarations. `/usr/bin/plutil`
   declares an enum whose cases are named `true` and `false`, which rendered as
   invalid Swift; keywords in declaration position are now backtick-escaped.

@@ -65,8 +65,18 @@ fn resign_plan_for_signed_binary() {
     assert!(plan.hash_type.is_some());
     assert!(plan.has_cms_signature);
     assert!(plan.suggested_command.starts_with("macho patch"));
+    assert!(plan.suggested_command.contains("<patched-binary>"));
     assert!(plan.suggested_command.contains("--sign-p12"));
+    assert!(plan.suggested_command.contains("--output <signed-binary>"));
+    assert!(!plan.suggested_command.contains("--in-place"));
     assert!(!plan.suggested_command.contains("xcrun"));
+    assert!(plan.manual_steps.iter().any(|step| {
+        step.contains("rerun the original mutation") && step.contains("same transaction")
+    }));
+    assert!(plan.manual_steps.iter().any(|step| {
+        step.contains("already materialized patched artifact")
+            && step.contains("does not apply the pending mutation")
+    }));
 }
 
 #[test]
@@ -100,6 +110,11 @@ fn resign_plan_serializes() {
     let json = serde_json::to_string(&plan).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize");
     assert_eq!(parsed["was_signed"], true);
+    assert!(
+        parsed["suggested_command"]
+            .as_str()
+            .is_some_and(|command| command.contains("--output") && !command.contains("--in-place"))
+    );
 }
 
 #[test]
@@ -114,7 +129,11 @@ fn resign_plan_display() {
     let plan = ResignPlan::from_mach(macho);
     let display = format!("{plan}");
     assert!(display.contains("Re-sign assistance:"));
-    assert!(display.contains("Native command:"));
+    assert!(display.contains("Candidate signing command:"));
+    assert!(display.contains("<patched-binary>"));
+    assert!(display.contains("--output <signed-binary>"));
+    assert!(!display.contains("--in-place"));
+    assert!(display.contains("does not apply the pending mutation"));
     assert!(display.contains("macho patch"));
 }
 

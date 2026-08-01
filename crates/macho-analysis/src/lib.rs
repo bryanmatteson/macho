@@ -53,8 +53,9 @@ pub mod vtables;
 pub mod xref;
 
 pub use analyzer::{
-    AnalysisDocument, AnalysisIssue, Analyzer, ContainerIdentity, DomainPayload, DomainState,
-    SliceIdentity, SliceSnapshot, SnapshotDocument, UnsupportedReason,
+    AnalysisDocument, AnalysisFailure, AnalysisIssue, Analyzer, ContainerIdentity, DomainPayload,
+    DomainReportKey, DomainState, SliceIdentity, SliceSnapshot, SnapshotDocument,
+    UnsupportedReason, domain_reports,
 };
 pub use planner::{
     AnalysisLimits, AnalysisPlan, AuditPlan, AuditRuleSpec, ContainerPlan, DiffPlan,

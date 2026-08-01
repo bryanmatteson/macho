@@ -1,5 +1,10 @@
 #![deny(missing_docs)]
-//! Cross-layer semantic mutation workflow contracts.
+//! Format-local, in-memory mutation validation contracts.
+//!
+//! This crate composes Mach-O parsing, analysis, mutation, optional signing,
+//! reparsing, and before/after diffing for one candidate. It owns no persisted
+//! investigation, review policy, apply history, undo/rollback store, or
+//! cross-format orchestration; callers retain those product-level concerns.
 
 use macho_analysis::diff::{DiffReport, diff_documents};
 use macho_analysis::{AnalysisPlan, Analyzer};
@@ -96,19 +101,21 @@ pub fn execute(
         stage: WorkflowStage::ParseBefore,
         source: source.into(),
     })?;
+    let macho_core::model::MachoContainer::Thin(before_image) = &before_container else {
+        return Err(WorkflowError {
+            stage: WorkflowStage::ParseBefore,
+            source: macho_core::ParseError::format(
+                "in-memory mutation workflow requires one selected thin Mach-O; select and rebuild a universal slice explicitly",
+            )
+            .into(),
+        });
+    };
     let before_document = Analyzer
         .run(&before_container, analysis_plan)
         .map_err(|source| WorkflowError {
             stage: WorkflowStage::AnalyzeBefore,
             source: source.into(),
         })?;
-    let before_image = before_container
-        .first_macho()
-        .ok_or_else(|| WorkflowError {
-            stage: WorkflowStage::ParseBefore,
-            source: macho_core::ParseError::format("container has no Mach-O image").into(),
-        })?;
-
     patch_plan
         .validate(before_image.bytes())
         .map_err(|source| WorkflowError {
@@ -284,5 +291,26 @@ mod tests {
         let error = execute(&input, &no_op_plan(), &analysis, None)
             .expect_err("missing selected architecture must fail");
         assert_eq!(error.stage, WorkflowStage::AnalyzeBefore);
+    }
+
+    #[test]
+    fn universal_input_is_rejected_instead_of_dropping_sibling_slices() {
+        let input = macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_X86_64,
+                3,
+                macho_test_support::signable_thin64_x86_64(2),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::signable_thin64_arm64(2),
+            ),
+        ]);
+        let analysis = AnalysisPlan::new([AnalysisDomain::Header]);
+        let error = execute(&input, &no_op_plan(), &analysis, None)
+            .expect_err("unselected universal input must not become a thin result");
+        assert_eq!(error.stage, WorkflowStage::ParseBefore);
+        assert!(error.to_string().contains("one selected thin Mach-O"));
     }
 }

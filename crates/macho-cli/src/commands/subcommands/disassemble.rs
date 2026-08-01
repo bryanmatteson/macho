@@ -5,11 +5,12 @@ use anyhow::Result;
 use macho::analysis::disassembly::{
     AddressExtent, DecodeMode, DisassemblyRequest, DisassemblySelection, DisassemblySink, NonEmpty,
     RegionHeader, RegionSummary, SectionSelector, SliceHeader, SliceSelection, SliceSummary,
-    disassemble_streaming, resolve_architecture_selector,
+    disassemble_streaming, resolve_slice_selection,
 };
 use macho::analysis::report::disassembly::{
     DisassemblyIssue, DisassemblyLabel, DisassemblyRecord, DisassemblyReportRequest,
-    DisassemblyStatus, InstructionFlags, RangeEndSource, SelectionSource, SymbolSource,
+    DisassemblySchemaVersion, DisassemblyStatus, InstructionFlags, RangeEndSource, SelectionSource,
+    SymbolSource,
 };
 use macho::analysis::report::{Architecture, ReportContainerIdentity, ReportSliceIdentity};
 use serde::Serialize;
@@ -115,11 +116,14 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
                     "--arch raw tuples must use 0xCCCCCCCC:0xSSSSSSSS",
                 ));
             }
-            SliceSelection::Exact(resolve_architecture_selector(&container, selector)?)
+            resolve_slice_selection(&container, selector)?
         }
         None => SliceSelection::All,
     };
-    if args.address.is_some() && container.is_fat() && matches!(arches, SliceSelection::All) {
+    if args.address.is_some()
+        && container.is_fat()
+        && !matches!(&arches, SliceSelection::One { .. })
+    {
         return Err(usage_message(
             "--address on a universal input requires --arch",
         ));
@@ -525,7 +529,7 @@ impl<'a> NdjsonSink<'a> {
         let container = self.container.take().expect("begin() runs before slices");
         let request = self.request.take().expect("begin() runs before slices");
         let line = Line::Header {
-            schema_version: 1,
+            schema_version: DisassemblySchemaVersion::CURRENT.get(),
             container: &container,
             request: &request,
         };

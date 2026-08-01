@@ -135,7 +135,7 @@ pub fn disassembly_fat() -> Vec<u8> {
     ])
 }
 
-/// Build two x86-64 slices whose display names collide but raw subtypes differ.
+/// Build ordinary x86-64 and qualified x86_64h sibling slices.
 pub fn disassembly_fat_x86_subtypes() -> Vec<u8> {
     let ordinary = disassembly_x86_64();
     let mut haswell = disassembly_x86_64();
@@ -548,7 +548,14 @@ fn signable_thin64(cpu_type: u32, file_type: u32) -> Vec<u8> {
         0,
     );
     bytes.resize(TEXT_SIZE + LINKEDIT_SIZE, 0);
-    bytes[0x400..0x404].copy_from_slice(&[0x1f, 0x20, 0x03, 0xd5]);
+    if cpu_type == CPU_TYPE_X86_64 {
+        // A complete, realistic x86_64 prologue: push rbp; mov rbp, rsp;
+        // sub rsp, 0x20. Keeping whole instructions here lets executable
+        // mutation tests prove their overwrite-window boundary contract.
+        bytes[0x400..0x408].copy_from_slice(&[0x55, 0x48, 0x89, 0xe5, 0x48, 0x83, 0xec, 0x20]);
+    } else {
+        bytes[0x400..0x404].copy_from_slice(&[0x1f, 0x20, 0x03, 0xd5]);
+    }
     bytes
 }
 

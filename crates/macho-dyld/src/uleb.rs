@@ -62,16 +62,14 @@ impl<'data> LebReader<'data> {
             self.pos += 1;
 
             let val = (byte & 0x7F) as u64;
-            if shift < 64 {
-                result |= val << shift;
+            if shift >= 64 || (shift == 63 && val > 1) {
+                return Err(Error::format("ULEB128 exceeds u64"));
             }
+            result |= val << shift;
             if byte & 0x80 == 0 {
                 return Ok(result);
             }
             shift += 7;
-            if shift > 70 {
-                return Err(Error::format("ULEB128 too large"));
-            }
         }
     }
 
@@ -192,6 +190,12 @@ mod tests {
     #[test]
     fn truncated_uleb128() {
         let mut r = LebReader::new(&[0x80]); // continuation bit set, no more bytes
+        assert!(r.read_uleb128().is_err());
+    }
+
+    #[test]
+    fn overflowing_uleb128_rejects() {
+        let mut r = LebReader::new(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02]);
         assert!(r.read_uleb128().is_err());
     }
 }

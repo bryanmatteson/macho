@@ -21,7 +21,7 @@ use crate::report::disassembly::{
     DisassemblyReport, DisassemblyReportRequest, ReportAddressExtent, ReportDecodeMode,
     ReportSectionSelector, ReportSelection,
 };
-use crate::report::{Architecture, ContainerKind, ReportContainerIdentity};
+use crate::report::{Architecture, ArchitectureSelection, ContainerKind, ReportContainerIdentity};
 
 use self::decode::decode_slice;
 use self::metadata::collect_metadata;
@@ -57,19 +57,13 @@ pub const PARTIAL_INSTRUCTION_CODE: &str = "analysis.disassembly.selection.parti
 pub const COUNT_UNSATISFIED_CODE: &str = "analysis.disassembly.count.unsatisfied";
 /// Invalid request construction or cross-field combination.
 pub const REQUEST_INVALID_CODE: &str = "analysis.disassembly.request.invalid";
-/// Internally or externally inconsistent schema-version-1 report.
+/// Internally or externally inconsistent schema-version-2 report.
 pub const REPORT_INVALID_CODE: &str = "analysis.disassembly.report.invalid";
 /// Failure writing streamed disassembly output through a sink.
 pub const OUTPUT_FAILED_CODE: &str = "analysis.disassembly.output.failed";
 
-/// Requested slices.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SliceSelection {
-    /// Every slice, in container order.
-    All,
-    /// One exact raw CPU tuple.
-    Exact(Architecture),
-}
+/// Requested slices and their exact report provenance.
+pub type SliceSelection = ArchitectureSelection;
 
 /// One exact Mach-O section selector.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -370,8 +364,7 @@ pub fn resolve_architecture_selector(
                 cpu_type: macho_core::model::header::CpuType(candidate.cpu_type),
                 cpu_subtype: macho_core::model::header::CpuSubtype(candidate.cpu_subtype),
             }
-            .name()
-            .eq_ignore_ascii_case(selector)
+            .matches_selector(selector)
         })
         .collect();
     match matches.as_slice() {
@@ -394,6 +387,44 @@ pub fn resolve_architecture_selector(
                     .join(", ")
             ),
         )),
+    }
+}
+
+/// Resolve a user-facing architecture name or exact raw tuple against every
+/// matching input slice.
+///
+/// CPU-family names retain all subtypes in that family (`arm64` includes
+/// arm64e), while qualified names retain only the named subtype (`arm64e`).
+pub fn resolve_slice_selection(
+    container: &MachoContainer<'_>,
+    selector: &str,
+) -> Result<SliceSelection, DisassemblyError> {
+    if parse_raw_architecture(selector).is_some() {
+        return resolve_architecture_selector(container, selector)
+            .map(|architecture| SliceSelection::One { architecture });
+    }
+    let matches = container_architectures(container)
+        .into_iter()
+        .filter(|candidate| {
+            ArchSpec {
+                cpu_type: macho_core::model::header::CpuType(candidate.cpu_type),
+                cpu_subtype: macho_core::model::header::CpuSubtype(candidate.cpu_subtype),
+            }
+            .matches_selector(selector)
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [architecture] => Ok(SliceSelection::One {
+            architecture: *architecture,
+        }),
+        [] => Err(DisassemblyError::new(
+            "analysis.disassembly.arch.unsupported",
+            format!("architecture '{selector}' is not present in the input"),
+        )),
+        _ => Ok(SliceSelection::Many {
+            architectures: crate::report::NonEmpty::new(matches)
+                .expect("checked non-empty architecture selection"),
+        }),
     }
 }
 
@@ -632,7 +663,7 @@ fn validate_request(
             ))
         }
         DisassemblySelection::Address { .. }
-            if container.is_fat() && matches!(request.arches, SliceSelection::All) =>
+            if container.is_fat() && !matches!(&request.arches, SliceSelection::One { .. }) =>
         {
             Err(DisassemblyError::new(
                 REQUEST_INVALID_CODE,
@@ -646,10 +677,6 @@ fn validate_request(
 fn report_request(
     request: &DisassemblyRequest,
 ) -> Result<DisassemblyReportRequest, DisassemblyError> {
-    let arch = match request.arches {
-        SliceSelection::All => None,
-        SliceSelection::Exact(value) => Some(value),
-    };
     let selection = match &request.selection {
         DisassemblySelection::ExecutableSections => ReportSelection::ExecutableSections,
         DisassemblySelection::Sections(values) => {
@@ -685,7 +712,7 @@ fn report_request(
         },
     };
     Ok(DisassemblyReportRequest {
-        arch,
+        architectures: request.arches.clone(),
         selection,
         mode: match request.mode {
             DecodeMode::Recovering => ReportDecodeMode::Recovering,
@@ -730,15 +757,16 @@ fn selected_slices<'input, 'data>(
     container: &'input MachoContainer<'data>,
     selection: &SliceSelection,
 ) -> Result<Vec<SelectedSlice<'input, 'data>>, DisassemblyError> {
-    let wanted = match selection {
-        SliceSelection::All => None,
-        SliceSelection::Exact(value) => Some(*value),
+    let wanted = |candidate: Architecture| match selection {
+        SliceSelection::All => true,
+        SliceSelection::One { architecture } => *architecture == candidate,
+        SliceSelection::Many { architectures } => architectures.as_slice().contains(&candidate),
     };
     let mut slices = Vec::new();
     match container {
         MachoContainer::Thin(macho) => {
             let architecture = architecture_for_macho(macho);
-            if wanted.is_none_or(|wanted| wanted == architecture) {
+            if wanted(architecture) {
                 slices.push(SelectedSlice::new(macho, 0, 0, architecture)?);
             }
         }
@@ -748,7 +776,7 @@ fn selected_slices<'input, 'data>(
                     cpu_type: fat_arch.spec().cpu_type.0,
                     cpu_subtype: fat_arch.spec().cpu_subtype.0,
                 };
-                if wanted.is_none_or(|wanted| wanted == architecture) {
+                if wanted(architecture) {
                     slices.push(SelectedSlice::new(
                         fat_arch.macho(),
                         index as u32,

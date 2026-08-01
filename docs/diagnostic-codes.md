@@ -20,7 +20,7 @@ unregistered constants, and rows without an owning constant.
 | `analysis.disassembly.arch.unsupported` | error | A selected raw CPU tuple is absent or unsupported by the decoder. |
 | `analysis.disassembly.count.unsatisfied` | error | Natural section end was reached before the requested instruction count. |
 | `analysis.disassembly.output.failed` | error | Streamed disassembly output could not be written to its destination. |
-| `analysis.disassembly.report.invalid` | error | A schema-version-1 disassembly report is internally inconsistent. |
+| `analysis.disassembly.report.invalid` | error | A schema-version-2 disassembly report is internally inconsistent. |
 | `analysis.disassembly.request.invalid` | error | A disassembly request has an invalid cross-field combination. |
 | `analysis.disassembly.section.invalid` | error | An exact section selector is malformed. |
 | `analysis.disassembly.section.missing` | error | An exact selected section is absent or not file-backed. |
@@ -29,6 +29,7 @@ unregistered constants, and rows without an owning constant.
 | `analysis.disassembly.symbol.metadata_invalid` | error | Metadata required to prove symbol ownership is malformed. |
 | `analysis.disassembly.symbol.missing` | error | An exact raw symbol name is absent from nlist and export authorities. |
 | `analysis.disassembly.symbol.non_code` | error | An exact selected symbol is not backed by an instruction section. |
+| `analysis.domain.type_mismatch` | error | A typed report key was applied to a payload from another analysis domain. |
 | `analysis.dwarf.failed` | error | DWARF analysis failed while retaining its typed source. |
 | `analysis.dyld.failed` | error | Dyld analysis failed while retaining its typed source. |
 | `analysis.exports.failed` | warning | Export extraction failed and the selected domain returned an issue. |

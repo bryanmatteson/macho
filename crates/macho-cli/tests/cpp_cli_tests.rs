@@ -34,7 +34,7 @@ fn cpp_cli_json_emits_conservative_canonical_recovery() {
     let envelope: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("JSON envelope");
     let data = &envelope["data"];
-    assert_eq!(data["schema_version"], 1);
+    assert_eq!(data["schema_version"], 2);
     assert_eq!(data["language"], "cpp");
     let slice = &data["slices"][0];
     assert_eq!(slice["observations"].as_array().map(Vec::len), Some(3));

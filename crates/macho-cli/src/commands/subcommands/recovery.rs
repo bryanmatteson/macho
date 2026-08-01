@@ -130,9 +130,9 @@ pub fn run(
         execute_header_correlation(&mut report, corpus.roots, &corpus.declarations)?;
     }
     if view == ViewArg::Header {
-        if report.slices.as_slice().len() > 1 && selection.arch.is_none() {
+        if report.slices.as_slice().len() > 1 {
             return Err(usage_message(
-                "header output from a fat binary requires --arch",
+                "header output requires exactly one selected architecture; use a qualified --arch such as arm64e",
             ));
         }
         project_headers(&mut report, language)?;
@@ -722,9 +722,11 @@ fn language_name(language: RecoveryLanguage) -> &'static str {
 }
 
 fn slice_arch(slice: &macho::analysis::report::SliceRecovery) -> String {
-    let cpu = macho::core::model::header::CpuType(slice.architecture.cpu_type);
-    let subtype = macho::core::model::header::CpuSubtype(slice.architecture.cpu_subtype);
-    format!("{} ({})", cpu.name(), subtype.name(cpu))
+    macho::core::model::header::ArchSpec {
+        cpu_type: macho::core::model::header::CpuType(slice.architecture.cpu_type),
+        cpu_subtype: macho::core::model::header::CpuSubtype(slice.architecture.cpu_subtype),
+    }
+    .name()
 }
 
 fn sha256(bytes: &[u8]) -> String {

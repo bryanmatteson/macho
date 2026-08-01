@@ -150,6 +150,7 @@ fn interpret_bind_opcodes<'data>(
                     lib_ordinal,
                     addend,
                     weak: symbol_flags & 0x01 != 0,
+                    symbol_flags,
                     lazy,
                 });
                 segment_offset += pointer_size;
@@ -163,6 +164,7 @@ fn interpret_bind_opcodes<'data>(
                     lib_ordinal,
                     addend,
                     weak: symbol_flags & 0x01 != 0,
+                    symbol_flags,
                     lazy,
                 });
                 let skip = reader.read_uleb128()?;
@@ -177,6 +179,7 @@ fn interpret_bind_opcodes<'data>(
                     lib_ordinal,
                     addend,
                     weak: symbol_flags & 0x01 != 0,
+                    symbol_flags,
                     lazy,
                 });
                 segment_offset += pointer_size + imm as u64 * pointer_size;
@@ -193,6 +196,7 @@ fn interpret_bind_opcodes<'data>(
                         lib_ordinal,
                         addend,
                         weak: symbol_flags & 0x01 != 0,
+                        symbol_flags,
                         lazy,
                     });
                     segment_offset += pointer_size + skip;

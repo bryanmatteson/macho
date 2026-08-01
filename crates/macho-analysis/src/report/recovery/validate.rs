@@ -7,6 +7,8 @@ use super::*;
 pub enum RecoveryValidationError {
     #[error("recovery language does not match request language")]
     LanguageMismatch,
+    #[error("request architecture selection does not match emitted slices")]
+    ArchitectureSelection,
     #[error("invalid recovery limit at index {index}: {value} exceeds 1..={maximum}")]
     InvalidLimit {
         index: usize,
@@ -42,6 +44,19 @@ impl RecoveryReport {
     pub fn validate(&self) -> Result<(), RecoveryValidationError> {
         if self.language != self.request.language {
             return Err(RecoveryValidationError::LanguageMismatch);
+        }
+        let emitted_architectures = self
+            .slices
+            .as_slice()
+            .iter()
+            .map(|slice| slice.architecture)
+            .collect::<Vec<_>>();
+        if !self
+            .request
+            .architectures
+            .matches_resolved(&emitted_architectures)
+        {
+            return Err(RecoveryValidationError::ArchitectureSelection);
         }
         self.request.limits.validate()?;
         let expected_digest = canonical_request_digest(&self.request)?;

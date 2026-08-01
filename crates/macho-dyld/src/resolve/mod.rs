@@ -7,6 +7,8 @@ pub mod fixups;
 pub mod pointers;
 
 pub use evidence::{
-    PointerAuthentication, PointerEncoding, PointerObservation, PointerResolver, PointerTarget,
+    DyldPointer, InventoryPointerTarget, LegacyBindOccurrence, LegacyBindStream,
+    PointerAuthentication, PointerEncoding, PointerInventory, PointerInventoryContinuation,
+    PointerObservation, PointerResolver, PointerTarget,
 };
 pub use pointers::{ResolutionContext, ResolvedTarget};

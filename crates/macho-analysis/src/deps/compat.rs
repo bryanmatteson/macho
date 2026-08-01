@@ -158,24 +158,26 @@ impl CompatReport {
 }
 
 fn check_arch(target: &MachoFile<'_>, provider: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
-    let t_cpu = target.header().cpu_type();
-    let p_cpu = provider.header().cpu_type();
+    let target_arch = target.header().arch_spec();
+    let provider_arch = provider.header().arch_spec();
 
-    if t_cpu != p_cpu {
+    if target_arch.cpu_type != provider_arch.cpu_type
+        || target_arch.cpu_subtype.masked() != provider_arch.cpu_subtype.masked()
+    {
         findings.push(CompatFinding {
             category: CompatCategory::Architecture,
             severity: CompatSeverity::Incompatible,
             message: format!(
                 "architecture mismatch: target is {} but provider is {}",
-                t_cpu.name(),
-                p_cpu.name(),
+                target_arch.name(),
+                provider_arch.name(),
             ),
         });
     } else {
         findings.push(CompatFinding {
             category: CompatCategory::Architecture,
             severity: CompatSeverity::Info,
-            message: format!("architecture match: {}", t_cpu.name()),
+            message: format!("architecture match: {}", target_arch.name()),
         });
     }
 }
@@ -477,5 +479,38 @@ fn check_rpaths(target: &MachoFile<'_>, findings: &mut Vec<CompatFinding>) {
             severity: CompatSeverity::Info,
             message: format!("target defines {} rpath(s)", rpaths.len()),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn first(bytes: &[u8]) -> macho_core::model::container::MachoContainer<'_> {
+        macho_core::parse(bytes).expect("parse fixture")
+    }
+
+    #[test]
+    fn architecture_compatibility_distinguishes_arm64e_from_plain_arm64() {
+        let plain_bytes = macho_test_support::disassembly_arm64();
+        let arm64e_bytes = macho_test_support::disassembly_arm64e();
+        let plain = first(&plain_bytes);
+        let arm64e = first(&arm64e_bytes);
+        let report = CompatReport::check(
+            plain.first_macho().unwrap(),
+            "plain",
+            arm64e.first_macho(),
+            Some("arm64e"),
+        )
+        .unwrap();
+
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| finding.category == CompatCategory::Architecture)
+            .expect("architecture finding");
+        assert_eq!(finding.severity, CompatSeverity::Incompatible);
+        assert!(finding.message.contains("target is arm64"));
+        assert!(finding.message.contains("provider is arm64e"));
     }
 }

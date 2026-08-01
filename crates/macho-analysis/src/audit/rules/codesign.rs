@@ -67,7 +67,8 @@ impl AuditRule for UnsignedBinary {
                 evidence: vec![format!("file_type={ft}, no LC_CODE_SIGNATURE")],
                 remediation: Some(
                     "Sign in process with `macho patch <binary> --sign-p12 <identity.p12> \
-                     --p12-password-file <password-file> --in-place`"
+                     --p12-password-file <password-file> --output <signed-binary>`; inspect the \
+                     new output before replacing the original"
                         .into(),
                 ),
             });
@@ -117,7 +118,13 @@ impl AuditRule for WeakHashAlgorithm {
                     title: "code signature uses SHA-1".into(),
                     body: "SHA-1 is considered weak. Modern binaries should use SHA-256.".into(),
                     evidence: vec![format!("hash_type={}", cs.hash_type)],
-                    remediation: Some("Re-sign with `--digest-algorithm=sha256`".into()),
+                    remediation: Some(
+                        "Re-sign to a new output with the built-in signer, which includes a \
+                         SHA-256 CodeDirectory: `macho patch <binary> --sign-p12 <identity.p12> \
+                         --p12-password-file <password-file> --output <sha256-signed-binary>`; \
+                         inspect the new output before replacing the original"
+                            .into(),
+                    ),
                 });
             }
         }
@@ -217,15 +224,15 @@ impl AuditRule for MissingTeamId {
             if cs.team_id.is_none() && cs.has_cms_signature {
                 findings.push(AuditFinding {
                     rule_id: self.id().to_owned(),
-                    severity: AuditSeverity::Warning,
-                    title: "signed binary missing team ID".into(),
-                    body: "A CMS-signed binary without a team ID may fail notarization \
-                           or Gatekeeper checks."
+                    severity: AuditSeverity::Info,
+                    title: "CMS signature has no team ID".into(),
+                    body: "Team IDs are expected for third-party Developer ID and App Store \
+                           distribution, but their absence can be valid for platform or internal \
+                           signing. Distribution context is required before treating this as a \
+                           defect."
                         .into(),
                     evidence: vec!["CMS signature present, team_id absent".into()],
-                    remediation: Some(
-                        "Sign with a Developer ID certificate that includes a team ID".into(),
-                    ),
+                    remediation: None,
                 });
             }
         }

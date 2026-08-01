@@ -530,7 +530,7 @@ fn recovering_text_json_and_color_share_one_report() {
     assert!(json.stderr.is_empty());
     let header = events(&lines, "header");
     assert_eq!(header.len(), 1);
-    assert_eq!(header[0]["schema_version"], 1);
+    assert_eq!(header[0]["schema_version"], 2);
     assert_eq!(events(&lines, "region")[0]["selection_source"], "address");
     assert_eq!(
         json.stdout,
@@ -765,13 +765,13 @@ fn fat_all_slice_json_order_offsets_and_process_route_are_stable() {
 }
 
 #[test]
-fn architecture_collision_and_unsupported_slices_are_explicit() {
+fn family_architecture_selection_retains_colliding_subtypes_and_raw_selection_is_exact() {
     let collision_path = fixture_path(
         "arch-collision",
         &macho_test_support::disassembly_fat_x86_subtypes(),
     );
     let collision = collision_path.to_str().unwrap();
-    let ambiguous = macho_cli::run_captured([
+    let family = macho_cli::run_captured([
         "disassemble",
         collision,
         "--arch",
@@ -781,16 +781,20 @@ fn architecture_collision_and_unsupported_slices_are_explicit() {
         "--color",
         "never",
     ]);
-    assert_eq!(ambiguous.code, 1);
-    assert!(ambiguous.stdout.is_empty());
-    let value: serde_json::Value = serde_json::from_slice(&ambiguous.stderr).unwrap();
+    assert_eq!(family.code, 0);
+    let family = ndjson(&family.stdout);
     assert_eq!(
-        value["diagnostics"][0]["code"],
-        "analysis.disassembly.arch.ambiguous"
+        events(&family, "slice")
+            .iter()
+            .map(|slice| {
+                slice["identity"]["image"]["architecture"]["cpu_subtype"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>(),
+        [3, 8],
+        "the CPU-family selector must retain both subtype slices"
     );
-    let message = value["diagnostics"][0]["message"].as_str().unwrap();
-    assert!(message.contains("0x01000007:0x00000003"));
-    assert!(message.contains("0x01000007:0x00000008"));
 
     let selected = macho_cli::run_captured([
         "disassemble",

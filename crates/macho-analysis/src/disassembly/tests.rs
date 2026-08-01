@@ -340,10 +340,12 @@ fn exact_unknown_and_mixed_fat_unsupported_slices_fail_closed() {
     let bytes = macho_test_support::disassembly_x86_64();
     let container = macho_core::parse(&bytes).unwrap();
     let request = DisassemblyRequest {
-        arches: SliceSelection::Exact(Architecture {
-            cpu_type: macho_test_support::CPU_TYPE_UNKNOWN_64 as i32,
-            cpu_subtype: 0,
-        }),
+        arches: SliceSelection::One {
+            architecture: Architecture {
+                cpu_type: macho_test_support::CPU_TYPE_UNKNOWN_64 as i32,
+                cpu_subtype: 0,
+            },
+        },
         ..DisassemblyRequest::default()
     };
     assert_eq!(
@@ -909,7 +911,7 @@ fn thin_and_fat_identity_offsets_use_both_coordinate_systems() {
     let fat = disassemble(
         &fat_container,
         &DisassemblyRequest {
-            arches: SliceSelection::Exact(architecture),
+            arches: SliceSelection::One { architecture },
             selection: DisassemblySelection::Address {
                 start: Va(0x1_0000_0100),
                 extent: AddressExtent::InstructionCount(NonZeroUsize::new(1).unwrap()),
@@ -936,7 +938,7 @@ fn thin_and_fat_identity_offsets_use_both_coordinate_systems() {
 }
 
 #[test]
-fn duplicate_display_architectures_require_a_raw_tuple() {
+fn family_selectors_are_ambiguous_for_exact_resolution_but_qualified_names_are_exact() {
     let bytes = macho_test_support::disassembly_fat_x86_subtypes();
     let container = macho_core::parse(&bytes).unwrap();
     let error = resolve_architecture_selector(&container, "x86_64").unwrap_err();
@@ -945,6 +947,8 @@ fn duplicate_display_architectures_require_a_raw_tuple() {
     assert!(error.message().contains("0x01000007:0x00000008"));
     let exact = resolve_architecture_selector(&container, "0x01000007:0x00000008").unwrap();
     assert_eq!(exact.cpu_subtype, 8);
+    let qualified = resolve_architecture_selector(&container, "x86_64h").unwrap();
+    assert_eq!(qualified.cpu_subtype, 8);
 }
 
 #[test]
@@ -960,7 +964,7 @@ fn report_deserialization_rejects_unknown_fields_and_bad_version() {
 
     let report = disassemble(&container, &DisassemblyRequest::default()).unwrap();
     let mut value = serde_json::to_value(report).unwrap();
-    value["schema_version"] = serde_json::json!(2);
+    value["schema_version"] = serde_json::json!(1);
     assert!(
         serde_json::from_value::<crate::report::disassembly::DisassemblyReport>(value).is_err()
     );
@@ -997,6 +1001,12 @@ fn report_validator_rejects_inconsistent_wire_evidence() {
     };
     rejects(|value| value["container"]["content_sha256"] = serde_json::json!("ABC"));
     rejects(|value| value["container"]["slice_count"] = serde_json::json!(2));
+    rejects(|value| {
+        value["request"]["architectures"] = serde_json::json!({
+            "kind": "one",
+            "architecture": { "cpu_type": 0, "cpu_subtype": 0 }
+        })
+    });
     rejects(|value| value["slices"][0]["identity"]["image"]["byte_len"] = serde_json::json!(1));
     rejects(|value| value["slices"][0]["container_offset"] = serde_json::json!(1));
     rejects(|value| value["slices"][0]["decoded_bytes"] = serde_json::json!(1));
@@ -1052,6 +1062,18 @@ fn report_validator_rejects_inconsistent_wire_evidence() {
     let fat_bytes = macho_test_support::disassembly_fat();
     let fat_container = macho_core::parse(&fat_bytes).unwrap();
     let fat = disassemble(&fat_container, &DisassemblyRequest::default()).unwrap();
+    let mut false_subset = serde_json::to_value(&fat).unwrap();
+    let second_architecture =
+        false_subset["slices"][1]["identity"]["image"]["architecture"].clone();
+    let first_architecture = false_subset["slices"][0]["identity"]["image"]["architecture"].clone();
+    false_subset["request"]["architectures"] = serde_json::json!({
+        "kind": "many",
+        "architectures": [second_architecture, first_architecture]
+    });
+    assert!(
+        serde_json::from_value::<crate::report::disassembly::DisassemblyReport>(false_subset)
+            .is_err()
+    );
     let mut duplicate = serde_json::to_value(&fat).unwrap();
     duplicate["slices"][1]["identity"]["image"]["slice_index"] =
         duplicate["slices"][0]["identity"]["image"]["slice_index"].clone();

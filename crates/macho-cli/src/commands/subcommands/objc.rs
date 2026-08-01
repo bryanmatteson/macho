@@ -1,8 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Write;
 
 mod filters;
 mod model;
+mod xrefs;
 
 use filters::*;
 use model::*;
@@ -12,7 +13,6 @@ use macho::analysis::report::{
     ObjCEntity, ObjCEntityId, ObjCGraphEdge, ObjCMethod, ObjCMethodKind, ObjCPresence, ObjCReport,
     ObjCSliceReport, project_objc_headers, recover_objc_container,
 };
-use macho::core::model::symbol::{SymbolTable, SymbolType};
 use serde::Serialize;
 
 use crate::commands::args::{ArchitectureArgs, InputArgs, OptionalInputArgs};
@@ -719,24 +719,7 @@ fn run_xrefs(
     output: OutputOptions,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let mmap = map_input(&input.path)?;
-    let container =
-        macho::parse(&mmap).with_context(|| format!("failed to parse {}", input.path.display()))?;
-    let mut report = recover_objc_container(&container, selection.arch.as_deref())?;
-    apply_filters(&mut report, filters);
-    let machos = container
-        .macho_files()
-        .filter(|macho| {
-            selection
-                .arch
-                .as_deref()
-                .is_none_or(|arch| arch == macho.header().cpu_type().name())
-        })
-        .collect::<Vec<_>>();
-    let mut views = Vec::new();
-    for (slice, macho) in report.slices.as_slice().iter().zip(machos) {
-        views.extend(xref_views(slice, macho));
-    }
+    let views = xrefs::recover_views(input, selection, filters)?;
     if output.format() == OutputFormat::Json {
         return crate::commands::output::json::write_pretty(out, &views).map_err(Into::into);
     }
@@ -765,87 +748,4 @@ fn run_xrefs(
         writeln!(out, "  {row}")?;
     }
     Ok(())
-}
-
-#[derive(Serialize)]
-struct XrefView {
-    arch: String,
-    member_id: String,
-    origin_id: ObjCEntityId,
-    origin: String,
-    selector: String,
-    method_kind: String,
-    implementation: u64,
-    status: String,
-    symbols: Vec<String>,
-    references: Vec<macho::analysis::xref::Xref>,
-}
-
-fn xref_views(
-    slice: &ObjCSliceReport,
-    macho: &macho::core::model::macho_file::MachoFile<'_>,
-) -> Vec<XrefView> {
-    let selected = slice
-        .selection
-        .selected_entity_ids
-        .iter()
-        .map(|id| id.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut symbols = BTreeMap::<u64, Vec<String>>::new();
-    if let Ok(table) = macho.ext::<SymbolTable<'_>>() {
-        for symbol in table.symbols() {
-            if symbol.sym_type == SymbolType::Section && symbol.value != 0 {
-                symbols
-                    .entry(symbol.value)
-                    .or_default()
-                    .push(symbol.name.to_owned());
-            }
-        }
-    }
-    let xrefs = macho::analysis::xref::XrefIndex::build(macho).ok();
-    let mut result = Vec::new();
-    for entity in &slice.entities {
-        if !selected.contains(entity.common().id.as_str()) {
-            continue;
-        }
-        for method in entity_methods(entity) {
-            let Some(implementation) = known(&method.implementation).and_then(Option::as_ref)
-            else {
-                continue;
-            };
-            let names = symbols
-                .get(&implementation.virtual_address)
-                .cloned()
-                .unwrap_or_default();
-            let status = match names.len() {
-                0 => "unresolved",
-                1 => "resolved",
-                _ => "ambiguous",
-            };
-            result.push(XrefView {
-                arch: architecture_name(slice),
-                member_id: method.id.to_string(),
-                origin_id: method.origin.clone(),
-                origin: entity_name_by_id(slice, &method.origin)
-                    .unwrap_or_else(|| "<unknown>".to_owned()),
-                selector: known(&method.selector)
-                    .map(|value| value.spelling.clone())
-                    .unwrap_or_else(|| "<unknown>".to_owned()),
-                method_kind: method_kind_name(method.kind).to_owned(),
-                implementation: implementation.virtual_address,
-                status: status.to_owned(),
-                symbols: names,
-                references: xrefs
-                    .as_ref()
-                    .map(|index| {
-                        index
-                            .refs_to(macho::core::model::addr::Va(implementation.virtual_address))
-                            .cloned()
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-            });
-        }
-    }
-    result
 }

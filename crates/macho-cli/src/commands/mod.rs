@@ -47,12 +47,12 @@ Analysis:
   snapshot       JSON structural snapshot
 
 Mutation:
-  patch          Apply structural patches (rpaths, dylibs, signatures, bytes)
+  patch          Safely patch structure, sections, executable entries, and signatures
   header-infer   Reconstruct Mach-O headers from evidence
 
 Special:
   fileset        Inspect fileset entries
-  cache          Inspect dyld shared cache";
+  cache          Inspect cache families and reconstruct standalone images";
 
 #[derive(Parser)]
 #[command(
@@ -174,7 +174,7 @@ enum Commands {
     Snapshot(subcommands::snapshot::SnapshotArgs),
 
     // ── Mutation ───────────────────────────────────────────────────────
-    /// Apply structural patches (rpaths, dylibs, signatures, bytes)
+    /// Safely patch structure, sections, executable entries, and signatures
     #[command(hide = true)]
     Patch(subcommands::patch::PatchArgs),
     /// Reconstruct Mach-O headers from evidence
@@ -185,7 +185,7 @@ enum Commands {
     /// Inspect fileset entries
     #[command(hide = true)]
     Fileset(subcommands::fileset::FilesetArgs),
-    /// Inspect dyld shared cache
+    /// Inspect cache families and reconstruct standalone images
     #[command(hide = true)]
     Cache(subcommands::dyld_cache::DyldCacheArgs),
 }

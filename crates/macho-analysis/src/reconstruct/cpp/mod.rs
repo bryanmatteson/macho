@@ -157,7 +157,7 @@ pub fn build_image_index(macho: &MachoFile<'_>) -> Result<types::CppImageIndex> 
 
     Ok(types::CppImageIndex {
         image: types::CppImageInfo {
-            arch: macho.header().cpu_type().name().to_string(),
+            arch: macho.header().arch_spec().name(),
             uuid: macho.uuid().map(crate::core::format_uuid),
             install_name: macho.load_commands().iter().find_map(|lc| match lc.kind() {
                 crate::core::LoadCommand::IdDylib(data) => Some(data.name.to_string()),

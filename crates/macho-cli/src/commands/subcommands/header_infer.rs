@@ -250,8 +250,11 @@ fn architecture_by_name(report: &RecoveryReport, name: &str) -> Result<Architect
 }
 
 fn architecture_name(architecture: Architecture) -> String {
-    let cpu = macho::core::model::header::CpuType(architecture.cpu_type);
-    cpu.name().to_owned()
+    macho::core::model::header::ArchSpec {
+        cpu_type: macho::core::model::header::CpuType(architecture.cpu_type),
+        cpu_subtype: macho::core::model::header::CpuSubtype(architecture.cpu_subtype),
+    }
+    .name()
 }
 
 fn print_bundle(

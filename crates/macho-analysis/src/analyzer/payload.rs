@@ -178,7 +178,10 @@ impl DomainPayload {
     }
 }
 
-fn validate_typed_payload(domain: AnalysisDomain, value: Value) -> Result<Value, String> {
+pub(super) fn validate_typed_payload(
+    domain: AnalysisDomain,
+    value: Value,
+) -> Result<Value, String> {
     use crate::report::{ObjCReport, RecoveryLanguage, RecoveryReport, SwiftReport};
 
     match domain {
@@ -260,7 +263,7 @@ mod tests {
         let mismatched = serde_json::json!({
             "kind": "c_surface",
             "report_schema": 1,
-            "report": {"schema_version": 1, "slices": []}
+            "report": {"schema_version": 2, "slices": []}
         });
         assert!(serde_json::from_value::<DomainPayload>(mismatched).is_err());
     }

@@ -298,9 +298,11 @@ fn record_kind_text(value: RecordKind) -> &'static str {
 }
 
 pub(super) fn architecture_name(slice: &ObjCSliceReport) -> String {
-    let cpu = macho::core::model::header::CpuType(slice.architecture.cpu_type);
-    let subtype = macho::core::model::header::CpuSubtype(slice.architecture.cpu_subtype);
-    format!("{} ({})", cpu.name(), subtype.name(cpu))
+    macho::core::model::header::ArchSpec {
+        cpu_type: macho::core::model::header::CpuType(slice.architecture.cpu_type),
+        cpu_subtype: macho::core::model::header::CpuSubtype(slice.architecture.cpu_subtype),
+    }
+    .name()
 }
 
 pub(super) fn entity_kind(entity: &ObjCEntity) -> &'static str {

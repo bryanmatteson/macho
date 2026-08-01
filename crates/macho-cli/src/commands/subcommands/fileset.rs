@@ -70,6 +70,11 @@ fn run_list(
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
     let plan = ContainerPlan::new([AnalysisDomain::LoadCommands]).with_limits(limits);
+    let plan = if let Some(arch) = arch {
+        plan.with_slices([arch.to_owned()])
+    } else {
+        plan
+    };
     let document = Analyzer.run(&container, &plan.compile())?;
     let report =
         ContainerDocumentReport::from_document(&document, &[AnalysisDomain::LoadCommands], false);
@@ -79,11 +84,6 @@ fn run_list(
     if let Some(fileset) = report.fileset.as_ref() {
         let mut entries_by_arch: BTreeMap<&str, Vec<_>> = BTreeMap::new();
         for entry in &fileset.entries {
-            if let Some(filter) = arch
-                && !entry.arch.eq_ignore_ascii_case(filter)
-            {
-                continue;
-            }
             entries_by_arch
                 .entry(entry.arch.as_str())
                 .or_default()
@@ -153,9 +153,23 @@ fn run_inspect(
         macho::parse(&mmap).with_context(|| format!("failed to parse {}", path.display()))?;
 
     let all_matches = container.inspect_fileset_entry(entry_id);
+    let selected_arches = container
+        .macho_files()
+        .filter(|macho| {
+            arch.is_none_or(|selector| macho.header().arch_spec().matches_selector(selector))
+        })
+        .map(|macho| macho.header().arch_spec().name())
+        .collect::<std::collections::BTreeSet<_>>();
+    if selected_arches.is_empty()
+        && let Some(selector) = arch
+    {
+        return Err(input_message(format!(
+            "no architecture matching '{selector}' found"
+        )));
+    }
     let matches: Vec<_> = all_matches
         .iter()
-        .filter(|inspection| arch.is_none_or(|filter| inspection.arch.eq_ignore_ascii_case(filter)))
+        .filter(|inspection| selected_arches.contains(&inspection.arch))
         .collect();
 
     if matches.is_empty() {

@@ -110,12 +110,22 @@ impl Default for DiffPlan {
                 AnalysisDomain::Header,
                 AnalysisDomain::LoadCommands,
                 AnalysisDomain::Segments,
+                AnalysisDomain::Relocations,
                 AnalysisDomain::Symbols,
                 AnalysisDomain::Exports,
                 AnalysisDomain::Imports,
                 AnalysisDomain::Fixups,
                 AnalysisDomain::Codesign,
                 AnalysisDomain::Objc,
+                AnalysisDomain::Swift,
+                AnalysisDomain::Strings,
+                AnalysisDomain::Ranges,
+                AnalysisDomain::Xrefs,
+                AnalysisDomain::Dependencies,
+                AnalysisDomain::Audit,
+                AnalysisDomain::CSurface,
+                AnalysisDomain::CppSurface,
+                AnalysisDomain::ObjcHeaders,
             ]
             .into_iter()
             .collect(),
@@ -454,4 +464,34 @@ pub(crate) fn resolve_domains(plan: &AnalysisPlan) -> BTreeSet<AnalysisDomain> {
         add(*domain, &plan.excluded, &mut resolved);
     }
     resolved
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_diff_selects_high_value_reverse_engineering_domains() {
+        let selected = DiffPlan::default().selected_domains().clone();
+        for domain in [
+            AnalysisDomain::Relocations,
+            AnalysisDomain::Strings,
+            AnalysisDomain::Ranges,
+            AnalysisDomain::Xrefs,
+            AnalysisDomain::Dependencies,
+            AnalysisDomain::Audit,
+            AnalysisDomain::CSurface,
+            AnalysisDomain::CppSurface,
+            AnalysisDomain::ObjcHeaders,
+            AnalysisDomain::Swift,
+        ] {
+            assert!(selected.contains(&domain), "missing {}", domain.as_str());
+        }
+        assert!(
+            !DiffPlan::default()
+                .exclude(AnalysisDomain::Xrefs)
+                .selected_domains()
+                .contains(&AnalysisDomain::Xrefs)
+        );
+    }
 }

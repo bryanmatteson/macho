@@ -10,7 +10,7 @@ use super::Style;
 pub enum Format {
     /// Human-readable text.
     Text,
-    /// Versioned JSON envelope.
+    /// JSON report or command-documented NDJSON stream.
     Json,
     /// SARIF 2.1 report.
     Sarif,

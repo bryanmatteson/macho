@@ -1,5 +1,4 @@
 use crate::model::container::MachoContainer;
-use crate::model::header::ArchSpec;
 use crate::model::macho_file::MachoFile;
 use std::path::Path;
 
@@ -43,11 +42,7 @@ pub fn read_input_string(path: &Path) -> Result<String> {
 
 /// Performs arch_name_for_mach.
 pub fn arch_name_for_mach(macho: &MachoFile<'_>) -> String {
-    let spec = ArchSpec {
-        cpu_type: macho.header().cpu_type(),
-        cpu_subtype: macho.header().cpu_subtype(),
-    };
-    spec.name()
+    macho.header().arch_spec().name()
 }
 
 /// Performs for_each_selected_mach.
@@ -60,7 +55,7 @@ pub fn for_each_selected_mach(
         MachoContainer::Thin(macho) => {
             let arch_name = arch_name_for_mach(macho);
             if let Some(filter) = arch_filter
-                && !arch_name.eq_ignore_ascii_case(filter)
+                && !macho.header().arch_spec().matches_selector(filter)
             {
                 return Err(input_message(format!(
                     "no architecture matching '{filter}' found (available: {arch_name})"
@@ -75,7 +70,7 @@ pub fn for_each_selected_mach(
             for arch in fat.arches() {
                 let arch_name = arch.spec().name();
                 if let Some(filter) = arch_filter
-                    && !arch_name.eq_ignore_ascii_case(filter)
+                    && !arch.spec().matches_selector(filter)
                 {
                     continue;
                 }

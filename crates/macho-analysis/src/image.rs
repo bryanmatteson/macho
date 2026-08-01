@@ -86,7 +86,7 @@ impl ImageInfo {
     /// Performs from_mach.
     pub fn from_mach(macho: &MachoFile<'_>) -> Self {
         let header = macho.header();
-        let arch = header.cpu_type().name().to_string();
+        let arch = header.arch_spec().name();
         let file_type = header.file_type().name().to_string();
         let uuid = macho.uuid().map(format_uuid);
         let image_base = macho.image_base().0;

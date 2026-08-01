@@ -157,10 +157,12 @@ fn cases() -> Vec<Case> {
                 "1",
             ],
             request: request(
-                SliceSelection::Exact(Architecture {
-                    cpu_type: 0x0100_000c,
-                    cpu_subtype: 2,
-                }),
+                SliceSelection::One {
+                    architecture: Architecture {
+                        cpu_type: 0x0100_000c,
+                        cpu_subtype: 2,
+                    },
+                },
                 DisassemblySelection::Address {
                     start: Va(0x1_0000_0100),
                     extent: AddressExtent::InstructionCount(NonZeroUsize::new(1).unwrap()),

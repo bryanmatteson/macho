@@ -335,9 +335,32 @@ fn patch_signing_pkcs12_produces_verified_cms_without_secret_output() {
         .ext::<CodeSignature<'_>>()
         .expect("parse certificate signature");
     assert!(signature.cms_signature_present());
+    assert!(
+        signature
+            .code_directories()
+            .iter()
+            .any(|directory| directory.hash_type.name() == "SHA-256")
+    );
     assert_eq!(
         signature.identifier(),
         Some("dev.matteson.macho.cli-certificate")
+    );
+
+    let audit = run_cli([
+        "audit",
+        output_path.to_str().expect("UTF-8 temp path"),
+        "--format",
+        "json",
+    ]);
+    assert!(
+        audit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&audit.stderr)
+    );
+    let audit: serde_json::Value = serde_json::from_slice(&audit.stdout).expect("parse audit JSON");
+    assert!(
+        !audit.to_string().contains("\"rule_id\":\"CS003\""),
+        "built-in certificate re-signing must resolve CS003: {audit}"
     );
 
     for path in [input_path, p12_path, password_path, output_path] {

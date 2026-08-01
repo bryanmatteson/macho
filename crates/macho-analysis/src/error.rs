@@ -21,6 +21,7 @@ pub(crate) const OBJC_FAILED_CODE: &str = "analysis.objc.failed";
 const SWIFT_FAILED_CODE: &str = "analysis.swift.failed";
 const CPP_FAILED_CODE: &str = "analysis.cpp.failed";
 const UNSUPPORTED_CAPABILITY_CODE: &str = "analysis.capability.unsupported";
+const DOMAIN_TYPE_MISMATCH_CODE: &str = "analysis.domain.type_mismatch";
 pub(crate) const EXPORTS_FAILED_CODE: &str = "analysis.exports.failed";
 pub(crate) const IMPORTS_FAILED_CODE: &str = "analysis.imports.failed";
 pub(crate) const FIXUPS_FAILED_CODE: &str = "analysis.fixups.failed";
@@ -102,6 +103,8 @@ pub enum AnalysisErrorKind {
     Cpp,
     /// The UnsupportedCapability variant.
     UnsupportedCapability,
+    /// A typed report key was used with a payload from another domain.
+    DomainTypeMismatch,
 }
 
 #[derive(Debug)]
@@ -192,6 +195,7 @@ impl AnalysisError {
             AnalysisErrorKind::Swift => SWIFT_FAILED_CODE,
             AnalysisErrorKind::Cpp => CPP_FAILED_CODE,
             AnalysisErrorKind::UnsupportedCapability => UNSUPPORTED_CAPABILITY_CODE,
+            AnalysisErrorKind::DomainTypeMismatch => DOMAIN_TYPE_MISMATCH_CODE,
         }
     }
 }

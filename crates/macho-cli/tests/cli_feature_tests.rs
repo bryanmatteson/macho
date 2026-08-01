@@ -78,7 +78,7 @@ fn container_json_reports_fileset_entry_offsets() {
 }
 
 #[test]
-fn fileset_list_reports_no_match_for_filtered_arch() {
+fn fileset_list_rejects_an_unmatched_architecture() {
     let path = temp_file_path("fileset-filter");
     let bytes = macho_test_support::fileset64_arm64();
     std::fs::write(&path, bytes).expect("failed to write temp Mach-O");
@@ -93,16 +93,11 @@ fn fileset_list_reports_no_match_for_filtered_arch() {
 
     let _ = std::fs::remove_file(&path);
 
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success(),
-        "fileset command failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("No fileset entries matched architecture 'x86_64'."),
-        "unexpected stdout: {stdout}"
+        stderr.contains("no architecture matching 'x86_64' found"),
+        "unexpected stderr: {stderr}"
     );
 }
 
@@ -194,7 +189,7 @@ fn fat_patch_bytes_requires_arch() {
         "patch",
         fixture_path,
         "--bytes",
-        "0x100:00010203",
+        "0x100,00000000,00010203",
         "--dry-run",
     ]);
 
@@ -570,7 +565,7 @@ fn report_arch_selectors_accept_qualified_slice_names() {
     const CPU_TYPE_ARM64: i64 = 0x0100_000c;
     const CPU_SUBTYPE_ARM64E: i64 = 2;
 
-    for command in ["swift", "objc"] {
+    for command in ["swift", "objc", "c", "cpp"] {
         for selector in ["arm64e", "arm64"] {
             let output = run_cli([
                 command,
@@ -680,7 +675,7 @@ fn a_qualified_arch_selector_narrows_rather_than_widens() {
             .collect()
     };
 
-    for command in ["swift", "objc"] {
+    for command in ["swift", "objc", "c", "cpp"] {
         assert_eq!(
             selected_subtypes(command, "arm64e"),
             vec![i64::from(macho_test_support::CPU_SUBTYPE_ARM64E)],
@@ -691,6 +686,104 @@ fn a_qualified_arch_selector_narrows_rather_than_widens() {
             2,
             "{command} --arch arm64 names the CPU type, so it still selects both"
         );
+    }
+}
+
+#[test]
+fn objc_xrefs_reuses_the_report_slice_selection_without_silent_empty_results() {
+    fn objc_slice(cpu_subtype: u32) -> Vec<u8> {
+        let mut bytes = macho_test_support::disassembly_objc_boundary();
+        bytes[4..8].copy_from_slice(&macho_test_support::CPU_TYPE_ARM64.to_le_bytes());
+        bytes[8..12].copy_from_slice(&cpu_subtype.to_le_bytes());
+        bytes
+    }
+
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (macho_test_support::CPU_TYPE_ARM64, 0, objc_slice(0)),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                macho_test_support::CPU_SUBTYPE_ARM64E,
+                objc_slice(macho_test_support::CPU_SUBTYPE_ARM64E),
+            ),
+        ]),
+        "objc-xrefs-arch-siblings",
+        false,
+    );
+    let path = fixture.path().to_str().expect("utf8 path");
+
+    let xrefs = |selector: &str| -> Vec<serde_json::Value> {
+        let output = run_cli([
+            "objc", "xrefs", path, "--arch", selector, "--format", "json",
+        ]);
+        assert!(
+            output.status.success(),
+            "objc xrefs --arch {selector} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("valid xrefs JSON");
+        envelope["data"].as_array().expect("xref views").to_owned()
+    };
+
+    let family = xrefs("arm64");
+    assert_eq!(family.len(), 2, "both sibling methods must remain visible");
+    assert_eq!(
+        family
+            .iter()
+            .map(|view| view["arch"].as_str().expect("xref arch"))
+            .collect::<Vec<_>>(),
+        ["arm64", "arm64e"]
+    );
+    let qualified = xrefs("arm64e");
+    assert_eq!(qualified.len(), 1, "qualified selection must not go empty");
+    assert_eq!(qualified[0]["arch"], "arm64e");
+}
+
+#[test]
+fn c_and_cpp_headers_reject_a_family_selector_that_matches_multiple_slices() {
+    let fixture = write_macho_fixture(
+        &macho_test_support::fat32(&[
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                0,
+                macho_test_support::disassembly_arm64(),
+            ),
+            (
+                macho_test_support::CPU_TYPE_ARM64,
+                macho_test_support::CPU_SUBTYPE_ARM64E,
+                macho_test_support::disassembly_arm64e(),
+            ),
+        ]),
+        "recovery-header-arch-siblings",
+        false,
+    );
+    let path = fixture.path().to_str().expect("utf8 path");
+
+    for command in ["c", "cpp"] {
+        let family = run_cli([command, path, "--headers", "--arch", "arm64"]);
+        assert!(
+            !family.status.success(),
+            "{command} headers silently accepted a multi-slice family"
+        );
+        assert!(
+            family.stdout.is_empty(),
+            "{command} emitted a partial header"
+        );
+        assert!(
+            String::from_utf8_lossy(&family.stderr)
+                .contains("header output requires exactly one selected architecture"),
+            "unexpected {command} diagnostic: {}",
+            String::from_utf8_lossy(&family.stderr)
+        );
+
+        let qualified = run_cli([command, path, "--headers", "--arch", "arm64e"]);
+        assert!(
+            qualified.status.success(),
+            "{command} qualified header failed: {}",
+            String::from_utf8_lossy(&qualified.stderr)
+        );
+        assert!(!qualified.stdout.is_empty());
     }
 }
 

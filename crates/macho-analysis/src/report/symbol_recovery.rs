@@ -40,11 +40,15 @@ pub fn recover_symbol_container(
             None => "container contains no Mach-O slices".to_owned(),
         }));
     }
-    let architectures = match selected_architecture {
-        Some(_) => ArchitectureSelection::One {
-            architecture: slices[0].architecture,
+    let architectures = match (selected_architecture, slices.as_slice()) {
+        (None, _) => ArchitectureSelection::All,
+        (Some(_), [slice]) => ArchitectureSelection::One {
+            architecture: slice.architecture,
         },
-        None => ArchitectureSelection::All,
+        (Some(_), slices) => ArchitectureSelection::Many {
+            architectures: NonEmpty::new(slices.iter().map(|slice| slice.architecture).collect())
+                .expect("selected recovery slices are non-empty"),
+        },
     };
     let request = recovery_request(language, architectures);
     let request_digest = request_digest(&request)?;
@@ -866,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn amended_v1_rejects_pre_amendment_entity_shape() {
+    fn v2_rejects_pre_amendment_entity_shape() {
         let bytes = macho_test_support::thin64_x86_64_with_data_symbols(&[
             macho_test_support::SymbolFixture {
                 name: "_global",
@@ -885,5 +889,30 @@ mod tests {
             .remove("value_type");
         let error = serde_json::from_value::<RecoveryReport>(value).unwrap_err();
         assert!(error.to_string().contains("value_type"), "{error}");
+    }
+
+    #[test]
+    fn v2_rejects_v1_and_false_architecture_provenance() {
+        let bytes = macho_test_support::thin64_x86_64_with_symbols(&[]);
+        let container = macho_core::parse(&bytes).unwrap();
+        let report =
+            recover_symbol_surface(container.first_macho().unwrap(), RecoveryLanguage::CAbi)
+                .unwrap();
+
+        let mut v1 = serde_json::to_value(&report).unwrap();
+        v1["schema_version"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<RecoveryReport>(v1).is_err());
+
+        let mut wrong_architecture = serde_json::to_value(report).unwrap();
+        wrong_architecture["request"]["architectures"] = serde_json::json!({
+            "kind": "one",
+            "architecture": { "cpu_type": 0, "cpu_subtype": 0 }
+        });
+        let wrong_architecture =
+            serde_json::from_value::<RecoveryReport>(wrong_architecture).unwrap();
+        assert!(matches!(
+            wrong_architecture.validate(),
+            Err(RecoveryValidationError::ArchitectureSelection)
+        ));
     }
 }

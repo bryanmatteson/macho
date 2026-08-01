@@ -1,8 +1,10 @@
 //! Dependency-driven, selective analysis and schema-v3 snapshots.
 
 mod payload;
+mod typed;
 
 pub use payload::DomainPayload;
+pub use typed::{DomainReportKey, domain_reports};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -312,6 +314,26 @@ impl Analyzer {
     ) -> Result<AnalysisDocument> {
         let resolved = resolve_domains(plan);
         let images: Vec<&MachoFile<'_>> = container.macho_files().collect();
+        if let Some(selected) = &plan.selected_slices {
+            let unmatched = selected
+                .iter()
+                .filter(|selector| {
+                    !images.iter().any(|macho| {
+                        macho
+                            .header()
+                            .arch_spec()
+                            .matches_selector(selector.as_str())
+                    })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !unmatched.is_empty() {
+                return Err(AnalysisError::invalid(format!(
+                    "no architecture matching '{}' found",
+                    unmatched.join(", ")
+                )));
+            }
+        }
         let format = match container {
             MachoContainer::Thin(_) => "thin",
             MachoContainer::Fat(_) => "fat",
@@ -326,24 +348,16 @@ impl Analyzer {
             observer,
         };
         for (index, macho) in images.into_iter().enumerate() {
-            let arch = macho.header().cpu_type().name().to_string();
-            if plan
-                .selected_slices
-                .as_ref()
-                .is_some_and(|selected| !selected.contains(&arch))
-            {
+            let architecture = macho.header().arch_spec();
+            if plan.selected_slices.as_ref().is_some_and(|selected| {
+                !selected
+                    .iter()
+                    .any(|selector| architecture.matches_selector(selector))
+            }) {
                 continue;
             }
+            let arch = architecture.name();
             slices.push(self.run_slice(index, arch, macho, &run_context)?);
-        }
-        if let Some(selected) = &plan.selected_slices
-            && !selected.is_empty()
-            && slices.is_empty()
-        {
-            return Err(AnalysisError::invalid(format!(
-                "no architecture matching '{}' found",
-                selected.iter().cloned().collect::<Vec<_>>().join(", ")
-            )));
         }
         let document = SnapshotDocument {
             schema_version: SNAPSHOT_SCHEMA_VERSION,
@@ -670,7 +684,7 @@ fn run_domain(
         }
         D::Audit => {
             let input = crate::audit::AuditInput {
-                arch: macho.header().cpu_type().name().to_owned(),
+                arch: macho.header().arch_spec().name(),
                 header: optional_fact(facts, D::Header)?,
                 load_commands: optional_fact(facts, D::LoadCommands)?,
                 segments: optional_fact(facts, D::Segments)?,

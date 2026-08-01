@@ -216,9 +216,27 @@ pub struct ArchSpec {
 }
 
 impl ArchSpec {
+    /// Returns whether a user-facing architecture selector names this slice.
+    ///
+    /// A CPU-family name selects every subtype in that family, while a known
+    /// qualified slice name selects only that subtype. For example, `arm64`
+    /// matches both plain arm64 and arm64e slices, whereas `arm64e` matches
+    /// only arm64e. Names are matched case-insensitively to preserve the CLI's
+    /// established behavior. Unknown subtype names retain the family spelling
+    /// and require an exact raw tuple where unambiguous identity matters.
+    pub fn matches_selector(&self, selector: &str) -> bool {
+        self.cpu_type.name().eq_ignore_ascii_case(selector)
+            || self.name().eq_ignore_ascii_case(selector)
+    }
+
     /// Performs is_x86_64.
     pub fn is_x86_64(&self) -> bool {
         self.cpu_type.0 == CPU_TYPE_X86_64
+    }
+
+    /// Whether this is the Haswell-qualified x86-64 slice known as `x86_64h`.
+    pub fn is_x86_64h(&self) -> bool {
+        self.cpu_type.0 == CPU_TYPE_X86_64 && self.cpu_subtype.masked() == CPU_SUBTYPE_X86_64_H
     }
 
     /// Performs is_arm64.
@@ -235,6 +253,8 @@ impl ArchSpec {
     pub fn name(&self) -> String {
         if self.is_arm64e() {
             "arm64e".to_string()
+        } else if self.is_x86_64h() {
+            "x86_64h".to_string()
         } else {
             self.cpu_type.name().to_string()
         }
@@ -357,6 +377,13 @@ impl MachoHeader {
     /// Declared CPU subtype.
     pub const fn cpu_subtype(&self) -> CpuSubtype {
         self.cpu_subtype
+    }
+    /// Qualified architecture identity for this Mach-O slice.
+    pub const fn arch_spec(&self) -> ArchSpec {
+        ArchSpec {
+            cpu_type: self.cpu_type,
+            cpu_subtype: self.cpu_subtype,
+        }
     }
     /// Declared Mach-O file type.
     pub const fn file_type(&self) -> FileType {

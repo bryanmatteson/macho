@@ -1,4 +1,4 @@
-//! Stable schema-version-1 disassembly report values.
+//! Stable schema-version-2 disassembly report values.
 
 #![allow(missing_docs)]
 
@@ -6,7 +6,7 @@ mod validate;
 
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{Architecture, HexBytes, ReportContainerIdentity, ReportSliceIdentity};
+use super::{ArchitectureSelection, HexBytes, ReportContainerIdentity, ReportSliceIdentity};
 
 pub use validate::DisassemblyReportValidationError;
 
@@ -15,7 +15,7 @@ pub use validate::DisassemblyReportValidationError;
 pub struct DisassemblySchemaVersion(u32);
 
 impl DisassemblySchemaVersion {
-    pub const CURRENT: Self = Self(1);
+    pub const CURRENT: Self = Self(2);
     pub const fn get(self) -> u32 {
         self.0
     }
@@ -24,8 +24,8 @@ impl DisassemblySchemaVersion {
 impl<'de> Deserialize<'de> for DisassemblySchemaVersion {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = u32::deserialize(deserializer)?;
-        (value == 1).then_some(Self(value)).ok_or_else(|| {
-            serde::de::Error::custom(format!("unsupported schema version {value}; expected 1"))
+        (value == 2).then_some(Self(value)).ok_or_else(|| {
+            serde::de::Error::custom(format!("unsupported schema version {value}; expected 2"))
         })
     }
 }
@@ -69,7 +69,7 @@ impl<'de> Deserialize<'de> for DisassemblyReport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DisassemblyReportRequest {
-    pub arch: Option<Architecture>,
+    pub architectures: ArchitectureSelection,
     pub selection: ReportSelection,
     pub mode: ReportDecodeMode,
     pub demangle: bool,

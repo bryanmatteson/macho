@@ -284,13 +284,6 @@ pub enum TargetPolicy {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ArchitectureSelection {
-    All,
-    One { architecture: Architecture },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntitySelection {
     pub scope: RecoveryScope,

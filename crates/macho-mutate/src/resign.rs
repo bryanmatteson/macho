@@ -82,6 +82,7 @@ impl ResignPlan {
             has_cms_signature,
         );
         let manual_steps = build_manual_steps(
+            was_signed,
             entitlements_xml.is_some(),
             entitlements_der_present,
             signature_parse_error.as_deref(),
@@ -109,27 +110,43 @@ fn build_resign_command(
     has_cms_signature: bool,
 ) -> String {
     let mut cmd = if has_cms_signature {
-        "macho patch <binary> --sign-p12 <identity.p12> --p12-password-file <password-file>"
+        "macho patch <patched-binary> --sign-p12 <identity.p12> --p12-password-file <password-file>"
             .to_string()
     } else {
-        "macho patch <binary> --sign-adhoc".to_string()
+        "macho patch <patched-binary> --sign-adhoc".to_string()
     };
     if let Some(id) = identifier {
-        cmd.push_str(&format!(" --identifier {id}"));
+        cmd.push_str(&format!(" --identifier {}", shell_quote(id)));
     }
     if has_xml_entitlements {
         cmd.push_str(" --entitlements <entitlements.plist>");
     }
-    cmd.push_str(" --in-place");
+    cmd.push_str(" --output <signed-binary>");
     cmd
 }
 
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn build_manual_steps(
+    was_signed: bool,
     has_xml_entitlements: bool,
     has_der_entitlements: bool,
     signature_parse_error: Option<&str>,
 ) -> Vec<String> {
     let mut steps = Vec::new();
+
+    if was_signed {
+        steps.push(
+            "Preferred: rerun the original mutation with these signing flags in the same transaction and write it with --output."
+                .to_string(),
+        );
+        steps.push(
+            "The suggested fallback signs an already materialized patched artifact; it does not apply the pending mutation."
+                .to_string(),
+        );
+    }
 
     if has_xml_entitlements {
         steps.push(
@@ -182,10 +199,25 @@ impl std::fmt::Display for ResignPlan {
         if self.has_cms_signature {
             writeln!(f, "  CMS signature present")?;
         }
-        writeln!(f, "  Native command: {}", self.suggested_command)?;
+        writeln!(f, "  Candidate signing command: {}", self.suggested_command)?;
         for step in &self.manual_steps {
             writeln!(f, "  Note:       {step}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suggested_command_quotes_untrusted_identifier_text() {
+        let command = build_resign_command(Some("bad value; echo 'no'"), false, false);
+        assert_eq!(
+            command,
+            "macho patch <patched-binary> --sign-adhoc --identifier 'bad value; echo '\\''no'\\''' --output <signed-binary>"
+        );
+        assert!(!command.contains("--in-place"));
     }
 }

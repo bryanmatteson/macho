@@ -1,9 +1,10 @@
 use crate::analysis::deps::compat::{CompatReport, CompatSeverity};
 use crate::analysis::deps::graph::{DepGraph, ImportProvider};
 use crate::commands::args::{ArchitectureArgs, InputArgs};
+use crate::commands::input_message;
 use crate::commands::output::layout;
 use crate::commands::output::{Options as OutputOptions, Style};
-use crate::commands::subcommands::common::map_input;
+use crate::commands::subcommands::common::{arch_name_for_mach, map_input, write_selected_json};
 use crate::model::container::MachoContainer;
 use crate::model::macho_file::MachoFile;
 use anyhow::{Context, Result};
@@ -43,55 +44,119 @@ pub fn run(args: DepsArgs, output: OutputOptions, out: &mut dyn Write) -> Result
     };
 
     let mut has_incompatible = false;
+    let mut json_values = Vec::new();
 
     match &container {
         MachoContainer::Thin(macho) => {
-            let prov_mach = provider.and_then(|container| container.first_macho());
-            has_incompatible |= print_deps(
-                macho,
-                &args.input.path.display().to_string(),
-                prov_mach,
-                args.check_compat
-                    .as_ref()
-                    .map(|p| p.display().to_string())
-                    .as_deref(),
-                json,
-                style,
-                out,
-            )?;
-        }
-        MachoContainer::Fat(fat) => {
-            for arch in fat.arches() {
-                let name = arch.spec().name();
-                if let Some(ref f) = args.selection.arch
-                    && !name.eq_ignore_ascii_case(f)
-                {
-                    continue;
-                }
-                if !json && fat.arches().len() > 1 {
-                    let _ = writeln!(out, "{}", style.title(&format!("=== {name} ===")));
-                }
-                let prov_mach = provider.and_then(|c| {
-                    c.find_arch(arch.macho().header().cpu_type())
-                        .or_else(|| c.first_macho())
-                });
-                has_incompatible |= print_deps(
-                    arch.macho(),
+            if let Some(filter) = args.selection.arch.as_deref()
+                && !macho.header().arch_spec().matches_selector(filter)
+            {
+                let available = arch_name_for_mach(macho);
+                return Err(input_message(format!(
+                    "no architecture matching '{filter}' found (available: {available})"
+                )));
+            }
+            let prov_mach = provider.and_then(|provider| {
+                provider
+                    .find_arch_spec(macho.header().cpu_type(), macho.header().cpu_subtype())
+                    .or_else(|| provider.first_macho())
+            });
+            let arch_name = arch_name_for_mach(macho);
+            if json {
+                let (incompatible, value) = capture_deps_json(
+                    macho,
                     &args.input.path.display().to_string(),
                     prov_mach,
                     args.check_compat
                         .as_ref()
                         .map(|p| p.display().to_string())
                         .as_deref(),
-                    json,
+                    style,
+                )?;
+                has_incompatible |= incompatible;
+                json_values.push((arch_name, value));
+            } else {
+                has_incompatible |= print_deps(
+                    macho,
+                    &args.input.path.display().to_string(),
+                    prov_mach,
+                    args.check_compat
+                        .as_ref()
+                        .map(|p| p.display().to_string())
+                        .as_deref(),
+                    false,
                     style,
                     out,
                 )?;
+            }
+        }
+        MachoContainer::Fat(fat) => {
+            let mut matched = false;
+            for arch in fat.arches() {
+                let name = arch.spec().name();
+                if let Some(ref f) = args.selection.arch
+                    && !arch.spec().matches_selector(f)
+                {
+                    continue;
+                }
+                matched = true;
+                if !json && fat.arches().len() > 1 {
+                    let _ = writeln!(out, "{}", style.title(&format!("=== {name} ===")));
+                }
+                let prov_mach = provider.and_then(|c| {
+                    c.find_arch_spec(
+                        arch.macho().header().cpu_type(),
+                        arch.macho().header().cpu_subtype(),
+                    )
+                    .or_else(|| c.first_macho())
+                });
+                if json {
+                    let (incompatible, value) = capture_deps_json(
+                        arch.macho(),
+                        &args.input.path.display().to_string(),
+                        prov_mach,
+                        args.check_compat
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .as_deref(),
+                        style,
+                    )?;
+                    has_incompatible |= incompatible;
+                    json_values.push((name, value));
+                } else {
+                    has_incompatible |= print_deps(
+                        arch.macho(),
+                        &args.input.path.display().to_string(),
+                        prov_mach,
+                        args.check_compat
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .as_deref(),
+                        false,
+                        style,
+                        out,
+                    )?;
+                }
                 if !json {
                     let _ = writeln!(out,);
                 }
             }
+            if !matched && let Some(filter) = args.selection.arch.as_deref() {
+                let available = fat
+                    .arches()
+                    .iter()
+                    .map(|arch| arch.spec().name())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(input_message(format!(
+                    "no architecture matching '{filter}' found (available: {available})"
+                )));
+            }
         }
+    }
+
+    if json {
+        write_selected_json(json_values, out)?;
     }
 
     if has_incompatible {
@@ -99,6 +164,27 @@ pub fn run(args: DepsArgs, output: OutputOptions, out: &mut dyn Write) -> Result
     }
 
     Ok(())
+}
+
+fn capture_deps_json(
+    macho: &MachoFile<'_>,
+    target_path: &str,
+    provider: Option<&MachoFile<'_>>,
+    provider_path: Option<&str>,
+    style: Style,
+) -> Result<(bool, serde_json::Value)> {
+    let mut bytes = Vec::new();
+    let incompatible = print_deps(
+        macho,
+        target_path,
+        provider,
+        provider_path,
+        true,
+        style,
+        &mut bytes,
+    )?;
+    let value = serde_json::from_slice(&bytes).context("dependency JSON serialization failed")?;
+    Ok((incompatible, value))
 }
 
 /// Returns true if incompatibilities were found.

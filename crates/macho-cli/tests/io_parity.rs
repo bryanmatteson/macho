@@ -217,7 +217,7 @@ fn production_and_injected_io_are_byte_identical() {
         OsString::from("json"),
         old.clone().into_os_string(),
         OsString::from("--bytes"),
-        OsString::from("0x1c:01000000"),
+        OsString::from("0x1c,00000000,01000000"),
         OsString::from("--output"),
         unwritable_output.clone().into_os_string(),
     ]);
@@ -238,7 +238,7 @@ fn production_and_injected_io_are_byte_identical() {
         OsString::from("json"),
         old.clone().into_os_string(),
         OsString::from("--bytes"),
-        OsString::from("0x1c:01000000"),
+        OsString::from("0x1c,00000000,01000000"),
         OsString::from("--output"),
         output.clone().into_os_string(),
     ];

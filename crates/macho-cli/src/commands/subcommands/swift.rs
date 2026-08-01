@@ -411,9 +411,11 @@ fn kind_name(kind: SwiftTypeKind) -> &'static str {
 }
 
 fn architecture_name(architecture: macho::analysis::report::Architecture) -> String {
-    let cpu = macho::core::model::header::CpuType(architecture.cpu_type);
-    let subtype = macho::core::model::header::CpuSubtype(architecture.cpu_subtype);
-    format!("{} ({})", cpu.name(), subtype.name(cpu))
+    macho::core::model::header::ArchSpec {
+        cpu_type: macho::core::model::header::CpuType(architecture.cpu_type),
+        cpu_subtype: macho::core::model::header::CpuSubtype(architecture.cpu_subtype),
+    }
+    .name()
 }
 
 #[cfg(test)]

@@ -54,6 +54,36 @@ pub enum DiffDomain {
     #[serde(rename = "fixups")]
     /// The Fixups variant.
     Fixups,
+    #[serde(rename = "relocations")]
+    /// Relocation-table changes.
+    Relocations,
+    #[serde(rename = "strings")]
+    /// Extracted string-surface changes.
+    Strings,
+    #[serde(rename = "ranges")]
+    /// Recovered code-ownership range changes.
+    Ranges,
+    #[serde(rename = "xrefs")]
+    /// Cross-reference relationship changes.
+    Xrefs,
+    #[serde(rename = "dependencies")]
+    /// Dynamic-link dependency-surface changes.
+    Dependencies,
+    #[serde(rename = "audit")]
+    /// Security audit finding changes.
+    Audit,
+    #[serde(rename = "swift")]
+    /// Recovered Swift surface changes.
+    Swift,
+    #[serde(rename = "c_surface")]
+    /// Recovered C ABI surface changes.
+    CSurface,
+    #[serde(rename = "cpp_surface")]
+    /// Recovered C++ surface changes.
+    CppSurface,
+    #[serde(rename = "objc_headers")]
+    /// Recovered Objective-C header changes.
+    ObjCHeaders,
     #[serde(rename = "objc")]
     /// The ObjC variant.
     ObjC,
@@ -79,6 +109,16 @@ impl fmt::Display for DiffDomain {
             Self::Exports => write!(f, "exports"),
             Self::Imports => write!(f, "imports"),
             Self::Fixups => write!(f, "fixups"),
+            Self::Relocations => write!(f, "relocations"),
+            Self::Strings => write!(f, "strings"),
+            Self::Ranges => write!(f, "ranges"),
+            Self::Xrefs => write!(f, "xrefs"),
+            Self::Dependencies => write!(f, "dependencies"),
+            Self::Audit => write!(f, "audit"),
+            Self::Swift => write!(f, "swift"),
+            Self::CSurface => write!(f, "c-surface"),
+            Self::CppSurface => write!(f, "cpp-surface"),
+            Self::ObjCHeaders => write!(f, "objc-headers"),
             Self::ObjC => write!(f, "objc"),
             Self::Codesign => write!(f, "codesign"),
             Self::Analysis => write!(f, "analysis"),
@@ -87,7 +127,7 @@ impl fmt::Display for DiffDomain {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 /// The DiffFinding type.
 pub struct DiffFinding {
     /// The domain field.
@@ -100,7 +140,7 @@ pub struct DiffFinding {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 /// The DiffReport type.
 pub struct DiffReport {
     /// The findings field.

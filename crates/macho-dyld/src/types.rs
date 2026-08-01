@@ -9,6 +9,8 @@ pub struct Fixup {
     pub segment_index: usize,
     /// The segment_offset field.
     pub segment_offset: u64,
+    /// Raw dyld chained-pointer format that encoded this fixup.
+    pub pointer_format: u16,
     /// The kind field.
     pub kind: FixupKind,
 }
@@ -63,6 +65,21 @@ pub struct ChainedImport<'data> {
     /// The weak field.
     pub weak: bool,
     /// The addend field.
+    pub addend: i64,
+}
+
+/// Stable owned view of one chained import, including its exact table ordinal.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ChainedImportRecord {
+    /// Zero-based index in the chained-import table.
+    pub ordinal: u32,
+    /// Imported symbol name.
+    pub name: String,
+    /// Dynamic-library ordinal encoded by dyld.
+    pub library_ordinal: i32,
+    /// Whether the import is weak.
+    pub weak: bool,
+    /// Import-table addend.
     pub addend: i64,
 }
 
@@ -191,6 +208,8 @@ pub struct BindEntry<'data> {
     pub addend: i64,
     /// The weak field.
     pub weak: bool,
+    /// Raw symbol flags from `BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM`.
+    pub symbol_flags: u8,
     /// The lazy field.
     pub lazy: bool,
 }

@@ -15,7 +15,7 @@ Options:
 
           Possible values:
           - text:  Human-readable text
-          - json:  Versioned JSON envelope
+          - json:  JSON report or command-documented NDJSON stream
           - sarif: SARIF 2.1 report
           
           [default: text]

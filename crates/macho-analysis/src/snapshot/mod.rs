@@ -2,7 +2,7 @@
 pub mod model;
 
 use crate::AnalysisIssue;
-use crate::codesign::CodeSignature;
+use crate::codesign::{CodeSignature, HashType};
 use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::exports::parse_exports;
 use crate::dyld::imports::{ImportRecord, collect_imports};
@@ -239,7 +239,11 @@ pub(crate) fn extract_codesign(
             return None;
         }
     };
-    let Some(cd) = sig.code_directories().first() else {
+    let code_directories = sig.code_directories();
+    let Some(cd) = code_directories
+        .iter()
+        .max_by_key(|directory| code_directory_hash_strength(directory.hash_type))
+    else {
         push_analysis_issue(
             analysis_issues,
             CODESIGN_FAILED_CODE,
@@ -261,6 +265,18 @@ pub(crate) fn extract_codesign(
         n_code_slots: cd.n_code_slots,
         code_limit: cd.code_limit as u64,
     })
+}
+
+fn code_directory_hash_strength(hash_type: HashType) -> u8 {
+    match hash_type {
+        HashType::Sha512 => 5,
+        HashType::Sha384 => 4,
+        HashType::Sha256 => 3,
+        HashType::Sha256Truncated => 2,
+        HashType::Sha1 => 1,
+        HashType::Unknown(_) => 0,
+        _ => 0,
+    }
 }
 
 fn collect_entitlement_keys(xml: Option<&str>, der: Option<&[u8]>) -> Vec<String> {

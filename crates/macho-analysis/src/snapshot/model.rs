@@ -1,5 +1,14 @@
 use serde::{Deserialize, Serialize};
 
+/// Basic facts about the selected Mach-O image.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContainerSnapshot {
+    /// Mach-O file type name.
+    pub file_type: String,
+    /// Selected image size in bytes.
+    pub size: usize,
+}
+
 // -- Header --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +101,37 @@ pub struct SectionSnapshot {
     pub size: u64,
     /// The section_type field.
     pub section_type: String,
+}
+
+/// Relocation count for one section.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelocationSectionSnapshot {
+    /// Segment containing the section.
+    pub segment: String,
+    /// Section containing the relocations.
+    pub section: String,
+    /// Number of relocations in the section.
+    pub count: usize,
+}
+
+/// Summary of indexed DWARF functions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DwarfSnapshot {
+    /// Number of indexed functions.
+    pub function_count: usize,
+}
+
+/// Summary of the selected image's dynamic-link dependency surface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DependencySnapshot {
+    /// Install name declared by this image, when present.
+    pub install_name: Option<String>,
+    /// Number of linked dylibs.
+    pub dylib_count: usize,
+    /// Number of imported symbols.
+    pub import_count: usize,
+    /// Number of exported symbols.
+    pub export_count: usize,
 }
 
 // -- Symbols --

@@ -74,7 +74,7 @@ pub(crate) fn run_scoped(
         MachoContainer::Thin(macho) => {
             if let Some(ref filter) = args.selection.arch {
                 let arch_name = arch_name_for_mach(macho);
-                if !arch_name.eq_ignore_ascii_case(filter) {
+                if !macho.header().arch_spec().matches_selector(filter) {
                     return Err(input_message(format!(
                         "no architecture matching '{filter}' found (available: {arch_name})"
                     )));
@@ -104,7 +104,7 @@ pub(crate) fn run_scoped(
                 let arch_name = arch.spec().name();
 
                 if let Some(ref filter) = args.selection.arch
-                    && !arch_name.eq_ignore_ascii_case(filter)
+                    && !arch.spec().matches_selector(filter)
                 {
                     continue;
                 }

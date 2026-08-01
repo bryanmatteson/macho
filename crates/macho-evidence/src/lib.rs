@@ -35,6 +35,30 @@ impl<'image, 'data> SelectedImageEvidence<'image, 'data> {
         &self.pointers
     }
 
+    /// Enumerate dyld-managed pointers with explicit absence and truncation states.
+    pub fn pointer_inventory(
+        &self,
+        limit: u64,
+    ) -> macho_dyld::Result<macho_dyld::resolve::PointerInventory> {
+        self.pointers.inventory(limit)
+    }
+
+    /// Look up an exact name in the authoritative chained-import table.
+    pub fn chained_import(
+        &self,
+        name: &str,
+    ) -> macho_dyld::Result<macho_dyld::ChainedImportLookup> {
+        macho_dyld::lookup_chained_import(self.image, name)
+    }
+
+    /// Decode bounded, source-retaining `LC_FUNCTION_STARTS` evidence.
+    pub fn function_starts(
+        &self,
+        limit: u64,
+    ) -> macho_dyld::Result<macho_dyld::FunctionStartsOutcome> {
+        macho_dyld::decode_function_starts(self.image, limit)
+    }
+
     /// Decode the strict Objective-C evidence batch.
     pub fn objective_c(
         &self,

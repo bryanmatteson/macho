@@ -13,7 +13,7 @@ fn invalid(message: impl Into<String>) -> DisassemblyReportValidationError {
 
 pub(super) fn validate(report: &DisassemblyReport) -> Result<(), DisassemblyReportValidationError> {
     if report.schema_version != DisassemblySchemaVersion::CURRENT {
-        return Err(invalid("schema_version must be 1"));
+        return Err(invalid("schema_version must be 2"));
     }
     if report.container.slice_count as usize != report.slices.len() {
         return Err(invalid("container slice_count does not match slices"));
@@ -31,12 +31,19 @@ pub(super) fn validate(report: &DisassemblyReport) -> Result<(), DisassemblyRepo
             "requested symbol count exceeds the symbol-range limit",
         ));
     }
-    if let Some(arch) = report.request.arch {
-        if report.slices.len() != 1 || report.slices[0].identity.image.architecture != arch {
-            return Err(invalid(
-                "exact request architecture does not match one emitted slice",
-            ));
-        }
+    let emitted_architectures = report
+        .slices
+        .iter()
+        .map(|slice| slice.identity.image.architecture)
+        .collect::<Vec<_>>();
+    if !report
+        .request
+        .architectures
+        .matches_resolved(&emitted_architectures)
+    {
+        return Err(invalid(
+            "request architecture selection does not match emitted slices",
+        ));
     }
 
     let mut identities = BTreeSet::new();
@@ -288,7 +295,7 @@ fn validate_region(
                 "insn.decode.invalid" | "analysis.disassembly.selection.partial_instruction"
             )
         {
-            return Err(invalid("gap code is not defined by schema version 1"));
+            return Err(invalid("gap code is not defined by schema version 2"));
         }
         if record.va() != expected_va {
             return Err(invalid("region records are not contiguous"));

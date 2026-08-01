@@ -168,7 +168,7 @@ macro_rules! exact_version {
     };
 }
 
-exact_version!(RecoverySchemaVersion, 1);
+exact_version!(RecoverySchemaVersion, 2);
 exact_version!(ObjCReportVersion, 1);
 exact_version!(SwiftReportVersion, 1);
 exact_version!(HypothesisBundleVersion, 1);
@@ -288,6 +288,36 @@ pub enum EvidenceStrength {
 pub struct Architecture {
     pub cpu_type: i32,
     pub cpu_subtype: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ArchitectureSelection {
+    All,
+    One {
+        architecture: Architecture,
+    },
+    Many {
+        architectures: NonEmpty<Architecture>,
+    },
+}
+
+impl ArchitectureSelection {
+    pub fn matches_resolved(&self, resolved: &[Architecture]) -> bool {
+        match self {
+            Self::All => !resolved.is_empty(),
+            Self::One { architecture } => resolved == [*architecture],
+            Self::Many { architectures } => {
+                let values = architectures.as_slice();
+                values.len() >= 2
+                    && values
+                        .iter()
+                        .enumerate()
+                        .all(|(index, value)| !values[..index].contains(value))
+                    && values == resolved
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

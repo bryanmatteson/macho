@@ -9,7 +9,10 @@ use crate::commands::subcommands::common::read_input;
 use crate::commands::{OutputFormat, PolicyFailure, usage_message};
 
 #[derive(clap::Args)]
-/// The DiffArgs type.
+/// Compare binary structure, link behavior, security posture, references, and
+/// recovered C, C++, Objective-C, and Swift surfaces. Findings are attributed
+/// to their architecture and semantic domain; reordered evidence alone is not
+/// a change.
 pub struct DiffArgs {
     /// Path to the old (baseline) Mach-O binary
     old: PathBuf,
@@ -40,7 +43,9 @@ pub fn run(args: DiffArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
         diff_plan = diff_plan.exclude(AnalysisDomain::Codesign);
     }
     if args.ignore_objc {
-        diff_plan = diff_plan.exclude(AnalysisDomain::Objc);
+        diff_plan = diff_plan
+            .exclude(AnalysisDomain::Objc)
+            .exclude(AnalysisDomain::ObjcHeaders);
     }
     if args.ignore_symbols {
         diff_plan = diff_plan.exclude(AnalysisDomain::Symbols);
@@ -50,8 +55,9 @@ pub fn run(args: DiffArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
     }
     diff_plan = diff_plan.with_limits((&args.limits).into());
     let analysis_plan = diff_plan.compile();
-    let old_snap = load_document(&args.old, &analysis_plan)?;
-    let new_snap = load_document(&args.new, &analysis_plan)?;
+    let selector = args.selection.arch.as_deref();
+    let old_snap = load_document(&args.old, &analysis_plan, selector)?;
+    let new_snap = load_document(&args.new, &analysis_plan, selector)?;
     let report = diff_documents(&old_snap, &new_snap, diff_plan.selected_domains());
 
     if format == OutputFormat::Json {
@@ -83,7 +89,11 @@ pub fn run(args: DiffArgs, format: OutputFormat, out: &mut dyn Write) -> Result<
     Ok(())
 }
 
-fn load_document(path: &Path, plan: &AnalysisPlan) -> Result<SnapshotDocument> {
+fn load_document(
+    path: &Path,
+    plan: &AnalysisPlan,
+    selector: Option<&str>,
+) -> Result<SnapshotDocument> {
     let bytes = read_input(path)?;
     if bytes
         .iter()
@@ -93,9 +103,63 @@ fn load_document(path: &Path, plan: &AnalysisPlan) -> Result<SnapshotDocument> {
     {
         let text = std::str::from_utf8(&bytes)
             .with_context(|| format!("snapshot {} is not UTF-8", path.display()))?;
-        return SnapshotDocument::from_json(text).map_err(Into::into);
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|error| {
+            crate::commands::input_message(format!(
+                "invalid snapshot JSON in {}: {error}",
+                path.display()
+            ))
+        })?;
+        let snapshot = if value.get("command").is_some() || value.get("ok").is_some() {
+            let envelope_version = value.get("schema_version").and_then(|value| value.as_u64());
+            let command = value.get("command").and_then(|value| value.as_str());
+            let ok = value.get("ok").and_then(|value| value.as_bool());
+            if envelope_version != Some(1) || command != Some("snapshot") || ok != Some(true) {
+                return Err(crate::commands::input_message(format!(
+                    "{} is not a successful macho snapshot JSON envelope",
+                    path.display()
+                )));
+            }
+            value.get("data").cloned().ok_or_else(|| {
+                crate::commands::input_message(format!(
+                    "snapshot envelope {} has no data payload",
+                    path.display()
+                ))
+            })?
+        } else {
+            value
+        };
+        let snapshot = serde_json::to_string(&snapshot)
+            .context("failed to normalize snapshot JSON payload")?;
+        let snapshot = SnapshotDocument::from_json(&snapshot)?;
+        return select_snapshot_slices(snapshot, selector);
     }
     let container =
         macho::parse(&bytes).with_context(|| format!("failed to parse {}", path.display()))?;
     Analyzer.run(&container, plan).map_err(Into::into)
+}
+
+fn select_snapshot_slices(
+    mut snapshot: SnapshotDocument,
+    selector: Option<&str>,
+) -> Result<SnapshotDocument> {
+    let Some(selector) = selector else {
+        return Ok(snapshot);
+    };
+    snapshot
+        .slices
+        .retain(|slice| snapshot_arch_matches(&slice.identity.arch, selector));
+    if snapshot.slices.is_empty() {
+        return Err(crate::commands::input_message(format!(
+            "no architecture matching '{selector}' found in snapshot"
+        )));
+    }
+    snapshot.container.slice_count = snapshot.slices.len();
+    snapshot.validate()?;
+    Ok(snapshot)
+}
+
+fn snapshot_arch_matches(arch: &str, selector: &str) -> bool {
+    arch.eq_ignore_ascii_case(selector)
+        || (selector.eq_ignore_ascii_case("arm64") && arch.eq_ignore_ascii_case("arm64e"))
+        || (selector.eq_ignore_ascii_case("x86_64") && arch.eq_ignore_ascii_case("x86_64h"))
 }
