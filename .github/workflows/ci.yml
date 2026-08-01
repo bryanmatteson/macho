@@ -49,6 +49,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
+          fallback: cargo-install
       - uses: Swatinem/rust-cache@v2
       - run: cargo xtask verify-fuzz
       - name: Bounded fuzz smoke
