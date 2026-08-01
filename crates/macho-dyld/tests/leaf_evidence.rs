@@ -495,3 +495,97 @@ fn pure_legacy_rebase_is_explicitly_retained() {
         InventoryPointerTarget::Address(Va(BASE + 0x80))
     );
 }
+
+#[test]
+fn weak_bind_over_rebase_retains_both_occurrences() {
+    use macho_dyld::resolve::LegacyBindStream;
+
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let weak = [
+        0x10, 0x41, b'_', b'w', b'e', b'a', b'k', 0, 0x51, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebase, &[], &weak, &[]);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    let resolver = PointerResolver::new(&macho).unwrap();
+    let PointerInventory::Complete(rows) = resolver.inventory(4).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].encoding, PointerEncoding::LegacyBind);
+    assert!(rows[0].legacy_rebase);
+    assert_eq!(rows[0].legacy_bind_occurrences.len(), 1);
+    assert_eq!(
+        rows[0].legacy_bind_occurrences[0].stream,
+        LegacyBindStream::Weak
+    );
+}
+
+#[test]
+fn regular_bind_over_rebase_rejects() {
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let regular = [
+        0x11, 0x40, b'_', b'r', b'e', b'g', b'u', b'l', b'a', b'r', 0, 0x51, 0x70, 0x80, 0x02,
+        0x90, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebase, &regular, &[], &[]);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    assert!(
+        PointerResolver::new(&macho)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("regular legacy bind conflicts with a rebase")
+    );
+}
+
+#[test]
+fn conflicting_legacy_rebase_types_reject() {
+    let rebases = [
+        0x11, 0x20, 0x80, 0x02, 0x51, 0x12, 0x20, 0x80, 0x02, 0x51, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebases, &[], &[], &[]);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    assert!(
+        PointerResolver::new(&macho)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("conflicting legacy rebase types")
+    );
+}
+
+#[test]
+fn conflicting_legacy_rebase_types_on_a_lazy_bind_reject() {
+    let rebases = [
+        0x11, 0x20, 0x80, 0x02, 0x51, 0x12, 0x20, 0x80, 0x02, 0x51, 0,
+    ];
+    let lazy = [
+        0x11, 0x40, b'_', b'l', b'a', b'z', b'y', 0, 0x51, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebases, &[], &[], &lazy);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    assert!(
+        PointerResolver::new(&macho)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("conflicting legacy rebase types at bound file offset")
+    );
+}
+
+#[test]
+fn lazy_bind_and_rebase_field_type_mismatch_rejects() {
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let lazy = [
+        0x11, 0x40, b'_', b'l', b'a', b'z', b'y', 0, 0x52, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebase, &[], &[], &lazy);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    assert!(
+        PointerResolver::new(&macho)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("legacy bind and rebase types conflict")
+    );
+}

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.2
+
+- Tightened retained legacy dyld pointer provenance after the 0.5.1 lazy-bind
+  fix. Lazy and weak binds may overlap a rebase; regular-bind overlap and
+  conflicting rebase types reject rather than weakening fail-closed evidence
+  admission. The public 0.5.1 pointer shape remains source-compatible.
+
 ## 0.5.1
 
 - Retained legitimate legacy rebase evidence when a lazy bind covers the same

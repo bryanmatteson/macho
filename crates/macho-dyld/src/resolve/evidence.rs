@@ -123,10 +123,10 @@ pub struct DyldPointer {
     pub legacy_bind_occurrences: Vec<LegacyBindOccurrence>,
     /// Whether the legacy rebase stream also covers this pointer field.
     ///
-    /// Lazy symbol pointers legitimately carry an initial rebase and a lazy
-    /// bind at the same file offset. In that case [`Self::encoding`] remains
-    /// [`PointerEncoding::LegacyBind`] while this flag retains the initial
-    /// rebase occurrence.
+    /// Lazy symbol pointers and internal weak definitions can legitimately
+    /// carry both a rebase and a bind at the same file offset. In that case
+    /// [`Self::encoding`] remains [`PointerEncoding::LegacyBind`] while this
+    /// flag retains the rebase occurrence.
     pub legacy_rebase: bool,
     /// Semantic pointer target.
     pub target: InventoryPointerTarget,
@@ -185,7 +185,7 @@ struct FixupEvidence {
     authentication: Option<PointerAuthentication>,
     target: InventoryPointerTarget,
     legacy_bind_occurrences: Vec<LegacyBindOccurrence>,
-    legacy_rebase: bool,
+    legacy_rebase_type: Option<u8>,
 }
 
 /// Fail-closed resolver shared by language metadata decoders.
@@ -268,7 +268,7 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
                 chained_pointer_format: evidence.chained_pointer_format,
                 authentication: evidence.authentication,
                 legacy_bind_occurrences: evidence.legacy_bind_occurrences.clone(),
-                legacy_rebase: evidence.legacy_rebase,
+                legacy_rebase: evidence.legacy_rebase_type.is_some(),
                 target,
             };
             if pointers.len() == usize::try_from(limit).unwrap_or(usize::MAX) {
@@ -408,7 +408,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 authentication: None,
                 target: rebased_target(image, fixup.pointer_format, target, false)?,
                 legacy_bind_occurrences: Vec::new(),
-                legacy_rebase: false,
+                legacy_rebase_type: None,
             },
             FixupKind::AuthRebase {
                 target,
@@ -425,7 +425,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 }),
                 target: rebased_target(image, fixup.pointer_format, target, true)?,
                 legacy_bind_occurrences: Vec::new(),
-                legacy_rebase: false,
+                legacy_rebase_type: None,
             },
             FixupKind::Bind {
                 import_index,
@@ -436,7 +436,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 authentication: None,
                 target: chained_import(&decoded.imports, import_index, addend)?,
                 legacy_bind_occurrences: Vec::new(),
-                legacy_rebase: false,
+                legacy_rebase_type: None,
             },
             FixupKind::AuthBind {
                 import_index,
@@ -453,7 +453,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 }),
                 target: chained_import(&decoded.imports, import_index, 0)?,
                 legacy_bind_occurrences: Vec::new(),
-                legacy_rebase: false,
+                legacy_rebase_type: None,
             },
         };
         if evidence.insert(file_offset, item).is_some() {
@@ -600,7 +600,7 @@ fn legacy_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence>
                             pointer_addend: bind.addend,
                         },
                         legacy_bind_occurrences: vec![occurrence],
-                        legacy_rebase: false,
+                        legacy_rebase_type: None,
                     },
                 );
             }
@@ -624,12 +624,46 @@ fn legacy_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence>
             authentication: None,
             target: InventoryPointerTarget::Address(Va(0)),
             legacy_bind_occurrences: Vec::new(),
-            legacy_rebase: true,
+            legacy_rebase_type: Some(rebase.rebase_type),
         };
         if let Some(existing) = evidence.get_mut(&file_offset) {
             match existing.encoding {
-                PointerEncoding::LegacyBind | PointerEncoding::LegacyRebase => {
-                    existing.legacy_rebase = true;
+                PointerEncoding::LegacyBind => {
+                    if existing
+                        .legacy_bind_occurrences
+                        .iter()
+                        .any(|occurrence| occurrence.stream == LegacyBindStream::Regular)
+                    {
+                        return Err(Error::format(format!(
+                            "regular legacy bind conflicts with a rebase at file offset {file_offset:#x}"
+                        )));
+                    }
+                    if existing
+                        .legacy_rebase_type
+                        .is_some_and(|existing_type| existing_type != rebase.rebase_type)
+                    {
+                        return Err(Error::format(format!(
+                            "conflicting legacy rebase types at bound file offset {file_offset:#x}"
+                        )));
+                    }
+                    if existing
+                        .legacy_bind_occurrences
+                        .first()
+                        .map(|occurrence| occurrence.bind_type)
+                        != Some(rebase.rebase_type)
+                    {
+                        return Err(Error::format(format!(
+                            "legacy bind and rebase types conflict at file offset {file_offset:#x}"
+                        )));
+                    }
+                    existing.legacy_rebase_type = Some(rebase.rebase_type);
+                }
+                PointerEncoding::LegacyRebase => {
+                    if existing.legacy_rebase_type != Some(rebase.rebase_type) {
+                        return Err(Error::format(format!(
+                            "conflicting legacy rebase types at file offset {file_offset:#x}"
+                        )));
+                    }
                 }
                 PointerEncoding::Direct
                 | PointerEncoding::ChainedRebase
