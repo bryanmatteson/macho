@@ -121,6 +121,13 @@ pub struct DyldPointer {
     pub authentication: Option<PointerAuthentication>,
     /// Exact regular/weak/lazy bind occurrences, empty for non-legacy pointers.
     pub legacy_bind_occurrences: Vec<LegacyBindOccurrence>,
+    /// Whether the legacy rebase stream also covers this pointer field.
+    ///
+    /// Lazy symbol pointers legitimately carry an initial rebase and a lazy
+    /// bind at the same file offset. In that case [`Self::encoding`] remains
+    /// [`PointerEncoding::LegacyBind`] while this flag retains the initial
+    /// rebase occurrence.
+    pub legacy_rebase: bool,
     /// Semantic pointer target.
     pub target: InventoryPointerTarget,
 }
@@ -178,6 +185,7 @@ struct FixupEvidence {
     authentication: Option<PointerAuthentication>,
     target: InventoryPointerTarget,
     legacy_bind_occurrences: Vec<LegacyBindOccurrence>,
+    legacy_rebase: bool,
 }
 
 /// Fail-closed resolver shared by language metadata decoders.
@@ -260,6 +268,7 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
                 chained_pointer_format: evidence.chained_pointer_format,
                 authentication: evidence.authentication,
                 legacy_bind_occurrences: evidence.legacy_bind_occurrences.clone(),
+                legacy_rebase: evidence.legacy_rebase,
                 target,
             };
             if pointers.len() == usize::try_from(limit).unwrap_or(usize::MAX) {
@@ -399,6 +408,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 authentication: None,
                 target: rebased_target(image, fixup.pointer_format, target, false)?,
                 legacy_bind_occurrences: Vec::new(),
+                legacy_rebase: false,
             },
             FixupKind::AuthRebase {
                 target,
@@ -415,6 +425,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 }),
                 target: rebased_target(image, fixup.pointer_format, target, true)?,
                 legacy_bind_occurrences: Vec::new(),
+                legacy_rebase: false,
             },
             FixupKind::Bind {
                 import_index,
@@ -425,6 +436,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 authentication: None,
                 target: chained_import(&decoded.imports, import_index, addend)?,
                 legacy_bind_occurrences: Vec::new(),
+                legacy_rebase: false,
             },
             FixupKind::AuthBind {
                 import_index,
@@ -441,6 +453,7 @@ fn chained_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence
                 }),
                 target: chained_import(&decoded.imports, import_index, 0)?,
                 legacy_bind_occurrences: Vec::new(),
+                legacy_rebase: false,
             },
         };
         if evidence.insert(file_offset, item).is_some() {
@@ -587,6 +600,7 @@ fn legacy_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence>
                             pointer_addend: bind.addend,
                         },
                         legacy_bind_occurrences: vec![occurrence],
+                        legacy_rebase: false,
                     },
                 );
             }
@@ -610,12 +624,20 @@ fn legacy_evidence(image: &MachoFile<'_>) -> Result<BTreeMap<u64, FixupEvidence>
             authentication: None,
             target: InventoryPointerTarget::Address(Va(0)),
             legacy_bind_occurrences: Vec::new(),
+            legacy_rebase: true,
         };
-        if let Some(existing) = evidence.get(&file_offset) {
-            if existing != &rebase_evidence {
-                return Err(Error::format(format!(
-                    "legacy bind and rebase records conflict at file offset {file_offset:#x}"
-                )));
+        if let Some(existing) = evidence.get_mut(&file_offset) {
+            match existing.encoding {
+                PointerEncoding::LegacyBind | PointerEncoding::LegacyRebase => {
+                    existing.legacy_rebase = true;
+                }
+                PointerEncoding::Direct
+                | PointerEncoding::ChainedRebase
+                | PointerEncoding::ChainedBind => {
+                    return Err(Error::format(format!(
+                        "legacy rebase conflicts with incompatible pointer evidence at file offset {file_offset:#x}"
+                    )));
+                }
             }
         } else {
             evidence.insert(file_offset, rebase_evidence);

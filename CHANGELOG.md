@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.1
+
+- Retained legitimate legacy rebase evidence when a lazy bind covers the same
+  pointer field. Pointer inventory now reports the binding as the effective
+  encoding while preserving the initial rebase occurrence explicitly, so
+  ordinary Darwin lazy symbol pointers no longer make selected-image evidence
+  fail closed.
+
 ## 0.5.0
 
 - Replaced raw dyld-cache text slicing with validated offline cache-family

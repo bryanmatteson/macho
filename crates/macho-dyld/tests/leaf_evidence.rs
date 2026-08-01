@@ -1,3 +1,4 @@
+use macho_core::model::addr::Va;
 use macho_core::model::container::{MachoContainer, SelectionKey};
 use macho_core::model::header::ArchSpec;
 use macho_dyld::resolve::{
@@ -80,7 +81,7 @@ fn chained_imports(format: u32, rows: &[(u64, i64)], symbols: &[u8]) -> Vec<u8> 
     bytes
 }
 
-fn legacy_streams(bind: &[u8], weak: &[u8], lazy: &[u8]) -> Vec<u8> {
+fn legacy_streams_with_rebase(rebase: &[u8], bind: &[u8], weak: &[u8], lazy: &[u8]) -> Vec<u8> {
     let mut bytes = header(2, 120);
     bytes.resize(0x220, 0);
     let segment = 32;
@@ -93,16 +94,23 @@ fn legacy_streams(bind: &[u8], weak: &[u8], lazy: &[u8]) -> Vec<u8> {
     let dyld = segment + 72;
     bytes[dyld..dyld + 4].copy_from_slice(&0x8000_0022_u32.to_le_bytes());
     bytes[dyld + 4..dyld + 8].copy_from_slice(&48_u32.to_le_bytes());
+    bytes[dyld + 8..dyld + 12].copy_from_slice(&0x160_u32.to_le_bytes());
+    bytes[dyld + 12..dyld + 16].copy_from_slice(&(rebase.len() as u32).to_le_bytes());
     bytes[dyld + 16..dyld + 20].copy_from_slice(&0x180_u32.to_le_bytes());
     bytes[dyld + 20..dyld + 24].copy_from_slice(&(bind.len() as u32).to_le_bytes());
     bytes[dyld + 24..dyld + 28].copy_from_slice(&0x1c0_u32.to_le_bytes());
     bytes[dyld + 28..dyld + 32].copy_from_slice(&(weak.len() as u32).to_le_bytes());
     bytes[dyld + 32..dyld + 36].copy_from_slice(&0x1e0_u32.to_le_bytes());
     bytes[dyld + 36..dyld + 40].copy_from_slice(&(lazy.len() as u32).to_le_bytes());
+    bytes[0x160..0x160 + rebase.len()].copy_from_slice(rebase);
     bytes[0x180..0x180 + bind.len()].copy_from_slice(bind);
     bytes[0x1c0..0x1c0 + weak.len()].copy_from_slice(weak);
     bytes[0x1e0..0x1e0 + lazy.len()].copy_from_slice(lazy);
     bytes
+}
+
+fn legacy_streams(bind: &[u8], weak: &[u8], lazy: &[u8]) -> Vec<u8> {
+    legacy_streams_with_rebase(&[], bind, weak, lazy)
 }
 
 fn legacy_binds(bind: &[u8]) -> Vec<u8> {
@@ -304,6 +312,7 @@ fn chained_inventory_retains_format_ordinals_and_both_addends() {
     assert_eq!(rows[0].file_offset.0, 0x100);
     assert_eq!(rows[0].chained_pointer_format, Some(6));
     assert_eq!(rows[0].encoding, PointerEncoding::ChainedBind);
+    assert!(!rows[0].legacy_rebase);
     assert!(matches!(&rows[0].target, InventoryPointerTarget::Import {
         import_ordinal: Some(0), name, library_ordinal: Some(1), weak: Some(false),
         import_addend: 0, pointer_addend: -1,
@@ -431,4 +440,58 @@ fn regular_and_weak_repetitions_retain_both_stream_facts() {
     let bytes = legacy_streams(&regular, &conflicting_addend, &[]);
     let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
     assert!(PointerResolver::new(&macho).is_err());
+}
+
+#[test]
+fn lazy_bind_over_rebase_retains_both_occurrences() {
+    use macho_dyld::resolve::{LegacyBindStream, PointerTarget};
+
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let lazy = [
+        0x11, 0x40, b'_', b'l', b'a', b'z', b'y', 0, 0x51, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let bytes = legacy_streams_with_rebase(&rebase, &[], &[], &lazy);
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    let resolver = PointerResolver::new(&macho).unwrap();
+    let PointerInventory::Complete(rows) = resolver.inventory(4).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].file_offset.0, 0x100);
+    assert_eq!(rows[0].encoding, PointerEncoding::LegacyBind);
+    assert!(rows[0].legacy_rebase);
+    assert_eq!(rows[0].legacy_bind_occurrences.len(), 1);
+    assert_eq!(
+        rows[0].legacy_bind_occurrences[0].stream,
+        LegacyBindStream::Lazy
+    );
+    assert!(matches!(
+        &rows[0].target,
+        InventoryPointerTarget::Import { name, .. } if name == "_lazy"
+    ));
+    assert!(matches!(
+        resolver.observe_at_offset(rows[0].file_offset).unwrap().target,
+        PointerTarget::Import { name, .. } if name == "_lazy"
+    ));
+}
+
+#[test]
+fn pure_legacy_rebase_is_explicitly_retained() {
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let mut bytes = legacy_streams_with_rebase(&rebase, &[], &[], &[]);
+    bytes[0x100..0x108].copy_from_slice(&(BASE + 0x80).to_le_bytes());
+    let macho = macho_core::format::parse_macho_file(&bytes).unwrap();
+    let resolver = PointerResolver::new(&macho).unwrap();
+    let PointerInventory::Complete(rows) = resolver.inventory(4).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].file_offset.0, 0x100);
+    assert_eq!(rows[0].encoding, PointerEncoding::LegacyRebase);
+    assert!(rows[0].legacy_rebase);
+    assert!(rows[0].legacy_bind_occurrences.is_empty());
+    assert_eq!(
+        rows[0].target,
+        InventoryPointerTarget::Address(Va(BASE + 0x80))
+    );
 }
