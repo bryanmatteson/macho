@@ -31,6 +31,30 @@ pub fn parse_symbol_table<'data>(macho: &MachoFile<'data>) -> Result<SymbolTable
     Ok(SymbolTable::new(symbols, layout.string_table))
 }
 
+/// Parse selected `nlist` entries without walking or materializing the complete
+/// symbol table.
+///
+/// Results preserve the requested index order, including duplicate indices.
+/// The symbol- and string-table layouts and every requested entry are fully
+/// bounds checked. An out-of-range index rejects the whole request.
+pub fn parse_symbols_at<'data>(
+    macho: &MachoFile<'data>,
+    indices: &[usize],
+) -> Result<Vec<Symbol<'data>>> {
+    let layout = symbol_table_layout(macho)?;
+    let mut symbols = Vec::with_capacity(indices.len());
+    for &index in indices {
+        if index >= layout.symbol_count {
+            return Err(Error::format(format!(
+                "symbol index {index} exceeds table count {}",
+                layout.symbol_count
+            )));
+        }
+        symbols.push(parse_nlist_symbol(macho, &layout, index)?);
+    }
+    Ok(symbols)
+}
+
 /// Fold raw `nlist` entries in physical symbol-table order without first
 /// materializing a [`SymbolTable`].
 ///
@@ -120,6 +144,56 @@ fn fold_nlist_symbols<'data, State>(
             &mut folder,
         ),
     }
+}
+
+fn parse_nlist_symbol<'data>(
+    macho: &MachoFile<'data>,
+    layout: &SymbolTableLayout<'data>,
+    index: usize,
+) -> Result<Symbol<'data>> {
+    match macho.bitness() {
+        Bitness::Bits64 => {
+            let entry_size = size_of::<RawNlist64>();
+            let entry_off = nlist_offset(layout.symbol_offset, index, entry_size, "nlist64")?;
+            let raw: RawNlist64 = pod::read_pod(macho.bytes(), entry_off)?;
+            let endian = macho.endian();
+            Ok(Symbol {
+                name: layout.string_table.get(endian.interpret_u32(raw.n_strx))?,
+                sym_type: SymbolType::from_n_type(raw.n_type),
+                external: raw.n_type & N_EXT != 0,
+                private_external: raw.n_type & N_PEXT != 0,
+                section_index: raw.n_sect,
+                desc: endian.interpret_u16(raw.n_desc),
+                value: endian.interpret_u64(raw.n_value),
+                index,
+            })
+        }
+        Bitness::Bits32 => {
+            let entry_size = size_of::<RawNlist32>();
+            let entry_off = nlist_offset(layout.symbol_offset, index, entry_size, "nlist32")?;
+            let raw: RawNlist32 = pod::read_pod(macho.bytes(), entry_off)?;
+            let endian = macho.endian();
+            Ok(Symbol {
+                name: layout.string_table.get(endian.interpret_u32(raw.n_strx))?,
+                sym_type: SymbolType::from_n_type(raw.n_type),
+                external: raw.n_type & N_EXT != 0,
+                private_external: raw.n_type & N_PEXT != 0,
+                section_index: raw.n_sect,
+                desc: endian.interpret_u16(raw.n_desc as u16),
+                value: u64::from(endian.interpret_u32(raw.n_value)),
+                index,
+            })
+        }
+    }
+}
+
+fn nlist_offset(base: usize, index: usize, entry_size: usize, kind: &str) -> Result<usize> {
+    base.checked_add(
+        index
+            .checked_mul(entry_size)
+            .ok_or_else(|| Error::format(format!("{kind}[{index}]: stride overflows")))?,
+    )
+    .ok_or_else(|| Error::format(format!("{kind}[{index}]: offset overflows")))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,6 +371,23 @@ mod tests {
 
         assert_eq!(count, 2);
         assert_eq!(value_sum, 0x3000);
+    }
+
+    #[test]
+    fn selected_symbols_preserve_request_order_and_skip_unrequested_rows() {
+        let bytes = macho_with_symbols(99);
+        let macho = parse_fixture(&bytes);
+
+        let symbols = parse_symbols_at(&macho, &[0, 0]).unwrap();
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|symbol| (symbol.index, symbol.name, symbol.value))
+                .collect::<Vec<_>>(),
+            [(0, "first", 0x2000), (0, "first", 0x2000)]
+        );
+        assert!(parse_symbols_at(&macho, &[1]).is_err());
+        assert!(parse_symbols_at(&macho, &[2]).is_err());
     }
 
     #[test]

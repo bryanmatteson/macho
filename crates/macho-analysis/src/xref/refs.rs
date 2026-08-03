@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
@@ -123,6 +125,37 @@ impl XrefIndex {
         // Sort by source address
         refs.sort_by_key(|r| r.source);
 
+        Ok(Self {
+            refs,
+            decode_gaps,
+            refs_truncated,
+            decoded_bytes_truncated,
+        })
+    }
+
+    /// Discover direct branches to an exact set of internal target addresses.
+    ///
+    /// The target set is supplied by separately validated format evidence, so
+    /// this scan does not parse unrelated symbols, imports, fixups, or xrefs.
+    pub fn direct_branches_to_targets_limited(
+        macho: &MachoFile<'_>,
+        targets: &BTreeSet<u64>,
+        max_refs: usize,
+        max_decoded_bytes: usize,
+    ) -> Result<Self> {
+        let mut refs = Vec::new();
+        let mut decode_gaps = Vec::new();
+        let mut refs_truncated = false;
+        let decoded_bytes_truncated = collect_direct_branches_to_targets(
+            macho,
+            targets,
+            &mut refs,
+            &mut decode_gaps,
+            max_refs,
+            max_decoded_bytes,
+            &mut refs_truncated,
+        );
+        refs.sort_by_key(|reference| reference.source);
         Ok(Self {
             refs,
             decode_gaps,
@@ -561,6 +594,120 @@ fn collect_direct_branches(
     decoded_bytes_truncated
 }
 
+fn collect_direct_branches_to_targets(
+    macho: &MachoFile<'_>,
+    targets: &BTreeSet<u64>,
+    refs: &mut Vec<Xref>,
+    gaps: &mut Vec<macho_insn::DecodeGap>,
+    max_refs: usize,
+    max_decoded_bytes: usize,
+    refs_truncated: &mut bool,
+) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
+    let cpu_type = macho.header().cpu_type().0;
+    let arch = if cpu_type == CPU_TYPE_ARM64 {
+        macho_insn::Arch::Arm64
+    } else if cpu_type == CPU_TYPE_X86_64 {
+        macho_insn::Arch::X86_64
+    } else {
+        return false;
+    };
+    let mut remaining = max_decoded_bytes;
+    let mut decoded_bytes_truncated = false;
+    for section in macho.all_sections().filter(|section| {
+        section
+            .attributes()
+            .contains(SectionAttributes::PURE_INSTRUCTIONS)
+    }) {
+        if remaining == 0 {
+            decoded_bytes_truncated = true;
+            break;
+        }
+        let requested = usize::try_from(section.size()).unwrap_or(usize::MAX);
+        let mut decode_len = requested.min(remaining);
+        if arch.is_arm64() {
+            decode_len -= decode_len % 4;
+        }
+        if decode_len < requested {
+            decoded_bytes_truncated = true;
+        }
+        if decode_len == 0 {
+            continue;
+        }
+        let section_bytes = match macho.read_bytes_at(section.offset(), decode_len) {
+            Ok(bytes) => bytes,
+            Err(_) => continue,
+        };
+        remaining -= decode_len;
+        if arch.is_arm64() {
+            for (index, bytes) in section_bytes.chunks_exact(4).enumerate() {
+                let word = macho
+                    .endian()
+                    .interpret_u32(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                if word & 0x7c00_0000 != 0x1400_0000 {
+                    continue;
+                }
+                let source = section.addr().0 + u64::try_from(index).unwrap_or(u64::MAX) * 4;
+                let Some(target) = arm64_direct_branch_target(word, source)
+                    .filter(|target| targets.contains(target))
+                else {
+                    continue;
+                };
+                if !push_ref(
+                    refs,
+                    max_refs,
+                    refs_truncated,
+                    Xref {
+                        source: Va(source),
+                        target: XrefTarget::Internal { va: Va(target) },
+                        kind: XrefKind::DirectBranch,
+                    },
+                ) {
+                    return decoded_bytes_truncated;
+                }
+            }
+        } else {
+            let report = macho_insn::decode_lossy(section_bytes, section.addr().0, arch);
+            gaps.extend(report.gaps);
+            for instruction in report.instructions {
+                let source = section.addr().0 + instruction.offset as u64;
+                let Some(target) = macho_insn::resolve_branch_target(&instruction, source)
+                    .filter(|target| targets.contains(target))
+                else {
+                    continue;
+                };
+                if !push_ref(
+                    refs,
+                    max_refs,
+                    refs_truncated,
+                    Xref {
+                        source: Va(source),
+                        target: XrefTarget::Internal { va: Va(target) },
+                        kind: XrefKind::DirectBranch,
+                    },
+                ) {
+                    return decoded_bytes_truncated;
+                }
+            }
+        }
+    }
+    decoded_bytes_truncated
+}
+
+fn arm64_direct_branch_target(word: u32, source: u64) -> Option<u64> {
+    if word & 0x7c00_0000 != 0x1400_0000 {
+        return None;
+    }
+    let immediate = i64::from(((word & 0x03ff_ffff) << 6) as i32 >> 6) * 4;
+    if immediate >= 0 {
+        source.checked_add(immediate as u64)
+    } else {
+        source.checked_sub(immediate.unsigned_abs())
+    }
+}
+
 fn push_ref(refs: &mut Vec<Xref>, max_refs: usize, truncated: &mut bool, reference: Xref) -> bool {
     if refs.len() >= max_refs {
         *truncated = true;
@@ -568,4 +715,22 @@ fn push_ref(refs: &mut Vec<Xref>, max_refs: usize, truncated: &mut bool, referen
     }
     refs.push(reference);
     true
+}
+
+#[cfg(test)]
+mod targeted_tests {
+    use super::arm64_direct_branch_target;
+
+    #[test]
+    fn arm64_target_filter_decodes_only_direct_branch_words() {
+        assert_eq!(
+            arm64_direct_branch_target(0x9400_0040, 0x4000),
+            Some(0x4100)
+        );
+        assert_eq!(
+            arm64_direct_branch_target(0x17ff_fffc, 0x5000),
+            Some(0x4ff0)
+        );
+        assert_eq!(arm64_direct_branch_target(0xd503_201f, 0x4000), None);
+    }
 }

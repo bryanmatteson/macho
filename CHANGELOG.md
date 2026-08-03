@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.6
+
+- Add bounded direct-branch discovery for an exact set of Mach-O targets,
+  including a fast ARM64 `B`/`BL` scan and decoded x86 branch validation.
+- Resolve indirect symbol bindings through sparse, bounds-checked nlist
+  lookups so exact import questions do not require parsing unrelated symbols.
+
 ## 0.5.5
 
 - Retain bounded legacy `.debug_ranges` and DWARF 5 `.debug_rnglists` records

@@ -10,30 +10,30 @@
     readme       = "README.md"
     repository   = "https://github.com/bryanmatteson/macho.git"
     rust-version = "1.85"
-    version      = "0.5.5"
+    version      = "0.5.6"
 
 [workspace.dependencies]
     apple-codesign      = { version = "0.29.0", default-features = false }
-    macho              = { package = "macho-lib", path = "crates/macho", version = "0.5.5", default-features = false }
-    macho-analysis     = { path = "crates/macho-analysis", version = "0.5.5" }
-    macho-cli          = { path = "crates/macho-cli", version = "0.5.5" }
-    macho-codesign     = { path = "crates/macho-codesign", version = "0.5.5" }
-    macho-core         = { path = "crates/macho-core", version = "0.5.5" }
-    macho-cpp          = { path = "crates/macho-cpp", version = "0.5.5", default-features = false }
-    macho-demangle     = { path = "crates/macho-demangle", version = "0.5.5" }
-    macho-dwarf        = { path = "crates/macho-dwarf", version = "0.5.5" }
-    macho-dyld         = { path = "crates/macho-dyld", version = "0.5.5" }
-    macho-evidence     = { path = "crates/macho-evidence", version = "0.5.5" }
-    macho-dyld-cache   = { path = "crates/macho-dyld-cache", version = "0.5.5" }
-    macho-header-infer = { path = "crates/macho-header-infer", version = "0.5.5" }
-    macho-header-syntax = { path = "crates/macho-header-syntax", version = "0.5.5" }
-    macho-insn         = { path = "crates/macho-insn", version = "0.5.5" }
-    macho-mutate       = { path = "crates/macho-mutate", version = "0.5.5" }
-    macho-objc         = { path = "crates/macho-objc", version = "0.5.5" }
-    macho-patch        = { path = "crates/macho-patch", version = "0.5.5" }
-    macho-swift        = { path = "crates/macho-swift", version = "0.5.5" }
-    macho-symbols      = { path = "crates/macho-symbols", version = "0.5.5" }
-    macho-workflow     = { path = "crates/macho-workflow", version = "0.5.5" }
+    macho              = { package = "macho-lib", path = "crates/macho", version = "0.5.6", default-features = false }
+    macho-analysis     = { path = "crates/macho-analysis", version = "0.5.6" }
+    macho-cli          = { path = "crates/macho-cli", version = "0.5.6" }
+    macho-codesign     = { path = "crates/macho-codesign", version = "0.5.6" }
+    macho-core         = { path = "crates/macho-core", version = "0.5.6" }
+    macho-cpp          = { path = "crates/macho-cpp", version = "0.5.6", default-features = false }
+    macho-demangle     = { path = "crates/macho-demangle", version = "0.5.6" }
+    macho-dwarf        = { path = "crates/macho-dwarf", version = "0.5.6" }
+    macho-dyld         = { path = "crates/macho-dyld", version = "0.5.6" }
+    macho-evidence     = { path = "crates/macho-evidence", version = "0.5.6" }
+    macho-dyld-cache   = { path = "crates/macho-dyld-cache", version = "0.5.6" }
+    macho-header-infer = { path = "crates/macho-header-infer", version = "0.5.6" }
+    macho-header-syntax = { path = "crates/macho-header-syntax", version = "0.5.6" }
+    macho-insn         = { path = "crates/macho-insn", version = "0.5.6" }
+    macho-mutate       = { path = "crates/macho-mutate", version = "0.5.6" }
+    macho-objc         = { path = "crates/macho-objc", version = "0.5.6" }
+    macho-patch        = { path = "crates/macho-patch", version = "0.5.6" }
+    macho-swift        = { path = "crates/macho-swift", version = "0.5.6" }
+    macho-symbols      = { path = "crates/macho-symbols", version = "0.5.6" }
+    macho-workflow     = { path = "crates/macho-workflow", version = "0.5.6" }
 
     anyhow         = "1"
     bad64          = "0.12"

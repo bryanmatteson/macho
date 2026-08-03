@@ -4,6 +4,7 @@ use macho_core::MachoFile;
 use macho_core::model::addr::{ThinFileOffset, Va};
 use macho_core::model::load_command::{DysymtabData, LoadCommand};
 use macho_core::model::section::SectionType;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{Result, SymbolsError};
 
@@ -166,8 +167,8 @@ pub fn decode_indirect_bindings(
         layouts.push((section_index, section, size, kind, count));
     }
 
-    let mut needs_symbols = false;
-    'sections: for (_, section, _, _, count) in &layouts {
+    let mut referenced_symbol_indices = BTreeSet::new();
+    for (_, section, _, _, count) in &layouts {
         for entry in 0..*count {
             let table_index = u64::from(section.reserved1())
                 .checked_add(entry)
@@ -179,14 +180,24 @@ pub fn decode_indirect_bindings(
                     .expect("validated indirect table word"),
             );
             if raw & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS) == 0 {
-                needs_symbols = true;
-                break 'sections;
+                referenced_symbol_indices.insert(raw);
             }
         }
     }
-    let symbols = needs_symbols
-        .then(|| macho_core::format::parse_symbol_table(macho).map_err(SymbolsError::from))
-        .transpose()?;
+    let requested_indices = referenced_symbol_indices
+        .iter()
+        .map(|&index| usize::try_from(index).expect("u32 fits usize on supported hosts"))
+        .collect::<Vec<_>>();
+    let symbols = macho_core::format::parse_symbols_at(macho, &requested_indices)
+        .map_err(SymbolsError::from)?
+        .into_iter()
+        .map(|symbol| {
+            (
+                u32::try_from(symbol.index).expect("requested u32 index"),
+                symbol,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     let limit = usize::try_from(limit).unwrap_or(usize::MAX);
     let mut bindings =
@@ -207,11 +218,8 @@ pub fn decode_indirect_bindings(
             );
             let target = match raw_indirect_index & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS) {
                 0 => {
-                    let symbol_index = usize::try_from(raw_indirect_index)
-                        .map_err(|_| SymbolsError::format("symbol index exceeds host"))?;
                     let symbol = symbols
-                        .as_ref()
-                        .and_then(|table| table.get(symbol_index))
+                        .get(&raw_indirect_index)
                         .ok_or_else(|| {
                             SymbolsError::format(format!(
                                 "indirect-symbol row {indirect_table_index} references absent symbol {raw_indirect_index}"
