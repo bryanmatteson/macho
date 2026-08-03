@@ -4846,7 +4846,6 @@ dependencies = [
  "cargo_metadata",
  "clap",
  "macho-cli",
- "proc-macro2",
  "serde_json",
  "syn",
  "tempfile",

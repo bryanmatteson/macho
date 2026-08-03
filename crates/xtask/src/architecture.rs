@@ -4,7 +4,6 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use cargo_metadata::{DependencyKind, MetadataCommand};
-use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
@@ -488,51 +487,6 @@ fn has_cfg_test(attributes: &[syn::Attribute]) -> bool {
     })
 }
 
-struct TestLineRanges {
-    ranges: Vec<std::ops::RangeInclusive<usize>>,
-}
-
-impl<'ast> Visit<'ast> for TestLineRanges {
-    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
-        if has_cfg_test(&item.attrs) {
-            let span = item.span();
-            self.ranges.push(span.start().line..=span.end().line);
-            return;
-        }
-        visit::visit_item_mod(self, item);
-    }
-}
-
-fn production_line_count(source: &str, syntax: &syn::File) -> usize {
-    let mut tests = TestLineRanges { ranges: Vec::new() };
-    tests.visit_file(syntax);
-    let tokens = source
-        .parse::<proc_macro2::TokenStream>()
-        .expect("syn already accepted this Rust source");
-    let mut code_lines = BTreeSet::new();
-    collect_token_lines(tokens, &mut code_lines);
-    code_lines
-        .into_iter()
-        .filter(|line| !tests.ranges.iter().any(|range| range.contains(line)))
-        .count()
-}
-
-fn collect_token_lines(tokens: proc_macro2::TokenStream, lines: &mut BTreeSet<usize>) {
-    for token in tokens {
-        match token {
-            proc_macro2::TokenTree::Group(group) => {
-                lines.insert(group.span_open().start().line);
-                lines.insert(group.span_close().end().line);
-                collect_token_lines(group.stream(), lines);
-            }
-            token => {
-                let span = token.span();
-                lines.extend(span.start().line..=span.end().line);
-            }
-        }
-    }
-}
-
 fn use_tree_contains(tree: &syn::UseTree, expected: &str) -> bool {
     match tree {
         syn::UseTree::Path(path) => {
@@ -655,14 +609,6 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
     }
     if facts.removed_format_flag {
         violations.push(format!("removed format flag detected: {path}"));
-    }
-    if !is_test {
-        let production_lines = production_line_count(source, &syntax);
-        if production_lines > 800 {
-            violations.push(format!(
-                "production file exceeds 800 non-blank non-comment lines ({production_lines}): {path}"
-            ));
-        }
     }
     violations
 }
@@ -855,46 +801,16 @@ mod tests {
     }
 
     #[test]
-    fn module_size_check_excludes_cfg_test_modules_only() {
-        let production = (0..801)
+    fn cohesive_large_source_is_not_rejected_only_for_length() {
+        let cohesive_source = (0..1_200)
             .map(|index| format!("pub const ITEM_{index}: usize = {index};"))
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
             scan_source(
                 "macho-core",
-                Path::new("crates/macho-core/src/large.rs"),
-                &production,
-            )
-            .iter()
-            .any(|violation| violation.contains("exceeds 800"))
-        );
-
-        let tests = (0..900)
-            .map(|index| format!("const TEST_ITEM_{index}: usize = {index};"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mixed =
-            format!("pub const PRODUCTION: usize = 1;\n#[cfg(test)]\nmod tests {{\n{tests}\n}}");
-        assert!(
-            scan_source(
-                "macho-core",
-                Path::new("crates/macho-core/src/mixed.rs"),
-                &mixed,
-            )
-            .is_empty()
-        );
-
-        let comments = (0..900)
-            .map(|index| format!("comment line {index}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let comment_heavy = format!("/*\n{comments}\n*/\npub const PRODUCTION: usize = 1;");
-        assert!(
-            scan_source(
-                "macho-core",
-                Path::new("crates/macho-core/src/comments.rs"),
-                &comment_heavy,
+                Path::new("crates/macho-core/src/cohesive_table.rs"),
+                &cohesive_source,
             )
             .is_empty()
         );

@@ -48,7 +48,6 @@
     iced-x86       = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info", "intel"] }
     laidout        = "0.3"
     memmap2        = "0.9"
-    proc-macro2    = { version = "1", features = ["span-locations"] }
 rustc-demangle = "0.1"
 swift-demangler = "0.1.1"
     serde          = { version = "1", features = ["derive"] }
