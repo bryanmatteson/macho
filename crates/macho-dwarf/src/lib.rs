@@ -14,17 +14,22 @@ pub use error::{DwarfError, DwarfErrorKind, Result};
 
 #[allow(non_upper_case_globals)]
 pub mod functions;
+mod traversal;
 pub mod types;
 
 pub use functions::{DwarfFunctionIndex, DwarfVariableIndex};
+pub use traversal::{
+    DwarfAttributeRecord, DwarfEntryRecord, DwarfLineRowRecord, DwarfSectionReceipt,
+    DwarfSourceFileRecord, DwarfTraversal, DwarfTraversalLimits, DwarfUnitRecord, traverse_dwarf,
+};
 
 use gimli::{DwarfSections, SectionId};
 
 /// Performs has_dwarf_sections.
 pub fn has_dwarf_sections(macho: &MachoFile<'_>) -> bool {
-    macho.all_sections().any(|section| {
-        section.segment_name() == "__DWARF" || section.section_name() == "__debug_info"
-    })
+    macho
+        .all_sections()
+        .any(|section| section.section_name() == "__debug_info" && section.size() > 0)
 }
 
 /// Performs load_dwarf.

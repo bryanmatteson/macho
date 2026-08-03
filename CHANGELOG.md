@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.3
+
+- Add a bounded, fail-closed `macho-dwarf` traversal receipt retaining exact
+  section custody, units, DIEs, forms, source files, and physical line rows for
+  normalized downstream consumers.
+
 ## 0.5.2
 
 - Tightened retained legacy dyld pointer provenance after the 0.5.1 lazy-bind
