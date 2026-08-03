@@ -7,6 +7,8 @@ use macho_core::format::io::Endian;
 
 use crate::{Error, MachoFile, Result};
 
+mod ranges;
+
 /// Hard limits for one deterministic DWARF traversal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DwarfTraversalLimits {
@@ -20,6 +22,8 @@ pub struct DwarfTraversalLimits {
     pub max_attributes: u64,
     /// Maximum retained physical line-program rows.
     pub max_line_rows: u64,
+    /// Maximum retained raw range-list entries, including base selections.
+    pub max_range_entries: u64,
 }
 
 impl Default for DwarfTraversalLimits {
@@ -30,6 +34,7 @@ impl Default for DwarfTraversalLimits {
             max_entries: 2_000_000,
             max_attributes: 8_000_000,
             max_line_rows: 4_000_000,
+            max_range_entries: 4_000_000,
         }
     }
 }
@@ -180,6 +185,58 @@ pub struct DwarfLineRowRecord {
     pub isa: u64,
 }
 
+/// One `DW_AT_ranges` list attached to a physical DIE attribute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwarfRangeListRecord {
+    /// Owning unit ordinal.
+    pub unit_ordinal: u64,
+    /// Owning DIE offset.
+    pub entry_offset: u64,
+    /// Physical `DW_AT_ranges` attribute ordinal.
+    pub attribute_ordinal: u64,
+    /// Physical attribute form numeric value.
+    pub attribute_form: u16,
+    /// Stable physical attribute form spelling.
+    pub attribute_form_name: String,
+    /// Raw section offset or range-list index carried by the attribute.
+    pub attribute_value: u64,
+    /// Resolved section-relative list offset.
+    pub list_offset: u64,
+    /// Unit base address in effect before the first list entry.
+    pub initial_base_address: u64,
+    /// `complete` when every raw range materialized, otherwise `partial`.
+    pub coverage: String,
+}
+
+/// One raw physical range-list entry and its bounded resolution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DwarfRangeEntryRecord {
+    /// Owning unit ordinal.
+    pub unit_ordinal: u64,
+    /// Owning DIE offset.
+    pub entry_offset: u64,
+    /// Physical `DW_AT_ranges` attribute ordinal.
+    pub attribute_ordinal: u64,
+    /// Physical entry ordinal within the referenced range list.
+    pub ordinal: u64,
+    /// Closed raw entry kind.
+    pub kind: String,
+    /// First raw address, offset, index, or length operand.
+    pub raw_operand0: Option<u64>,
+    /// Second raw address, offset, index, or length operand.
+    pub raw_operand1: Option<u64>,
+    /// Resolved active base after a base selection, or before a range entry.
+    pub active_base_address: u64,
+    /// Exact resolved half-open start when the entry materialized.
+    pub start: Option<u64>,
+    /// Exact resolved half-open end when the entry materialized.
+    pub end: Option<u64>,
+    /// `base`, `range`, or `suppressed`.
+    pub disposition: String,
+    /// Typed reason for a suppressed non-base entry.
+    pub limitation: Option<String>,
+}
+
 /// Complete bounded traversal receipt for the supported in-image DWARF package.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DwarfTraversal {
@@ -195,6 +252,10 @@ pub struct DwarfTraversal {
     pub source_files: Vec<DwarfSourceFileRecord>,
     /// Physical line rows including `end_sequence` rows.
     pub line_rows: Vec<DwarfLineRowRecord>,
+    /// `DW_AT_ranges` list headers in physical attribute order.
+    pub range_lists: Vec<DwarfRangeListRecord>,
+    /// Raw range-list entries in physical list order.
+    pub range_entries: Vec<DwarfRangeEntryRecord>,
 }
 
 /// Traverse every supported in-image DWARF unit, DIE, attribute, file, and line row.
@@ -228,6 +289,7 @@ fn validate_limits(limits: DwarfTraversalLimits) -> Result<()> {
         || limits.max_entries == 0
         || limits.max_attributes == 0
         || limits.max_line_rows == 0
+        || limits.max_range_entries == 0
     {
         return Err(Error::unsupported(
             "DWARF traversal limits must be non-zero",
@@ -301,6 +363,8 @@ fn traverse_loaded<R: Reader<Offset = usize>>(
         attributes: Vec::new(),
         source_files: Vec::new(),
         line_rows: Vec::new(),
+        range_lists: Vec::new(),
+        range_entries: Vec::new(),
     };
     let mut headers = dwarf.units();
     while let Some(header) = headers
@@ -366,6 +430,25 @@ fn traverse_loaded<R: Reader<Offset = usize>>(
                         }
                         _ => {}
                     }
+                }
+                if attribute.name() == gimli::DW_AT_ranges {
+                    let range_attribute_ordinal =
+                        u64::try_from(attribute_ordinal).map_err(|_| {
+                            Error::unsupported("DWARF range attribute ordinal exceeds u64")
+                        })?;
+                    ranges::retain_range_list(
+                        dwarf,
+                        &unit,
+                        &result.sections,
+                        unit_ordinal,
+                        offset,
+                        range_attribute_ordinal,
+                        attribute.clone(),
+                        endian,
+                        limits,
+                        &mut result.range_lists,
+                        &mut result.range_entries,
+                    )?;
                 }
                 result.attributes.push(attribute_record(
                     dwarf,
@@ -457,6 +540,7 @@ fn traverse_loaded<R: Reader<Offset = usize>>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn source_file_record<R: Reader<Offset = usize>>(
     dwarf: &Dwarf<R>,
     unit: &gimli::Unit<R>,
@@ -480,7 +564,9 @@ fn source_file_record<R: Reader<Offset = usize>>(
 }
 
 fn enforce_count(current: usize, maximum: u64, label: &str) -> Result<()> {
-    if current as u64 >= maximum {
+    let current = u64::try_from(current)
+        .map_err(|_| Error::unsupported(format!("DWARF {label} count exceeds u64")))?;
+    if current >= maximum {
         return Err(Error::unsupported(format!(
             "DWARF {label} count exceeds limit {maximum}"
         )));

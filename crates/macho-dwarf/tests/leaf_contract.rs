@@ -80,6 +80,177 @@ fn malformed_unit_and_tight_budget_fail_closed() {
     assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::Unsupported);
 }
 
+#[test]
+fn legacy_range_lists_retain_raw_order_bases_and_exact_intervals() {
+    let bytes = dwarf4_ranges_fixture(true);
+    let container = macho_core::parse(&bytes).expect("range fixture parses");
+    let traversal = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect("range traversal succeeds")
+    .expect("DWARF exists");
+
+    assert_eq!(traversal.range_lists.len(), 1);
+    assert_eq!(
+        traversal.range_lists[0].attribute_form,
+        gimli::DW_FORM_sec_offset.0
+    );
+    assert_eq!(traversal.range_lists[0].list_offset, 0);
+    assert_eq!(traversal.range_lists[0].initial_base_address, 0x1000);
+    assert_eq!(traversal.range_lists[0].coverage, "complete");
+    assert_eq!(traversal.range_entries.len(), 3);
+    assert_eq!(traversal.range_entries[0].kind, "address_or_offset_pair");
+    assert_eq!(traversal.range_entries[0].raw_operand0, Some(0));
+    assert_eq!(traversal.range_entries[0].start, Some(0x1000));
+    assert_eq!(traversal.range_entries[0].end, Some(0x1010));
+    assert_eq!(traversal.range_entries[1].start, Some(0x1020));
+    assert_eq!(traversal.range_entries[1].end, Some(0x1028));
+    assert_eq!(traversal.range_entries[2].kind, "base_address");
+    assert_eq!(traversal.range_entries[2].raw_operand0, Some(0x3000));
+    assert_eq!(traversal.range_entries[2].active_base_address, 0x3000);
+    assert_eq!(traversal.range_entries[2].disposition, "base");
+}
+
+#[test]
+fn dwarf5_rnglistx_retains_index_and_closed_rle_records() {
+    let bytes = dwarf5_rnglistx_fixture(0x00, true);
+    let container = macho_core::parse(&bytes).expect("DWARF5 fixture parses");
+    let traversal = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect("DWARF5 range traversal succeeds")
+    .expect("DWARF exists");
+
+    let list = traversal.range_lists.first().expect("one range list");
+    assert_eq!(list.attribute_form, gimli::DW_FORM_rnglistx.0);
+    assert_eq!(list.attribute_value, 0);
+    assert_eq!(list.list_offset, 16);
+    assert_eq!(list.initial_base_address, 0x2000);
+    assert_eq!(list.coverage, "complete");
+    assert_eq!(traversal.range_entries.len(), 3);
+    assert_eq!(traversal.range_entries[0].kind, "base_address");
+    assert_eq!(traversal.range_entries[0].active_base_address, 0x4000);
+    assert_eq!(traversal.range_entries[1].kind, "offset_pair");
+    assert_eq!(traversal.range_entries[1].start, Some(0x4004));
+    assert_eq!(traversal.range_entries[1].end, Some(0x4010));
+    assert_eq!(traversal.range_entries[2].kind, "start_end");
+    assert_eq!(traversal.range_entries[2].start, Some(0x5000));
+    assert_eq!(traversal.range_entries[2].end, Some(0x5008));
+}
+
+#[test]
+fn range_lists_reject_missing_terminators_unknown_opcodes_and_tight_budgets() {
+    let missing_terminator = dwarf4_ranges_fixture(false);
+    let container = macho_core::parse(&missing_terminator).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("missing range terminator rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let missing_dwarf5_terminator = dwarf5_rnglistx_fixture(0x00, false);
+    let container = macho_core::parse(&missing_dwarf5_terminator).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("missing DWARF5 range terminator rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let truncated_operand = dwarf5_rnglistx_body(vec![0x06, 1, 2, 3, 4]);
+    let container = macho_core::parse(&truncated_operand).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("truncated DWARF5 range operand rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let mut overflowing_uleb = vec![0x04];
+    overflowing_uleb.extend_from_slice(&[0xff; 10]);
+    let overflowing_uleb = dwarf5_rnglistx_body(overflowing_uleb);
+    let container = macho_core::parse(&overflowing_uleb).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("overflowing DWARF5 ULEB rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let unresolved_address_index = dwarf5_rnglistx_fixture(0x01, true);
+    let container = macho_core::parse(&unresolved_address_index).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("missing .debug_addr index rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let unknown_opcode = dwarf5_rnglistx_fixture(0xff, true);
+    let container = macho_core::parse(&unknown_opcode).expect("envelope parses");
+    let error = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect_err("unknown RLE opcode rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::InvalidFormat);
+
+    let bytes = dwarf4_ranges_fixture(true);
+    let container = macho_core::parse(&bytes).expect("fixture parses");
+    let limits = macho_dwarf::DwarfTraversalLimits {
+        max_range_entries: 1,
+        ..macho_dwarf::DwarfTraversalLimits::default()
+    };
+    let error = macho_dwarf::traverse_dwarf(container.first_macho().expect("thin image"), limits)
+        .expect_err("range ceiling rejects");
+    assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::Unsupported);
+}
+
+#[test]
+fn legacy_32_bit_address_width_resolves_without_64_bit_reads() {
+    let bytes = dwarf4_ranges_fixture_with_address_size(true, 4);
+    let container = macho_core::parse(&bytes).expect("32-bit-address DWARF envelope parses");
+    let traversal = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect("32-bit-address DWARF traverses")
+    .expect("DWARF exists");
+    assert_eq!(traversal.units[0].address_size, 4);
+    assert_eq!(traversal.range_entries.len(), 3);
+    assert_eq!(traversal.range_entries[0].raw_operand1, Some(0x10));
+    assert_eq!(traversal.range_entries[0].start, Some(0x1000));
+    assert_eq!(traversal.range_entries[1].end, Some(0x1028));
+    assert_eq!(traversal.range_entries[2].raw_operand0, Some(0x3000));
+}
+
+#[test]
+fn suppressed_raw_ranges_are_retained_as_partial_not_absent() {
+    let mut bytes = dwarf4_ranges_fixture(true);
+    let ranges = section_offset(&bytes, "__debug_ranges");
+    bytes[ranges..ranges + 8].copy_from_slice(&0x10_u64.to_le_bytes());
+    bytes[ranges + 8..ranges + 16].copy_from_slice(&0x10_u64.to_le_bytes());
+    let container = macho_core::parse(&bytes).expect("envelope parses");
+    let traversal = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect("suppressed range remains traversable")
+    .expect("DWARF exists");
+    assert_eq!(traversal.range_lists[0].coverage, "partial");
+    assert_eq!(traversal.range_entries[0].disposition, "suppressed");
+    assert_eq!(
+        traversal.range_entries[0].limitation.as_deref(),
+        Some("dwarf.range_entry_suppressed")
+    );
+    assert!(traversal.range_entries[0].start.is_none());
+    assert!(traversal.range_entries[0].end.is_none());
+    assert_eq!(traversal.range_entries[1].start, Some(0x1020));
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn dwarf5_indexed_strings_are_resolved_to_exact_attribute_bytes() {
@@ -193,6 +364,155 @@ fn dwarf4_macho_fixture() -> Vec<u8> {
         ("__debug_info", debug_info),
         ("__debug_line", debug_line),
     ])
+}
+
+fn dwarf4_ranges_fixture(terminated: bool) -> Vec<u8> {
+    dwarf4_ranges_fixture_with_address_size(terminated, 8)
+}
+
+fn dwarf4_ranges_fixture_with_address_size(terminated: bool, address_size: u8) -> Vec<u8> {
+    let mut debug_abbrev = Vec::new();
+    push_uleb(&mut debug_abbrev, 1);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_TAG_compile_unit.0));
+    debug_abbrev.push(1);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_AT_low_pc.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_FORM_addr.0));
+    debug_abbrev.extend_from_slice(&[0, 0]);
+    push_uleb(&mut debug_abbrev, 2);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_TAG_subprogram.0));
+    debug_abbrev.push(0);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_AT_name.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_FORM_string.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_AT_ranges.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_FORM_sec_offset.0));
+    debug_abbrev.extend_from_slice(&[0, 0, 0]);
+
+    let mut entries = vec![1];
+    match address_size {
+        4 => entries.extend_from_slice(&0x1000_u32.to_le_bytes()),
+        8 => entries.extend_from_slice(&0x1000_u64.to_le_bytes()),
+        _ => panic!("test fixture address width must be 4 or 8"),
+    }
+    entries.push(2);
+    entries.extend_from_slice(b"authorize\0");
+    entries.extend_from_slice(&0_u32.to_le_bytes());
+    entries.push(0);
+    let mut debug_info = Vec::new();
+    debug_info.extend_from_slice(&((7 + entries.len()) as u32).to_le_bytes());
+    debug_info.extend_from_slice(&4_u16.to_le_bytes());
+    debug_info.extend_from_slice(&0_u32.to_le_bytes());
+    debug_info.push(address_size);
+    debug_info.extend_from_slice(&entries);
+
+    let mut debug_ranges = Vec::new();
+    let maximum = if address_size == 4 {
+        u64::from(u32::MAX)
+    } else {
+        u64::MAX
+    };
+    for value in [0_u64, 0x10, 0x20, 0x28, maximum, 0x3000] {
+        match address_size {
+            4 => debug_ranges.extend_from_slice(&(value as u32).to_le_bytes()),
+            8 => debug_ranges.extend_from_slice(&value.to_le_bytes()),
+            _ => unreachable!(),
+        }
+    }
+    if terminated {
+        debug_ranges.resize(debug_ranges.len() + usize::from(address_size) * 2, 0);
+    }
+    macho_with_sections(&[
+        ("__debug_abbrev", debug_abbrev),
+        ("__debug_info", debug_info),
+        ("__debug_ranges", debug_ranges),
+    ])
+}
+
+fn dwarf5_rnglistx_fixture(first_list_opcode: u8, terminated: bool) -> Vec<u8> {
+    let mut range_body = Vec::new();
+    range_body.push(if first_list_opcode == 0 {
+        0x05
+    } else {
+        first_list_opcode
+    });
+    if range_body[0] == 0x05 {
+        range_body.extend_from_slice(&0x4000_u64.to_le_bytes());
+        range_body.extend_from_slice(&[0x04, 0x04, 0x10, 0x06]);
+        range_body.extend_from_slice(&0x5000_u64.to_le_bytes());
+        range_body.extend_from_slice(&0x5008_u64.to_le_bytes());
+    } else if range_body[0] == 0x01 {
+        range_body.push(0);
+    }
+    if terminated {
+        range_body.push(0);
+    }
+    dwarf5_rnglistx_body(range_body)
+}
+
+fn dwarf5_rnglistx_body(range_body: Vec<u8>) -> Vec<u8> {
+    let mut debug_abbrev = Vec::new();
+    push_uleb(&mut debug_abbrev, 1);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_TAG_compile_unit.0));
+    debug_abbrev.push(1);
+    for (name, form) in [
+        (gimli::DW_AT_low_pc.0, gimli::DW_FORM_addr.0),
+        (gimli::DW_AT_rnglists_base.0, gimli::DW_FORM_sec_offset.0),
+    ] {
+        push_uleb(&mut debug_abbrev, u64::from(name));
+        push_uleb(&mut debug_abbrev, u64::from(form));
+    }
+    debug_abbrev.extend_from_slice(&[0, 0]);
+    push_uleb(&mut debug_abbrev, 2);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_TAG_subprogram.0));
+    debug_abbrev.push(0);
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_AT_name.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_FORM_string.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_AT_ranges.0));
+    push_uleb(&mut debug_abbrev, u64::from(gimli::DW_FORM_rnglistx.0));
+    debug_abbrev.extend_from_slice(&[0, 0, 0]);
+
+    let mut entries = vec![1];
+    entries.extend_from_slice(&0x2000_u64.to_le_bytes());
+    entries.extend_from_slice(&12_u32.to_le_bytes());
+    entries.push(2);
+    entries.extend_from_slice(b"authorize\0");
+    entries.push(0);
+    entries.push(0);
+    let mut debug_info = Vec::new();
+    debug_info.extend_from_slice(&((8 + entries.len()) as u32).to_le_bytes());
+    debug_info.extend_from_slice(&5_u16.to_le_bytes());
+    debug_info.push(gimli::DW_UT_compile.0);
+    debug_info.push(8);
+    debug_info.extend_from_slice(&0_u32.to_le_bytes());
+    debug_info.extend_from_slice(&entries);
+
+    let mut debug_rnglists = Vec::new();
+    debug_rnglists.extend_from_slice(&((8 + 4 + range_body.len()) as u32).to_le_bytes());
+    debug_rnglists.extend_from_slice(&5_u16.to_le_bytes());
+    debug_rnglists.push(8);
+    debug_rnglists.push(0);
+    debug_rnglists.extend_from_slice(&1_u32.to_le_bytes());
+    debug_rnglists.extend_from_slice(&4_u32.to_le_bytes());
+    debug_rnglists.extend_from_slice(&range_body);
+
+    macho_with_sections(&[
+        ("__debug_abbrev", debug_abbrev),
+        ("__debug_info", debug_info),
+        ("__debug_rnglists", debug_rnglists),
+    ])
+}
+
+fn push_uleb(bytes: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        bytes.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
 }
 
 fn macho_with_sections(sections: &[(&str, Vec<u8>)]) -> Vec<u8> {

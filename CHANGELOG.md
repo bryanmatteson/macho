@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.5.5
+
+- Retain bounded legacy `.debug_ranges` and DWARF 5 `.debug_rnglists` records
+  in physical order, including raw operands, base-address selections, resolved
+  half-open intervals, coverage, and typed suppression evidence. Reject
+  malformed, unterminated, unknown, unresolvable, or over-budget range lists
+  instead of presenting incomplete traversal as complete.
+
 ## 0.5.4
 
 - Resolve DWARF 5 indexed string forms to exact retained bytes while preserving

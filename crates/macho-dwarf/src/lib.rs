@@ -19,8 +19,9 @@ pub mod types;
 
 pub use functions::{DwarfFunctionIndex, DwarfVariableIndex};
 pub use traversal::{
-    DwarfAttributeRecord, DwarfEntryRecord, DwarfLineRowRecord, DwarfSectionReceipt,
-    DwarfSourceFileRecord, DwarfTraversal, DwarfTraversalLimits, DwarfUnitRecord, traverse_dwarf,
+    DwarfAttributeRecord, DwarfEntryRecord, DwarfLineRowRecord, DwarfRangeEntryRecord,
+    DwarfRangeListRecord, DwarfSectionReceipt, DwarfSourceFileRecord, DwarfTraversal,
+    DwarfTraversalLimits, DwarfUnitRecord, traverse_dwarf,
 };
 
 use gimli::{DwarfSections, SectionId};
