@@ -613,7 +613,13 @@ fn attribute_record<R: Reader<Offset = usize>>(
             set_section_offset(&mut record, value.0 as u64)
         }
         AttributeValue::DebugStrOffsetsIndex(value) => {
-            set_section_offset(&mut record, value.0 as u64)
+            record.value_kind = "text".into();
+            record.unsigned = Some(value.0 as u64);
+            record.text = Some(resolved_bytes(
+                dwarf,
+                unit,
+                AttributeValue::DebugStrOffsetsIndex(value),
+            )?);
         }
         AttributeValue::FileIndex(value) => set_unsigned(&mut record, value),
         AttributeValue::DwoId(value) => set_unsigned(&mut record, value.0),

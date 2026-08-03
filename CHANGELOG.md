@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.4
+
+- Resolve DWARF 5 indexed string forms to exact retained bytes while preserving
+  their physical string-table index, so downstream consumers receive callable,
+  parameter, and type names without lossy reconstruction.
+
 ## 0.5.3
 
 - Add a bounded, fail-closed `macho-dwarf` traversal receipt retaining exact

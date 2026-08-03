@@ -16,3 +16,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 macho-test-support = { path = "../macho-test-support" }
+tempfile.workspace = true

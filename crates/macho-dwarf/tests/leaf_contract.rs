@@ -80,6 +80,65 @@ fn malformed_unit_and_tight_budget_fail_closed() {
     assert_eq!(error.kind, macho_dwarf::DwarfErrorKind::Unsupported);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn dwarf5_indexed_strings_are_resolved_to_exact_attribute_bytes() {
+    let temporary = tempfile::tempdir().expect("tempdir");
+    let source = temporary.path().join("indexed-strings.c");
+    let object = temporary.path().join("indexed-strings.o");
+    std::fs::write(
+        &source,
+        "int authorize(int code, long token) { return code == 7 && token == 11; }\n",
+    )
+    .expect("write source");
+    let output = std::process::Command::new("clang")
+        .args(["-gdwarf-5", "-O0", "-c"])
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .output()
+        .expect("spawn clang");
+    assert!(
+        output.status.success(),
+        "clang failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bytes = std::fs::read(object).expect("read object");
+    let container = macho_core::parse(&bytes).expect("object parses");
+    let traversal = macho_dwarf::traverse_dwarf(
+        container.first_macho().expect("thin image"),
+        macho_dwarf::DwarfTraversalLimits::default(),
+    )
+    .expect("DWARF traverses")
+    .expect("DWARF exists");
+    let names = traversal
+        .attributes
+        .iter()
+        .filter(|attribute| attribute.name == gimli::DW_AT_name.0)
+        .filter_map(|attribute| attribute.text.as_deref())
+        .collect::<Vec<_>>();
+    for expected in [
+        b"authorize".as_slice(),
+        b"code".as_slice(),
+        b"token".as_slice(),
+        b"int".as_slice(),
+        b"long".as_slice(),
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing exact indexed string {:?} from {names:?}",
+            String::from_utf8_lossy(expected)
+        );
+    }
+    assert!(traversal.attributes.iter().any(|attribute| {
+        attribute.form == gimli::DW_FORM_strx1.0
+            && attribute.value_kind == "text"
+            && attribute.text.is_some()
+            && attribute.unsigned.is_some()
+    }));
+}
+
 fn dwarf4_macho_fixture() -> Vec<u8> {
     let debug_abbrev = vec![
         1, 0x11, 1, 0x03, 0x08, 0x13, 0x05, 0x25, 0x08, 0x1b, 0x08, 0x10, 0x17, 0, 0, 2, 0x24, 0,
