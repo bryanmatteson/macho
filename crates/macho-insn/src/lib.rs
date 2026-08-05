@@ -87,6 +87,26 @@ pub enum Operand {
     },
 }
 
+/// Architecture-neutral effect of an instruction on its written first
+/// operand, retained for bounded address-value recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ValueEffect {
+    /// The instruction does not write its first operand.
+    None,
+    /// The destination is assigned from a register or immediate operand.
+    Set,
+    /// The destination is an address computed from a memory-form operand.
+    Address,
+    /// The destination is loaded from a memory-form operand.
+    Load,
+    /// The destination is a source register plus a signed immediate.
+    AddImmediate,
+    /// The destination is written, but this decoder exposes no safe value
+    /// transfer model for the instruction.
+    UnknownWrite,
+}
+
 const MAX_OPERANDS: usize = 4;
 
 /// Target architecture.
@@ -148,6 +168,8 @@ pub struct Insn {
     /// stores (`STR`, `MOV [mem], reg`), and any instruction whose op0 is
     /// not a register.
     pub writes_op0_reg: bool,
+    /// Address-value effect for the written first operand.
+    pub value_effect: ValueEffect,
     ops: [Operand; MAX_OPERANDS],
     op_count: u8,
 }
@@ -176,6 +198,7 @@ impl Insn {
         op_count: u8,
         writes_implicit_gpr0: bool,
         writes_op0_reg: bool,
+        value_effect: ValueEffect,
     ) -> Self {
         Self {
             offset: 0,
@@ -183,6 +206,7 @@ impl Insn {
             kind,
             writes_implicit_gpr0,
             writes_op0_reg,
+            value_effect,
             ops,
             op_count,
         }
@@ -233,6 +257,20 @@ pub enum BranchTarget {
 pub struct PcRelInfo {
     /// Signed displacement from the instruction's VA.
     pub displacement: i64,
+    /// Whether the instruction materializes an address, a page address, or
+    /// references memory at the PC-relative target.
+    pub kind: PcRelKind,
+}
+
+/// Semantics of a PC-relative non-branch instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcRelKind {
+    /// Materializes the exact target address, such as ADR or RIP-relative LEA.
+    Address,
+    /// Materializes a page address, such as ADRP.
+    PageAddress,
+    /// Reads or writes memory at the target address, including literal loads.
+    Memory,
 }
 
 /// Errors from decode operations.

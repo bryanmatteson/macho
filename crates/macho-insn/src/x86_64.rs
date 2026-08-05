@@ -6,7 +6,8 @@ use iced_x86::{
 };
 
 use crate::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo, Reg,
+    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo,
+    PcRelKind, Reg, ValueEffect,
 };
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
@@ -58,6 +59,22 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     } else {
         false
     };
+    let value_effect = if !writes_op0_reg {
+        ValueEffect::None
+    } else {
+        match insn.mnemonic() {
+            Mnemonic::Mov | Mnemonic::Movsx | Mnemonic::Movsxd | Mnemonic::Movzx => {
+                if insn.op_count() > 1 && insn.op1_kind() == OpKind::Memory {
+                    ValueEffect::Load
+                } else {
+                    ValueEffect::Set
+                }
+            }
+            Mnemonic::Lea => ValueEffect::Address,
+            Mnemonic::Add | Mnemonic::Sub => ValueEffect::AddImmediate,
+            _ => ValueEffect::UnknownWrite,
+        }
+    };
 
     Ok(Insn::with_ops(
         insn.len(),
@@ -66,6 +83,7 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
         op_count,
         writes_implicit_gpr0,
         writes_op0_reg,
+        value_effect,
     ))
 }
 
@@ -89,14 +107,21 @@ fn classify(insn: &Instruction, _va: u64) -> InsnKind {
         }
         FlowControl::Return => InsnKind::Return,
         FlowControl::IndirectBranch => InsnKind::Branch(BranchInfo {
-            target: BranchTarget::Indirect,
+            target: extract_branch_target(insn),
         }),
         FlowControl::IndirectCall => InsnKind::Call(BranchInfo {
-            target: BranchTarget::Indirect,
+            target: extract_branch_target(insn),
         }),
         FlowControl::Next | FlowControl::Interrupt | FlowControl::Exception => {
             if let Some(disp) = rip_relative_displacement(insn) {
-                return InsnKind::PcRelative(PcRelInfo { displacement: disp });
+                return InsnKind::PcRelative(PcRelInfo {
+                    displacement: disp,
+                    kind: if insn.mnemonic() == Mnemonic::Lea {
+                        PcRelKind::Address
+                    } else {
+                        PcRelKind::Memory
+                    },
+                });
             }
             InsnKind::Other
         }
@@ -167,10 +192,14 @@ fn map_operand(insn: &Instruction, idx: u32) -> Option<Operand> {
             // operand positions — consumers checking for specific bases like
             // Gpr(4)/RSP naturally skip the sentinel.
             let base = map_register(insn.memory_base()).unwrap_or(Reg::gpr(255));
-            // Sign-extend the displacement correctly based on its encoded width.
-            // memory_displacement64() returns the raw value without sign extension,
-            // so [rbp-8] encoded as disp8=0xF8 would yield 248 instead of -8.
-            let disp = insn.memory_displacement32() as i32 as i64;
+            let disp = if insn.is_ip_rel_memory_operand() {
+                insn.ip_rel_memory_address().wrapping_sub(insn.next_ip()) as i64
+            } else {
+                // Sign-extend the displacement correctly based on its encoded width.
+                // memory_displacement64() returns the raw value without sign extension,
+                // so [rbp-8] encoded as disp8=0xF8 would yield 248 instead of -8.
+                insn.memory_displacement32() as i32 as i64
+            };
             Some(Operand::Mem { base, disp })
         }
         OpKind::Immediate8

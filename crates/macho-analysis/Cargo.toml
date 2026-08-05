@@ -17,7 +17,7 @@ macho-dyld.workspace = true
 macho-codesign.workspace = true
 macho-dwarf.workspace = true
 macho-objc.workspace = true
-macho-swift.workspace = true
+macho-swift = { workspace = true, features = ["strict-rtti"] }
 macho-cpp = { workspace = true, features = ["abi", "fixups", "itanium-rtti"] }
 macho-header-syntax.workspace = true
 serde.workspace = true

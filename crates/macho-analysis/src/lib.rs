@@ -26,19 +26,28 @@ pub mod abi;
 pub mod analyzer;
 /// The audit module.
 pub mod audit;
+/// Bounded inter-procedural direct-call recovery over function identities.
+pub mod call_graph;
 /// The container module.
 pub mod container;
+/// Bounded control-flow recovery over recovered function identities.
+pub mod control_flow;
 /// The deps module.
 pub mod deps;
 /// The diff module.
 pub mod diff;
 /// Bounded, architecture-aware Mach-O disassembly.
 pub mod disassembly;
+/// Bounded evidence-bearing function recovery.
+pub mod functions;
 /// The image module.
 pub mod image;
+pub mod indirect_calls;
 /// The paths module.
 pub mod paths;
 pub mod planner;
+/// Unified Macho-owned program recovery over one exact image.
+pub mod program;
 /// The reconstruct module.
 pub mod reconstruct;
 /// Canonical language-recovery wire reports and schema registry.
@@ -47,6 +56,8 @@ pub mod report;
 pub mod snapshot;
 /// The strings module.
 pub mod strings;
+/// Bounded inter-procedural branch, tail-call, and thunk recovery.
+pub mod transfers;
 /// The vtables module.
 pub mod vtables;
 /// The xref module.

@@ -1,7 +1,8 @@
 //! AArch64 instruction decoding and disassembly via `bad64`.
 
 use crate::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo, Reg,
+    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, Operand, PcRelInfo,
+    PcRelKind, Reg, ValueEffect,
 };
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
@@ -15,6 +16,7 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
     let kind = classify(word, va);
     let (ops, op_count) = extract_operands(word);
     let writes_op0_reg = op0_is_written(word);
+    let value_effect = value_effect(word, writes_op0_reg);
 
     Ok(Insn::with_ops(
         4,
@@ -23,7 +25,34 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
         op_count,
         false,
         writes_op0_reg,
+        value_effect,
     ))
+}
+
+fn value_effect(word: u32, writes_op0_reg: bool) -> ValueEffect {
+    if !writes_op0_reg {
+        return ValueEffect::None;
+    }
+    if word & 0x1F00_0000 == 0x1000_0000 {
+        return ValueEffect::Set;
+    }
+    if is_mov_register(word) {
+        return ValueEffect::Set;
+    }
+    if word & 0x3B00_0000 == 0x1800_0000 {
+        return ValueEffect::Load;
+    }
+    if word & 0x3F00_0000 == 0x3900_0000
+        || word & 0x3E00_0000 == 0x2800_0000
+        || word & 0x3E00_0000 == 0x2C00_0000
+        || is_ldur_x(word)
+    {
+        return ValueEffect::Load;
+    }
+    if word & 0x1F00_0000 == 0x1100_0000 {
+        return ValueEffect::AddImmediate;
+    }
+    ValueEffect::UnknownWrite
 }
 
 /// Whether the first operand of an ARM64 instruction is a register that the
@@ -57,8 +86,14 @@ fn op0_is_written(word: u32) -> bool {
     // bits 25:24 = 01. Bit 23 distinguishes STR/LDR (opc[1]=0) from
     // LDRSW/PRFM (opc[1]=1); we only handle the STR/LDR case here and let
     // bit 22 act as the load/store selector (opc[0]=L).
-    if word & 0x3F80_0000 == 0x3900_0000 {
+    if word & 0x3F00_0000 == 0x3900_0000 {
         return (word >> 22) & 1 == 1;
+    }
+
+    // LDUR Xt, [Xn, #imm9]. Pre/post-indexed forms also write the base
+    // register and therefore remain outside the single-destination model.
+    if is_ldur_x(word) {
+        return true;
     }
 
     // ADD/SUB immediate: Rd is op0, always written.
@@ -72,6 +107,11 @@ fn op0_is_written(word: u32) -> bool {
     // here is correct — the ABI layer filters by whether Rd is an arg
     // register, and xzr is never one.
     if word & 0x1F20_0000 == 0x0B00_0000 {
+        return true;
+    }
+
+    // MOV Xd, Xm is the ORR Xd, XZR, Xm alias with no shift.
+    if is_mov_register(word) {
         return true;
     }
 
@@ -186,6 +226,7 @@ fn classify(word: u32, va: u64) -> InsnKind {
         let offset = sign_extend_21(imm) as i64;
         return InsnKind::PcRelative(PcRelInfo {
             displacement: offset,
+            kind: PcRelKind::Address,
         });
     }
 
@@ -202,6 +243,7 @@ fn classify(word: u32, va: u64) -> InsnKind {
         let target = offset - (va & 0xFFF) as i64;
         return InsnKind::PcRelative(PcRelInfo {
             displacement: target,
+            kind: PcRelKind::PageAddress,
         });
     }
 
@@ -211,10 +253,19 @@ fn classify(word: u32, va: u64) -> InsnKind {
         let offset = sign_extend_19(imm19) as i64 * 4;
         return InsnKind::PcRelative(PcRelInfo {
             displacement: offset,
+            kind: PcRelKind::Memory,
         });
     }
 
     InsnKind::Other
+}
+
+fn is_mov_register(word: u32) -> bool {
+    word & 0xFFE0_FFE0 == 0xAA00_03E0
+}
+
+fn is_ldur_x(word: u32) -> bool {
+    word & 0xFFE0_0C00 == 0xF840_0000
 }
 
 // ───────────────── operand extraction ─────────────────
@@ -293,6 +344,17 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         return (ops, 2);
     }
 
+    // ── LDUR Xt, [Xn, #imm9] ──
+    if is_ldur_x(word) {
+        let imm9 = ((word >> 12) & 0x1FF) as i32;
+        ops[0] = Operand::Reg(Reg::gpr(rt));
+        ops[1] = Operand::Mem {
+            base: Reg::gpr(rn),
+            disp: sign_extend_9(imm9) as i64,
+        };
+        return (ops, 2);
+    }
+
     // ── ADD/SUB (immediate) ──
     // sf 0 0 100010 sh imm12 Rn Rd (ADD)
     // sf 1 0 100010 sh imm12 Rn Rd (SUB)
@@ -318,6 +380,13 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
         return (ops, 3);
     }
 
+    // ── MOV Xd, Xm (ORR alias) ──
+    if is_mov_register(word) {
+        ops[0] = Operand::Reg(Reg::gpr(rd));
+        ops[1] = Operand::Reg(Reg::gpr(rm));
+        return (ops, 2);
+    }
+
     // ── FMOV (register, single/double) ──
     // 000 11110 xx 1 0000 00 10000 Rn Rd
     if word & 0xFF20_FC00 == 0x1E20_4000 {
@@ -330,6 +399,16 @@ fn extract_operands(word: u32) -> ([Operand; MAX_OPERANDS], u8) {
     if word & 0xFFFF_FC1F == 0xD61F_0000 || word & 0xFFFF_FC1F == 0xD63F_0000 {
         ops[0] = Operand::Reg(Reg::gpr(rn));
         return (ops, 1);
+    }
+
+    // ── Authenticated branch-register families ──
+    // The target register is Rn. Forms with an explicit modifier encode it in
+    // the low register field; retaining both is sufficient for target-value
+    // recovery while authentication details remain in the raw opcode layer.
+    if word & 0xFE00_0000 == 0xD600_0000 {
+        ops[0] = Operand::Reg(Reg::gpr(rn));
+        ops[1] = Operand::Reg(Reg::gpr(rt));
+        return (ops, 2);
     }
 
     // ── CBZ / CBNZ ──
@@ -378,6 +457,14 @@ fn sign_extend_26(val: i32) -> i32 {
 fn sign_extend_21(val: i32) -> i32 {
     if val & (1 << 20) != 0 {
         val | !0x001F_FFFF
+    } else {
+        val
+    }
+}
+
+fn sign_extend_9(val: i32) -> i32 {
+    if val & (1 << 8) != 0 {
+        val | !0x1FF
     } else {
         val
     }

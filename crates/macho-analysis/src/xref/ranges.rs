@@ -6,6 +6,9 @@ use crate::Result;
 use crate::dyld::exports::parse_exports;
 use crate::dyld::types::ExportKind;
 use crate::ext::MachoExt;
+use crate::functions::{
+    FunctionCollectorStatus, FunctionEvidenceSource, FunctionIdentity, FunctionIndex,
+};
 use crate::model::addr::map::AddressMap;
 use crate::model::addr::types::{ThinFileOffset, Va};
 use crate::model::macho_file::MachoFile;
@@ -303,6 +306,87 @@ impl SymbolRangeIndex {
         Ok(Self { entries, truncated })
     }
 
+    /// Project the Macho-owned function inventory into the legacy range wire
+    /// model without deriving new boundaries from adjacent symbols.
+    pub fn from_function_index_limited(
+        macho: &MachoFile<'_>,
+        functions: &FunctionIndex,
+        max_ranges: usize,
+    ) -> Self {
+        let truncated = functions.truncated_function_count() != 0
+            || functions.functions().len() > max_ranges
+            || functions
+                .receipts()
+                .iter()
+                .any(|receipt| receipt.status == FunctionCollectorStatus::Truncated);
+        let entries = functions
+            .functions()
+            .iter()
+            .take(max_ranges)
+            .map(|function| {
+                let source = if function
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.source == FunctionEvidenceSource::Nlist)
+                {
+                    RangeSource::Nlist
+                } else if function
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.source == FunctionEvidenceSource::ExportTrie)
+                {
+                    RangeSource::ExportTrie
+                } else if function
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.source == FunctionEvidenceSource::ObjectiveC)
+                {
+                    RangeSource::ObjCMetadata
+                } else {
+                    RangeSource::Inferred
+                };
+                let entity = match &function.identity {
+                    FunctionIdentity::Named { primary, .. }
+                        if source == RangeSource::ObjCMetadata =>
+                    {
+                        objc_entity(primary).unwrap_or_else(|| CodeEntity::Symbol {
+                            name: primary.clone(),
+                            external: false,
+                        })
+                    }
+                    FunctionIdentity::Named { primary, .. } => CodeEntity::Symbol {
+                        name: primary.clone(),
+                        external: false,
+                    },
+                    FunctionIdentity::Anonymous { .. } => CodeEntity::Anonymous {
+                        section_name: macho
+                            .all_sections()
+                            .find(|section| {
+                                section.addr().0 <= function.entry
+                                    && function.entry
+                                        < section.addr().0.saturating_add(section.size())
+                            })
+                            .map_or_else(String::new, |section| section.section_name().to_string()),
+                    },
+                };
+                RangeEntry {
+                    start: Va(function.entry),
+                    end: Va(function.extent.map_or_else(
+                        || function.entry.saturating_add(1),
+                        |extent| extent.end_exclusive,
+                    )),
+                    entity,
+                    source,
+                    is_alt_entry: function
+                        .evidence
+                        .iter()
+                        .any(|evidence| evidence.detail == "nlist_alt_entry"),
+                }
+            })
+            .collect();
+        Self { entries, truncated }
+    }
+
     /// Performs lookup_va.
     pub fn lookup_va(&self, va: Va) -> Option<&RangeEntry> {
         // Binary search for the entry containing this VA
@@ -357,6 +441,21 @@ impl SymbolRangeIndex {
     }
 }
 
+fn objc_entity(name: &str) -> Option<CodeEntity> {
+    let is_class_method = name.starts_with("+[");
+    if !is_class_method && !name.starts_with("-[") {
+        return None;
+    }
+    let body = name.get(2..name.len().checked_sub(1)?)?;
+    let (class, selector) = body.split_once(' ')?;
+    let class_name = class.split_once('(').map_or(class, |(class, _)| class);
+    Some(CodeEntity::ObjCMethod {
+        class_name: class_name.to_owned(),
+        selector: selector.to_owned(),
+        is_class_method,
+    })
+}
+
 impl<'data> MachoExt<'data> for SymbolRangeIndex {
     type Error = crate::AnalysisError;
 
@@ -387,6 +486,7 @@ fn find_section_end(section_ends: &[(Va, Va)], va: Va) -> Option<Va> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::functions::FunctionRecoveryLimits;
 
     #[test]
     fn find_section_end_empty() {
@@ -442,5 +542,25 @@ mod tests {
         assert_eq!(find_section_end(&sections, Va(0x1500)), Some(Va(0x2000)));
         assert_eq!(find_section_end(&sections, Va(0x2000)), Some(Va(0x3000)));
         assert_eq!(find_section_end(&sections, Va(0x4800)), Some(Va(0x5000)));
+    }
+
+    #[test]
+    fn legacy_ranges_project_function_index_extents_without_rederiving_adjacency() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let container = macho_core::parse(&bytes).unwrap();
+        let macho = container.first_macho().unwrap();
+        let functions = FunctionIndex::recover(macho, FunctionRecoveryLimits::default()).unwrap();
+        let ranges = SymbolRangeIndex::from_function_index_limited(macho, &functions, usize::MAX);
+        assert_eq!(ranges.entries().len(), functions.functions().len());
+        for (range, function) in ranges.entries().iter().zip(functions.functions()) {
+            assert_eq!(range.start.0, function.entry);
+            assert_eq!(
+                range.end.0,
+                function.extent.map_or_else(
+                    || function.entry.saturating_add(1),
+                    |extent| extent.end_exclusive
+                )
+            );
+        }
     }
 }

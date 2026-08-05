@@ -266,6 +266,8 @@ impl AnalysisDomain {
 struct FactStore {
     values: BTreeMap<AnalysisDomain, Value>,
     issues: BTreeMap<AnalysisDomain, Vec<AnalysisIssue>>,
+    functions: Option<crate::functions::FunctionIndex>,
+    program: Option<crate::program::RecoveredProgram>,
 }
 
 #[derive(Debug, Default)]
@@ -444,7 +446,7 @@ impl Analyzer {
                         run.limits,
                         run.audit_rules,
                         run.heuristic_strings,
-                        &facts,
+                        &mut facts,
                     )
                 }) {
                     Ok((payload, mut issues)) => {
@@ -522,13 +524,99 @@ fn bound_issues(domain: AnalysisDomain, issues: &mut Vec<AnalysisIssue>, limit: 
     issues.push(bounded_collection_issue(domain, limit, "issues"));
 }
 
+fn program_limits(limits: &AnalysisLimits) -> crate::program::ProgramRecoveryLimits {
+    let function_limit = limits
+        .max_ranges_per_slice
+        .max(limits.max_xrefs_per_slice)
+        .max(1);
+    let reference_limit = limits.max_xrefs_per_slice.max(1);
+    let decoded_byte_limit = limits.max_decoded_bytes_per_slice.max(1);
+    let mut recovered = crate::program::ProgramRecoveryLimits::default();
+    recovered.functions.max_functions = function_limit;
+    recovered.functions.max_decoded_bytes = decoded_byte_limit;
+    recovered.control_flow.max_functions = function_limit;
+    recovered.control_flow.max_decoded_bytes = decoded_byte_limit;
+    recovered.direct_calls.max_nodes = function_limit;
+    recovered.direct_calls.max_examined_callsites = reference_limit;
+    recovered.direct_calls.max_edges = reference_limit;
+    recovered.direct_calls.max_unresolved_callsites = reference_limit;
+    recovered.transfers.max_functions = function_limit;
+    recovered.transfers.max_examined_exits = reference_limit;
+    recovered.transfers.max_transfers = reference_limit;
+    recovered.indirect_calls.max_functions = function_limit;
+    recovered.indirect_calls.max_transfers = reference_limit;
+    recovered
+}
+
+fn recovered_functions<'facts>(
+    domain: AnalysisDomain,
+    macho: &MachoFile<'_>,
+    limits: &AnalysisLimits,
+    facts: &'facts mut FactStore,
+) -> Result<&'facts crate::functions::FunctionIndex> {
+    if facts.functions.is_none() {
+        let recovery_limits = program_limits(limits);
+        facts.functions = Some(
+            crate::functions::FunctionIndex::recover(macho, recovery_limits.functions).map_err(
+                |error| {
+                    AnalysisError::new(
+                        domain,
+                        AnalysisErrorKind::Parse,
+                        format!("recover authoritative function inventory: {error}"),
+                    )
+                },
+            )?,
+        );
+    }
+    Ok(facts
+        .functions
+        .as_ref()
+        .expect("function cache initialized"))
+}
+
+fn recovered_program<'facts>(
+    domain: AnalysisDomain,
+    macho: &MachoFile<'_>,
+    limits: &AnalysisLimits,
+    facts: &'facts mut FactStore,
+) -> Result<&'facts crate::program::RecoveredProgram> {
+    if facts.program.is_none() {
+        let recovery_limits = program_limits(limits);
+        let functions = recovered_functions(domain, macho, limits, facts)?.clone();
+        facts.program = Some(
+            crate::program::RecoveredProgram::recover_from_functions(
+                macho,
+                functions,
+                recovery_limits,
+            )
+            .map_err(|error| {
+                let kind = match error {
+                    crate::program::ProgramRecoveryError::ControlFlow(
+                        crate::control_flow::ControlFlowRecoveryError::UnsupportedArchitecture,
+                    )
+                    | crate::program::ProgramRecoveryError::IndirectCalls(
+                        crate::indirect_calls::IndirectCallRecoveryError::UnsupportedArchitecture,
+                    ) => AnalysisErrorKind::UnsupportedCapability,
+                    _ => AnalysisErrorKind::Parse,
+                };
+                AnalysisError::new(
+                    domain,
+                    kind,
+                    format!("recover authoritative program: {error}"),
+                )
+            })?,
+        );
+    }
+    Ok(facts.program.as_ref().expect("program cache initialized"))
+}
+
 fn run_domain(
     domain: AnalysisDomain,
     macho: &MachoFile<'_>,
     limits: &AnalysisLimits,
     audit_rules: Option<&BTreeSet<String>>,
     heuristic_strings: bool,
-    facts: &FactStore,
+    facts: &mut FactStore,
 ) -> Result<(DomainPayload, Vec<AnalysisIssue>)> {
     use AnalysisDomain as D;
     let mut issues = Vec::new();
@@ -617,10 +705,12 @@ fn run_domain(
             DomainPayload::Strings(serialize(domain, values)?)
         }
         D::Ranges => {
-            let index = crate::xref::ranges::SymbolRangeIndex::build_limited(
+            let functions = recovered_functions(domain, macho, limits, facts)?;
+            let index = crate::xref::ranges::SymbolRangeIndex::from_function_index_limited(
                 macho,
+                functions,
                 limits.max_ranges_per_slice,
-            )?;
+            );
             if index.was_truncated() {
                 issues.push(bounded_collection_issue(
                     domain,
@@ -646,10 +736,11 @@ fn run_domain(
                     ),
                 ));
             }
-            let index = crate::xref::refs::XrefIndex::build_limited(
+            let program = recovered_program(domain, macho, limits, facts)?;
+            let index = crate::xref::refs::XrefIndex::from_recovered_program_limited(
                 macho,
+                program,
                 limits.max_xrefs_per_slice,
-                limits.max_decoded_bytes_per_slice,
             )?;
             for gap in index.decode_gaps() {
                 issues.push(AnalysisIssue {

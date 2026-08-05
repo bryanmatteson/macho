@@ -3,6 +3,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
+use crate::control_flow::{ControlFlowGapKind, InstructionTarget};
 use crate::dyld::bind::parse_bind_entries;
 use crate::dyld::chained::parse_chained_fixups;
 use crate::dyld::types::FixupKind;
@@ -14,6 +15,7 @@ use crate::model::macho_file::MachoFile;
 use crate::model::relocation::Relocation;
 use crate::model::section::SectionType;
 use crate::model::symbol::SymbolTable;
+use crate::program::RecoveredProgram;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 /// The XrefIndex type.
@@ -130,6 +132,85 @@ impl XrefIndex {
             decode_gaps,
             refs_truncated,
             decoded_bytes_truncated,
+        })
+    }
+
+    /// Build the legacy xref projection from a Macho-owned recovered program.
+    ///
+    /// Format-level stub, fixup, bind, and relocation references remain
+    /// collected from their authoritative records. Direct code references and
+    /// decode gaps are projected from the program CFGs without rescanning
+    /// executable sections or inventing separate function ownership.
+    pub fn from_recovered_program_limited(
+        macho: &MachoFile<'_>,
+        program: &RecoveredProgram,
+        max_refs: usize,
+    ) -> Result<Self> {
+        if program.image() != &crate::functions::FunctionImageIdentity::from_macho(macho) {
+            return Err(crate::AnalysisError::new(
+                crate::AnalysisDomain::Xrefs,
+                crate::AnalysisErrorKind::Validation,
+                "recovered program and xref image identities differ",
+            ));
+        }
+        let mut refs = Vec::new();
+        let mut refs_truncated = false;
+        collect_stub_refs(macho, &mut refs, max_refs, &mut refs_truncated)?;
+        collect_chained_fixup_refs(macho, &mut refs, max_refs, &mut refs_truncated);
+        collect_legacy_bind_refs(macho, &mut refs, max_refs, &mut refs_truncated);
+        collect_relocation_refs(macho, &mut refs, max_refs, &mut refs_truncated);
+
+        let mut decode_gaps = Vec::new();
+        for graph in program.control_flow().functions() {
+            for gap in &graph.gaps {
+                decode_gaps.push(macho_insn::DecodeGap {
+                    offset: 0,
+                    len: usize::try_from(gap.end_exclusive.saturating_sub(gap.start))
+                        .unwrap_or(usize::MAX),
+                    va: gap.start,
+                    error: macho_insn::DecodeError {
+                        message: match gap.kind {
+                            ControlFlowGapKind::InvalidInstruction => {
+                                "invalid instruction in recovered function".into()
+                            }
+                            ControlFlowGapKind::UnmappedRange => {
+                                "unmapped recovered function range".into()
+                            }
+                        },
+                    },
+                });
+            }
+            for instruction in &graph.instructions {
+                let Some(InstructionTarget::Direct { address }) = &instruction.target else {
+                    continue;
+                };
+                let _ = push_ref(
+                    &mut refs,
+                    max_refs,
+                    &mut refs_truncated,
+                    Xref {
+                        source: Va(instruction.address),
+                        target: XrefTarget::Internal { va: Va(*address) },
+                        kind: XrefKind::DirectBranch,
+                    },
+                );
+            }
+        }
+        decode_gaps.sort_by_key(|gap| (gap.va, gap.len));
+        decode_gaps.dedup_by_key(|gap| (gap.va, gap.len));
+        refs.sort_by_key(|reference| reference.source);
+        let function_truncated = program.completeness().stages.iter().any(|stage| {
+            stage.stage == crate::program::ProgramRecoveryStage::Functions
+                && stage.status == crate::program::ProgramRecoveryStatus::Truncated
+        });
+        refs_truncated |= function_truncated;
+        Ok(Self {
+            refs,
+            decode_gaps,
+            refs_truncated,
+            decoded_bytes_truncated: function_truncated
+                || program.control_flow().status()
+                    == crate::control_flow::ControlFlowIndexStatus::Truncated,
         })
     }
 
@@ -719,7 +800,11 @@ fn push_ref(refs: &mut Vec<Xref>, max_refs: usize, truncated: &mut bool, referen
 
 #[cfg(test)]
 mod targeted_tests {
-    use super::arm64_direct_branch_target;
+    use std::collections::BTreeSet;
+
+    use super::{XrefIndex, XrefKind, XrefTarget, arm64_direct_branch_target};
+    use crate::control_flow::InstructionTarget;
+    use crate::program::{ProgramRecoveryLimits, RecoveredProgram};
 
     #[test]
     fn arm64_target_filter_decodes_only_direct_branch_words() {
@@ -732,5 +817,38 @@ mod targeted_tests {
             Some(0x4ff0)
         );
         assert_eq!(arm64_direct_branch_target(0xd503_201f, 0x4000), None);
+    }
+
+    #[test]
+    fn legacy_direct_xrefs_are_projected_from_recovered_program_instructions() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let container = macho_core::parse(&bytes).unwrap();
+        let macho = container.first_macho().unwrap();
+        let program = RecoveredProgram::recover(macho, ProgramRecoveryLimits::default()).unwrap();
+        let index = XrefIndex::from_recovered_program_limited(macho, &program, usize::MAX).unwrap();
+        let expected = program
+            .control_flow()
+            .functions()
+            .iter()
+            .flat_map(|graph| &graph.instructions)
+            .filter_map(|instruction| match &instruction.target {
+                Some(InstructionTarget::Direct { address }) => {
+                    Some((instruction.address, *address))
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        let actual = index
+            .all_refs()
+            .iter()
+            .filter_map(|reference| match (&reference.kind, &reference.target) {
+                (XrefKind::DirectBranch, XrefTarget::Internal { va }) => {
+                    Some((reference.source.0, va.0))
+                }
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
+        assert_eq!(actual, expected);
     }
 }

@@ -665,6 +665,70 @@ fn x86_64_negative_disp8_sign_extends() {
     }
 }
 
+#[test]
+fn x86_64_rip_memory_operand_is_relative_to_next_ip() {
+    let insn = decode_one(
+        &[0xff, 0x15, 0x2a, 0x00, 0x00, 0x00],
+        0x1_0000_0100,
+        Arch::X86_64,
+    )
+    .unwrap();
+    assert_eq!(
+        insn.operands(),
+        &[Operand::Mem {
+            base: Reg::gpr(16),
+            disp: 0x2a,
+        }]
+    );
+}
+
+#[test]
+fn decoded_value_effects_distinguish_loads_from_unknown_writes() {
+    let ldr = decode_one(&0xf940_9a10_u32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+    assert_eq!(ldr.value_effect, ValueEffect::Load);
+    assert_eq!(ldr.op0_write_target(), Some(Reg::gpr(16)));
+
+    let xor = decode_one(&[0x48, 0x31, 0xc0], 0x1000, Arch::X86_64).unwrap();
+    assert_eq!(xor.value_effect, ValueEffect::UnknownWrite);
+
+    let load = decode_one(&[0x48, 0x8b, 0x47, 0x18], 0x1000, Arch::X86_64).unwrap();
+    assert_eq!(load.value_effect, ValueEffect::Load);
+    assert_eq!(load.op0_write_target(), Some(Reg::gpr(0)));
+    assert_eq!(
+        load.operands(),
+        &[
+            Operand::Reg(Reg::gpr(0)),
+            Operand::Mem {
+                base: Reg::gpr(7),
+                disp: 0x18,
+            },
+        ]
+    );
+
+    let copy = decode_one(&[0x48, 0x89, 0xf8], 0x1000, Arch::X86_64).unwrap();
+    assert_eq!(copy.value_effect, ValueEffect::Set);
+
+    let arm_copy = decode_one(&0xaa01_03e0_u32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+    assert_eq!(arm_copy.value_effect, ValueEffect::Set);
+    assert_eq!(
+        arm_copy.operands(),
+        &[Operand::Reg(Reg::gpr(0)), Operand::Reg(Reg::gpr(1))]
+    );
+
+    let ldur = decode_one(&0xf85f_8020_u32.to_le_bytes(), 0x1000, Arch::Arm64).unwrap();
+    assert_eq!(ldur.value_effect, ValueEffect::Load);
+    assert_eq!(
+        ldur.operands(),
+        &[
+            Operand::Reg(Reg::gpr(0)),
+            Operand::Mem {
+                base: Reg::gpr(1),
+                disp: -8,
+            },
+        ]
+    );
+}
+
 // ── ARM64 STP FP pair ──
 
 #[test]
@@ -1104,6 +1168,27 @@ fn resolve_target_indirect_call_none() {
         })
     ));
     assert_eq!(resolve_branch_target(&insn, 0x1000), None);
+}
+
+#[test]
+fn x86_register_indirect_flow_retains_register_target_kind() {
+    for (bytes, is_call) in [(&[0xff, 0xd0][..], true), (&[0xff, 0xe0][..], false)] {
+        let insn = decode_one(bytes, 0x1000, Arch::X86_64).unwrap();
+        assert!(matches!(
+            (insn.kind, is_call),
+            (
+                InsnKind::Call(BranchInfo {
+                    target: BranchTarget::Register
+                }),
+                true
+            ) | (
+                InsnKind::Branch(BranchInfo {
+                    target: BranchTarget::Register
+                }),
+                false
+            )
+        ));
+    }
 }
 
 #[test]
