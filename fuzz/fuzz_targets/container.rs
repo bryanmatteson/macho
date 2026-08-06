@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use macho_core::{ParseLimits, ParseMode, ParseOptions};
+use macho::core::{ParseLimits, ParseMode, ParseOptions};
 
 fn run(data: &[u8], mode: ParseMode) -> (bool, usize) {
     let options = ParseOptions {
@@ -13,7 +13,7 @@ fn run(data: &[u8], mode: ParseMode) -> (bool, usize) {
             max_string_bytes: 1 << 20,
         },
     };
-    match macho_core::parse_with_options(data, &options) {
+    match macho::core::parse_with_options(data, &options) {
         Ok(outcome) => (true, outcome.diagnostics.len()),
         Err(_) => (false, 0),
     }

@@ -10,7 +10,7 @@ description = "Workspace architecture, documentation, release, and verification 
 publish = false
 
 [dependencies]
-macho-cli.workspace = true
+macho = { workspace = true, features = ["cli"] }
 anyhow.workspace = true
 clap.workspace = true
 cargo_metadata.workspace = true

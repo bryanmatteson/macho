@@ -27,7 +27,7 @@ pub fn check(root: &Path) -> Result<()> {
 }
 
 pub fn generated_reference() -> String {
-    let command = macho_cli::clap_command();
+    let command = macho::cli::clap_command();
     let mut rows = Vec::new();
     for subcommand in command.get_subcommands() {
         rows.push(format!(
@@ -65,7 +65,7 @@ fn check_examples(readme: &str) -> Result<()> {
         if args.iter().any(|arg| arg.starts_with('<')) {
             continue;
         }
-        macho_cli::parse_only(args.into_iter().map(OsString::from))
+        macho::cli::parse_only(args.into_iter().map(OsString::from))
             .with_context(|| format!("README example is rejected by the live router: {line}"))?;
     }
     Ok(())

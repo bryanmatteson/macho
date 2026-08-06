@@ -1,0 +1,4 @@
+__TEXT,__text  0x0000000100000100 (2 instructions)
+_main:
+  0x0000000100000100  eb02                            jmp 0x100000104  ; _helper
+  0x0000000100000102  90                              nop

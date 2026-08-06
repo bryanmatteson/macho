@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Consolidate every shipped library and CLI capability into the single
+  feature-gated `macho` package. Parsing, instructions, metadata, shared-cache
+  support, analysis, mutation, evidence, workflow, and CLI delivery remain
+  distinct public modules while the workspace is reduced to `macho`, private
+  `xtask`, and private `macho-test-support`.
+
 ## 0.5.6
 
 - Add bounded direct-branch discovery for an exact set of Mach-O targets,

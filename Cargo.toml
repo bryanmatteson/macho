@@ -1,6 +1,12 @@
 [workspace]
-    members  = ["crates/*"]
     exclude  = ["fuzz"]
+    members  = [
+        "crates/macho",
+        "crates/macho-test-support",
+        "crates/mkasm-aarch64",
+        "crates/mkasm-x86-64",
+        "crates/xtask",
+    ]
     resolver = "2"
 
 [workspace.package]
@@ -10,61 +16,43 @@
     readme       = "README.md"
     repository   = "https://github.com/bryanmatteson/macho.git"
     rust-version = "1.85"
-    version      = "0.5.6"
+    version      = "1.0.0"
 
 [workspace.dependencies]
-    apple-codesign      = { version = "0.29.0", default-features = false }
-    macho              = { package = "macho-lib", path = "crates/macho", version = "0.5.6", default-features = false }
-    macho-analysis     = { path = "crates/macho-analysis", version = "0.5.6" }
-    macho-cli          = { path = "crates/macho-cli", version = "0.5.6" }
-    macho-codesign     = { path = "crates/macho-codesign", version = "0.5.6" }
-    macho-core         = { path = "crates/macho-core", version = "0.5.6" }
-    macho-cpp          = { path = "crates/macho-cpp", version = "0.5.6", default-features = false }
-    macho-demangle     = { path = "crates/macho-demangle", version = "0.5.6" }
-    macho-dwarf        = { path = "crates/macho-dwarf", version = "0.5.6" }
-    macho-dyld         = { path = "crates/macho-dyld", version = "0.5.6" }
-    macho-evidence     = { path = "crates/macho-evidence", version = "0.5.6" }
-    macho-dyld-cache   = { path = "crates/macho-dyld-cache", version = "0.5.6" }
-    macho-header-infer = { path = "crates/macho-header-infer", version = "0.5.6" }
-    macho-header-syntax = { path = "crates/macho-header-syntax", version = "0.5.6" }
-    macho-insn         = { path = "crates/macho-insn", version = "0.5.6" }
-    macho-mutate       = { path = "crates/macho-mutate", version = "0.5.6" }
-    macho-objc         = { path = "crates/macho-objc", version = "0.5.6" }
-    macho-patch        = { path = "crates/macho-patch", version = "0.5.6" }
-    macho-swift        = { path = "crates/macho-swift", version = "0.5.6" }
-    macho-symbols      = { path = "crates/macho-symbols", version = "0.5.6" }
-    macho-workflow     = { path = "crates/macho-workflow", version = "0.5.6" }
+    apple-codesign = { version = "0.29.0", default-features = false }
+    macho          = { path = "crates/macho", version = "1", default-features = false }
+    mkasm-aarch64  = { package = "aarch64", path = "crates/mkasm-aarch64" }
+    mkasm-x86-64   = { package = "x86_64", path = "crates/mkasm-x86-64" }
 
-    anyhow         = "1"
-    bad64          = "0.12"
-    base64         = "0.22"
-    bitflags       = "2"
-    bytes          = "1"
-    cargo_metadata = "0.22"
-    clap           = { version = "4", features = ["derive"] }
-    cpp_demangle   = "0.5.1"
-    criterion      = "0.7"
-    gimli          = { version = "0.34.0", features = ["read"] }
-    iced-x86       = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info", "intel"] }
-    laidout        = "0.3"
-    memmap2        = "0.9"
-rustc-demangle = "0.1"
-swift-demangler = "0.1.1"
-    serde          = { version = "1", features = ["derive"] }
-    serde_json     = "1"
-    sha2           = "0.10"
-    signature      = "2"
-    syn            = { version = "2", features = ["full", "visit"] }
-    tempfile       = "3"
-    termosaic      = { version = "=0.2.0", default-features = false }
-    thiserror      = "2"
-    tree-sitter    = "0.26.11"
-    tree-sitter-c  = "0.24.2"
-    tree-sitter-cpp = "0.23.4"
+    anyhow           = "1"
+    base64           = "0.23.1"
+    bitflags         = "2"
+    bytes            = "1"
+    cargo_metadata   = "0.23.1"
+    clap             = { version = "4", features = ["derive"] }
+    cpp_demangle     = "0.5.1"
+    criterion        = "0.8.2"
+    gimli            = { version = "0.34.0", features = ["read"] }
+    iced-x86         = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info"] }
+    laidout          = "0.3"
+    memmap2          = "0.9"
+    rustc-demangle   = "0.1"
+    serde            = { version = "1", features = ["derive"] }
+    serde_json       = "1"
+    sha2             = "0.11.0"
+    signature        = "2"
+    swift-demangler  = "0.1.1"
+    syn              = { version = "2", features = ["full", "visit"] }
+    tempfile         = "3"
+    termosaic        = { version = "=0.3.0", default-features = false }
+    thiserror        = "2"
+    tree-sitter      = "0.26.11"
+    tree-sitter-c    = "0.24.2"
+    tree-sitter-cpp  = "0.23.4"
     tree-sitter-objc = "3.0.2"
-    trybuild       = "1"
-    trycmd         = "0.15"
-    walkdir        = "2"
+    trybuild         = "1"
+    trycmd           = "1.2.1"
+    walkdir          = "2"
     x509-certificate = "0.24.0"
-    zeroize        = "1"
-    zerocopy       = { version = "0.8", features = ["derive"] }
+    zerocopy         = { version = "0.8", features = ["derive"] }
+    zeroize          = "1"

@@ -1,72 +1,83 @@
 #![deny(missing_docs)]
-//! Feature-gated façade for the Mach-O workspace.
+//! Feature-gated Mach-O parsing, metadata, analysis, mutation, and delivery.
 
-/// The error module.
+/// Byte-safe structural Mach-O parsing and validation.
+pub mod core;
+
+/// The core parsing error surface.
 pub mod error {
-    pub use macho_core::{ParseError, ParseErrorKind, ParseResult};
+    pub use crate::core::{ParseError, ParseErrorKind, ParseResult};
 }
 
-pub use macho_core as core;
-pub use macho_core::ext;
-pub use macho_core::format;
-pub use macho_core::model;
-pub use macho_core::{ParseError, ParseErrorKind, ParseResult, parse, parse_with_options};
+pub use core::ext;
+pub use core::format;
+pub use core::model;
+pub use core::{ParseError, ParseErrorKind, ParseResult, parse, parse_with_options};
 
-#[cfg(feature = "analysis")]
-pub use macho_analysis as analysis;
-#[cfg(feature = "metadata")]
-pub use macho_codesign as codesign;
-#[cfg(feature = "metadata")]
-pub use macho_cpp as cpp;
-#[cfg(feature = "metadata")]
-pub use macho_dwarf as dwarf;
-#[cfg(feature = "metadata")]
-pub use macho_dyld as dyld;
+/// Architecture-aware instruction decoding, encoding, and relocation.
+#[cfg(feature = "insn")]
+pub mod insn;
+
+/// Feature-gated Mach-O metadata decoding and symbol interpretation.
+pub mod metadata;
+
+#[cfg(feature = "codesign")]
+pub use metadata::codesign;
+#[cfg(feature = "cpp")]
+pub use metadata::cpp;
+#[cfg(feature = "dwarf")]
+pub use metadata::dwarf;
+#[cfg(feature = "dyld")]
+pub use metadata::dyld;
+#[cfg(feature = "objc")]
+pub use metadata::objc;
+#[cfg(feature = "swift")]
+pub use metadata::swift;
+#[cfg(feature = "symbols")]
+pub use metadata::symbols as symbol_metadata;
+
+/// Dyld shared-cache parsing and extraction.
 #[cfg(feature = "dyld-cache")]
-pub use macho_dyld_cache as dyld_cache;
-#[cfg(feature = "metadata")]
-pub use macho_evidence as evidence;
+pub mod dyld_cache;
+
+/// Selective analysis, snapshots, diffing, auditing, and reconstruction.
+#[cfg(feature = "analysis")]
+pub mod analysis;
+
 #[cfg(feature = "header-infer")]
-pub use macho_header_infer as header_infer;
-#[cfg(feature = "metadata")]
-pub use macho_header_syntax as header_syntax;
-#[cfg(feature = "mutation")]
-pub use macho_insn as insn;
-#[cfg(feature = "mutation")]
-pub use macho_mutate as mutate;
-#[cfg(feature = "metadata")]
-pub use macho_objc as objc;
-#[cfg(feature = "mutation")]
-pub use macho_patch as patch;
-#[cfg(feature = "metadata")]
-pub use macho_swift as swift;
-#[cfg(feature = "metadata")]
-pub use macho_symbols as symbol_metadata;
+pub use analysis::header_infer;
+#[cfg(feature = "analysis")]
+pub use analysis::header_syntax;
+
+/// In-memory structural mutation, signing, and patch planning.
+#[cfg(feature = "structural")]
+pub mod mutate;
+
+#[cfg(feature = "patch")]
+pub use mutate::patch;
+
+/// Cross-language evidence collection.
+#[cfg(feature = "evidence")]
+pub mod evidence;
+
+/// Verified mutation workflow composition.
 #[cfg(feature = "workflow")]
-pub use macho_workflow as workflow;
+pub mod workflow;
 
-#[cfg(feature = "metadata")]
-/// The metadata module.
-pub mod metadata {
-    #[cfg(feature = "analysis")]
-    pub use macho_analysis::image;
-    pub use macho_codesign as codesign;
-    pub use macho_dyld as dyld;
-    pub use macho_evidence as evidence;
-    pub use macho_objc as objc;
-    pub use macho_swift as swift;
-}
+/// Testable command-line grammar and delivery implementation.
+#[cfg(feature = "cli")]
+pub mod cli;
 
-#[cfg(feature = "metadata")]
-/// The resolve module.
+/// Dyld target resolution helpers.
+#[cfg(feature = "dyld")]
 pub mod resolve {
     #[cfg(feature = "analysis")]
-    pub use macho_analysis::paths;
-    pub use macho_dyld::resolve::{ResolutionContext, ResolvedTarget, fixups};
+    pub use crate::analysis::paths;
+    pub use crate::metadata::dyld::resolve::{ResolutionContext, ResolvedTarget, fixups};
 }
 
-#[cfg(feature = "metadata")]
-/// The symbols module.
+/// Symbol table and demangling helpers.
+#[cfg(feature = "symbols")]
 pub mod symbols {
-    pub use macho_symbols::{demangle, table};
+    pub use crate::metadata::symbols::{demangle, table};
 }

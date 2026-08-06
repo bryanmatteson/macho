@@ -7,28 +7,7 @@ use cargo_metadata::{DependencyKind, MetadataCommand};
 use syn::visit::{self, Visit};
 use walkdir::WalkDir;
 
-const PRODUCT_CRATES: &[&str] = &[
-    "macho-core",
-    "macho-insn",
-    "macho-dyld",
-    "macho-demangle",
-    "macho-symbols",
-    "macho-codesign",
-    "macho-dwarf",
-    "macho-objc",
-    "macho-swift",
-    "macho-cpp",
-    "macho-evidence",
-    "macho-analysis",
-    "macho-mutate",
-    "macho-patch",
-    "macho-dyld-cache",
-    "macho-header-infer",
-    "macho-header-syntax",
-    "macho-workflow",
-    "macho-lib",
-    "macho-cli",
-];
+const PRODUCT_CRATES: &[&str] = &["macho"];
 
 pub fn check(root: &Path) -> Result<()> {
     let metadata = MetadataCommand::new()
@@ -53,12 +32,12 @@ pub fn check(root: &Path) -> Result<()> {
         bail!("missing required workspace crates: {}", missing.join(", "));
     }
 
-    let facade = metadata
+    let product = metadata
         .packages
         .iter()
-        .find(|package| package.name.as_str() == "macho-lib")
-        .context("workspace has no macho-lib facade package")?;
-    check_feature_authority(&facade.features)?;
+        .find(|package| package.name.as_str() == "macho")
+        .context("workspace has no macho package")?;
+    check_feature_authority(&product.features)?;
 
     let mut violations = Vec::new();
     for package in metadata
@@ -96,7 +75,7 @@ pub fn check(root: &Path) -> Result<()> {
                 ));
             }
             if dependency.name == "termosaic"
-                && (dependency.req.to_string() != "=0.2.0"
+                && (dependency.req.to_string() != "=0.3.0"
                     || dependency
                         .source
                         .as_ref()
@@ -105,7 +84,7 @@ pub fn check(root: &Path) -> Result<()> {
                     || !dependency.features.is_empty())
             {
                 violations.push(format!(
-                    "macho-cli must pin crates.io termosaic =0.2.0 with default features disabled: {}",
+                    "macho must pin crates.io termosaic =0.3.0 with default features disabled: {}",
                     package.name
                 ));
             }
@@ -134,30 +113,29 @@ fn dependency_violation(
             "forbidden workspace edge: {package} -> {dependency}"
         ));
     }
-    if matches!(dependency, "clap" | "memmap2" | "anyhow")
-        && !matches!(package, "macho-cli" | "xtask")
+    if matches!(dependency, "clap" | "memmap2" | "anyhow") && !matches!(package, "macho" | "xtask")
     {
         return Some(format!(
             "delivery dependency {dependency} is owned by {package}"
         ));
     }
-    if dependency == "termosaic" && package != "macho-cli" {
+    if dependency == "termosaic" && package != "macho" {
         return Some(format!(
-            "presentation dependency termosaic is owned by macho-cli, not {package}"
+            "presentation dependency termosaic is owned by macho, not {package}"
         ));
     }
     if matches!(
         dependency,
         "cpp_demangle" | "rustc-demangle" | "swift-demangler"
-    ) && package != "macho-demangle"
+    ) && package != "macho"
     {
         return Some(format!(
-            "symbol-demangling dependency {dependency} is owned by macho-demangle, not {package}"
+            "symbol-demangling dependency {dependency} is owned by macho, not {package}"
         ));
     }
-    if dependency == "apple-codesign" && package != "macho-mutate" {
+    if dependency == "apple-codesign" && package != "macho" {
         return Some(format!(
-            "signing dependency apple-codesign is owned by macho-mutate, not {package}"
+            "signing dependency apple-codesign is owned by macho, not {package}"
         ));
     }
     None
@@ -170,43 +148,28 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
         .collect::<BTreeMap<&str, BTreeSet<&str>>>();
     let expected = BTreeMap::from([
         ("default", BTreeSet::from(["analysis"])),
+        ("evidence", BTreeSet::from(["cpp", "dyld", "objc", "swift"])),
         (
             "metadata",
-            BTreeSet::from([
-                "dep:macho-codesign",
-                "dep:macho-cpp",
-                "dep:macho-dwarf",
-                "dep:macho-dyld",
-                "dep:macho-evidence",
-                "dep:macho-objc",
-                "dep:macho-swift",
-                "dep:macho-symbols",
-                "dep:macho-header-syntax",
-            ]),
+            BTreeSet::from(["codesign", "dwarf", "evidence", "symbols"]),
         ),
         (
             "analysis",
-            BTreeSet::from(["dep:macho-analysis", "dep:macho-insn", "metadata"]),
-        ),
-        (
-            "mutation",
             BTreeSet::from([
-                "dep:macho-codesign",
-                "dep:macho-dyld",
-                "dep:macho-insn",
-                "dep:macho-mutate",
-                "dep:macho-patch",
+                "dep:serde_json",
+                "dep:tree-sitter",
+                "dep:tree-sitter-c",
+                "dep:tree-sitter-cpp",
+                "dep:tree-sitter-objc",
+                "dyld-cache",
+                "insn",
+                "metadata",
             ]),
         ),
-        (
-            "workflow",
-            BTreeSet::from(["analysis", "dep:macho-workflow", "mutation"]),
-        ),
-        ("dyld-cache", BTreeSet::from(["dep:macho-dyld-cache"])),
-        (
-            "header-infer",
-            BTreeSet::from(["analysis", "dep:macho-header-infer"]),
-        ),
+        ("mutation", BTreeSet::from(["patch", "signing"])),
+        ("workflow", BTreeSet::from(["analysis", "mutation"])),
+        ("dyld-cache", BTreeSet::from(["dep:serde", "dyld"])),
+        ("header-infer", BTreeSet::from(["analysis"])),
         (
             "full",
             BTreeSet::from([
@@ -217,93 +180,37 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
                 "workflow",
             ]),
         ),
+        (
+            "cli",
+            BTreeSet::from([
+                "dep:anyhow",
+                "dep:clap",
+                "dep:laidout",
+                "dep:memmap2",
+                "dep:termosaic",
+                "full",
+            ]),
+        ),
     ]);
-    if actual == expected {
-        Ok(())
-    } else {
-        bail!("macho feature authority mismatch\nexpected: {expected:?}\nactual: {actual:?}")
+    for (feature, expected_values) in expected {
+        let actual_values = actual
+            .get(feature)
+            .with_context(|| format!("macho is missing required feature {feature}"))?;
+        if actual_values != &expected_values {
+            bail!(
+                "macho feature authority mismatch for {feature}\nexpected: {expected_values:?}\nactual: {actual_values:?}"
+            );
+        }
     }
+    Ok(())
 }
 
 fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
     let rows: &[(&str, &[&str])] = &[
-        ("macho-core", &[]),
-        ("macho-header-syntax", &[]),
-        ("macho-insn", &[]),
-        ("macho-demangle", &[]),
-        ("macho-dyld", &["macho-core"]),
-        ("macho-symbols", &["macho-core", "macho-demangle"]),
-        ("macho-codesign", &["macho-core"]),
-        ("macho-dwarf", &["macho-core"]),
-        ("macho-objc", &["macho-core", "macho-dyld"]),
-        (
-            "macho-swift",
-            &["macho-core", "macho-demangle", "macho-dyld"],
-        ),
-        (
-            "macho-cpp",
-            &["macho-core", "macho-insn", "macho-demangle", "macho-dyld"],
-        ),
-        (
-            "macho-evidence",
-            &[
-                "macho-core",
-                "macho-dyld",
-                "macho-objc",
-                "macho-swift",
-                "macho-cpp",
-            ],
-        ),
-        (
-            "macho-analysis",
-            &[
-                "macho-core",
-                "macho-insn",
-                "macho-symbols",
-                "macho-dyld",
-                "macho-codesign",
-                "macho-dwarf",
-                "macho-objc",
-                "macho-swift",
-                "macho-cpp",
-                "macho-header-syntax",
-            ],
-        ),
-        ("macho-mutate", &["macho-core", "macho-codesign"]),
-        ("macho-patch", &["macho-core", "macho-insn"]),
-        ("macho-dyld-cache", &["macho-core", "macho-dyld"]),
-        (
-            "macho-header-infer",
-            &["macho-analysis", "macho-header-syntax"],
-        ),
-        (
-            "macho-workflow",
-            &["macho-core", "macho-analysis", "macho-mutate"],
-        ),
-        (
-            "macho-lib",
-            &[
-                "macho-core",
-                "macho-insn",
-                "macho-symbols",
-                "macho-dyld",
-                "macho-codesign",
-                "macho-dwarf",
-                "macho-objc",
-                "macho-swift",
-                "macho-cpp",
-                "macho-evidence",
-                "macho-analysis",
-                "macho-mutate",
-                "macho-patch",
-                "macho-workflow",
-                "macho-dyld-cache",
-                "macho-header-infer",
-                "macho-header-syntax",
-            ],
-        ),
-        ("macho-cli", &["macho-lib"]),
-        ("xtask", &["macho-cli"]),
+        ("macho", &["aarch64", "x86_64"]),
+        ("aarch64", &[]),
+        ("x86_64", &[]),
+        ("xtask", &["macho"]),
         ("macho-test-support", &[]),
     ];
     rows.iter()
@@ -393,10 +300,12 @@ impl<'ast> Visit<'ast> for SourceFacts {
     }
 
     fn visit_path(&mut self, path: &'ast syn::Path) {
-        self.mutation_analysis_path |= path
-            .segments
-            .iter()
-            .any(|segment| segment.ident == "macho_analysis");
+        self.mutation_analysis_path |= path.segments.iter().any(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "analysis" | "macho_analysis"
+            )
+        });
         self.image_inspector |= path
             .segments
             .iter()
@@ -405,7 +314,8 @@ impl<'ast> Visit<'ast> for SourceFacts {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        self.mutation_analysis_path |= use_tree_contains(&item.tree, "macho_analysis");
+        self.mutation_analysis_path |= use_tree_contains(&item.tree, "analysis")
+            || use_tree_contains(&item.tree, "macho_analysis");
         visit::visit_item_use(self, item);
     }
 
@@ -554,6 +464,8 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
     }
     let path = relative.to_string_lossy();
     let is_test = path.contains("/tests/") || path.ends_with("/tests.rs");
+    let is_cli = path.contains("/src/cli/") || path.ends_with("/src/bin/macho.rs");
+    let is_mutation = path.contains("/src/mutate/");
     let syntax = match syn::parse_file(source) {
         Ok(syntax) => syntax,
         Err(error) => {
@@ -568,32 +480,26 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
             "host process reference outside adapters/tooling/tests: {path}"
         ));
     }
-    if crate_name == "macho-cli"
-        && path.contains("/src/commands/")
-        && (facts.output_macro || facts.system_io_call)
+    if is_cli && path.contains("/src/cli/commands/") && (facts.output_macro || facts.system_io_call)
     {
         violations.push(format!("CLI output bypasses injected writers: {path}"));
     }
-    if crate_name == "macho-cli"
+    if is_cli
         && !is_test
-        && path != "crates/macho-cli/src/main.rs"
+        && path != "crates/macho/src/bin/macho.rs"
         && (facts.output_macro || facts.system_io_call)
     {
         violations.push(format!(
             "system I/O construction outside CLI main entry point: {path}"
         ));
     }
-    if crate_name == "macho-mutate" && facts.mutation_analysis_path {
+    if is_mutation && facts.mutation_analysis_path {
         violations.push(format!("mutation references analysis: {path}"));
     }
-    if crate_name == "macho-mutate" && facts.mutation_string_result {
+    if is_mutation && facts.mutation_string_result {
         violations.push(format!(
             "mutation exposes a string-bucket result instead of MutationError: {path}"
         ));
-    }
-    if crate_name == "macho-lib" && (path.contains("/src/commands") || path.contains("/src/inputs"))
-    {
-        violations.push(format!("façade owns delivery module: {path}"));
     }
     if facts.public_vec_reference {
         violations.push(format!("public Vec reference return detected: {path}"));
@@ -626,8 +532,8 @@ mod tests {
         {
             assert!(graph.contains_key(*name), "missing graph row for {name}");
         }
-        assert!(graph["macho-core"].is_empty());
-        assert_eq!(graph["macho-cli"], BTreeSet::from(["macho-lib"]));
+        assert_eq!(graph["macho"], BTreeSet::from(["aarch64", "x86_64"]));
+        assert_eq!(graph["xtask"], BTreeSet::from(["macho"]));
 
         let workspace_names = graph.keys().copied().collect();
         for (package, allowed) in &graph {
@@ -664,37 +570,33 @@ mod tests {
         let allowed = BTreeSet::new();
         for dependency in ["clap", "memmap2", "anyhow"] {
             assert!(
-                dependency_violation("macho-core", dependency, &workspace_names, &allowed)
+                dependency_violation("macho-test-support", dependency, &workspace_names, &allowed)
                     .is_some()
             );
             assert_eq!(
-                dependency_violation("macho-cli", dependency, &workspace_names, &allowed),
+                dependency_violation("macho", dependency, &workspace_names, &allowed),
                 None
             );
         }
-        assert!(
-            dependency_violation("macho-core", "termosaic", &workspace_names, &allowed).is_some()
-        );
+        assert!(dependency_violation("xtask", "termosaic", &workspace_names, &allowed).is_some());
         assert_eq!(
-            dependency_violation("macho-cli", "termosaic", &workspace_names, &allowed),
+            dependency_violation("macho", "termosaic", &workspace_names, &allowed),
             None
         );
         for dependency in ["cpp_demangle", "rustc-demangle", "swift-demangler"] {
             assert!(
-                dependency_violation("macho-analysis", dependency, &workspace_names, &allowed)
-                    .is_some()
+                dependency_violation("xtask", dependency, &workspace_names, &allowed).is_some()
             );
             assert_eq!(
-                dependency_violation("macho-demangle", dependency, &workspace_names, &allowed),
+                dependency_violation("macho", dependency, &workspace_names, &allowed),
                 None
             );
         }
         assert!(
-            dependency_violation("macho-cli", "apple-codesign", &workspace_names, &allowed)
-                .is_some()
+            dependency_violation("xtask", "apple-codesign", &workspace_names, &allowed).is_some()
         );
         assert_eq!(
-            dependency_violation("macho-mutate", "apple-codesign", &workspace_names, &allowed),
+            dependency_violation("macho", "apple-codesign", &workspace_names, &allowed),
             None
         );
     }
@@ -703,73 +605,68 @@ mod tests {
     fn forbidden_source_patterns_have_negative_fixtures() {
         let fixtures = [
             (
-                "macho-core",
-                "crates/macho-core/src/x.rs",
+                "macho",
+                "crates/macho/src/core/x.rs",
                 "fn fixture() { Command::new(\"xcrun\"); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/src/commands/x.rs",
+                "macho",
+                "crates/macho/src/cli/commands/x.rs",
                 "fn fixture() { Command::new(\"xcrun\"); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/src/adapters.rs",
+                "macho",
+                "crates/macho/src/cli/adapters.rs",
                 "fn fixture() { Command::new(\"xcrun\"); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/src/adapters/signing.rs",
+                "macho",
+                "crates/macho/src/cli/adapters/signing.rs",
                 "fn fixture() { std::process::Command::new(\"codesign\"); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/src/commands/x.rs",
+                "macho",
+                "crates/macho/src/cli/commands/x.rs",
                 "fn fixture() { println!(\"x\"); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/src/lib.rs",
+                "macho",
+                "crates/macho/src/cli/mod.rs",
                 "fn fixture() { let output = std::io::stdout(); }",
             ),
             (
-                "macho-mutate",
-                "crates/macho-mutate/src/x.rs",
-                "use macho_analysis::Analyzer;",
+                "macho",
+                "crates/macho/src/mutate/x.rs",
+                "use crate::analysis::Analyzer;",
             ),
             (
-                "macho-mutate",
-                "crates/macho-mutate/src/x.rs",
+                "macho",
+                "crates/macho/src/mutate/x.rs",
                 "pub fn patch() -> Result<Vec<u8>, String> { todo!() }",
             ),
             (
-                "macho-lib",
-                "crates/macho/src/commands.rs",
-                "pub fn run() {}",
-            ),
-            (
-                "macho-core",
-                "crates/macho-core/src/x.rs",
+                "macho",
+                "crates/macho/src/core/x.rs",
                 "pub fn x() -> &'static Vec<u8> { todo!() }",
             ),
             (
-                "macho-core",
-                "crates/macho-core/src/x.rs",
+                "macho",
+                "crates/macho/src/core/x.rs",
                 "fn fixture() { container.first_mach(); }",
             ),
             (
-                "macho-analysis",
-                "crates/macho-analysis/src/x.rs",
+                "macho",
+                "crates/macho/src/analysis/x.rs",
                 "pub struct ImageInspector;",
             ),
             (
-                "macho-analysis",
-                "crates/macho-analysis/src/x.rs",
+                "macho",
+                "crates/macho/src/analysis/x.rs",
                 "fn fixture(input: impl Iterator<Item = Result<u8, ()>>) { let _ = input.filter_map(Result::ok); }",
             ),
             (
-                "macho-cli",
-                "crates/macho-cli/tests/x.rs",
+                "macho",
+                "crates/macho/tests/x.rs",
                 "fn fixture() { let arg = \"--json\"; }",
             ),
         ];
@@ -785,8 +682,8 @@ mod tests {
     fn valid_source_fixture_is_accepted() {
         assert!(
             scan_source(
-                "macho-core",
-                Path::new("crates/macho-core/src/model.rs"),
+                "macho",
+                Path::new("crates/macho/src/core/model.rs"),
                 "pub fn values() -> &'static [u8] { &[] }"
             )
             .is_empty()
@@ -808,8 +705,8 @@ mod tests {
             .join("\n");
         assert!(
             scan_source(
-                "macho-core",
-                Path::new("crates/macho-core/src/cohesive_table.rs"),
+                "macho",
+                Path::new("crates/macho/src/core/cohesive_table.rs"),
                 &cohesive_source,
             )
             .is_empty()

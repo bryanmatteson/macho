@@ -1,21 +1,18 @@
 [tools]
-rust = "latest"
+    rust = "latest"
 
 [tasks.link]
-run = "cargo install --path crates/macho-cli"
+    run = "cargo install --path crates/macho --bin macho --features cli --force"
 
 [tasks."verify:stable"]
-description = "Run the stable architecture, docs, release, format, lint, test, and benchmark gates"
-run = "cargo xtask verify"
+    description = "Run the stable architecture, docs, release, format, lint, test, and benchmark gates"
+    run         = "cargo xtask verify"
 
 [tasks."verify:fuzz"]
-description = "Build every fuzz target with task-scoped nightly Rust"
-tools.rust = "nightly"
-run = "cargo xtask verify-fuzz"
+    description = "Build every fuzz target with task-scoped nightly Rust"
+    run         = "cargo xtask verify-fuzz"
+    tools.rust  = "nightly"
 
 [tasks.verify]
-description = "Run the complete stable and nightly-fuzz verification gates"
-run = [
-    { task = "verify:stable" },
-    { task = "verify:fuzz" },
-]
+    description = "Run the complete stable and nightly-fuzz verification gates"
+    run         = [{ task = "verify:stable" }, { task = "verify:fuzz" }]

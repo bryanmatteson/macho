@@ -5,7 +5,7 @@ use macho::analysis::{AnalysisDomain, AnalysisPlan, Analyzer, DomainState, domai
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args_os()
         .nth(1)
-        .ok_or("usage: cargo run -p macho-lib --example typed_analysis -- <Mach-O>")?;
+        .ok_or("usage: cargo run -p macho --example typed_analysis -- <Mach-O>")?;
     let bytes = std::fs::read(path)?;
     let container = macho::parse(&bytes)?;
     let document = Analyzer.run(

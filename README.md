@@ -3,10 +3,9 @@
 **One Rust toolkit for reading, reconstructing, auditing, and rewriting Mach-O binaries — no Xcode, no `otool`, no macOS required.**
 
 [![CI](https://github.com/bryanmatteson/macho/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanmatteson/macho/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/macho-lib.svg)](https://crates.io/crates/macho-lib)
+[![crates.io](https://img.shields.io/crates/v/macho.svg)](https://crates.io/crates/macho)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Libraries: Rust 1.85+](https://img.shields.io/badge/libraries-rust%201.85%2B-orange.svg)](https://www.rust-lang.org)
-[![CLI: Rust 1.88+](https://img.shields.io/badge/CLI-rust%201.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
 
 `macho` is what you reach for when you have an Apple binary and a question. It reads the header, walks the load commands, recovers Objective-C and Swift declarations that were compiled away, disassembles the code, diffs two builds, audits the code signature, patches an rpath, re-signs the result, and cracks open a dyld shared cache — from a single static binary that runs the same on macOS, Linux, and Windows.
 
@@ -49,16 +48,16 @@ Report-producing commands speak `--format text` for humans and `--format json` f
 - **Byte-safe by construction.** The core parser validates structure before it trusts it, and the whole workspace is continuously fuzzed (headers, load commands, code signatures, dyld metadata, mutation, and more).
 - **Mutation that refuses to corrupt.** Patches extend existing slack and file-backed segments only; they never relocate existing payload, symbols, or fixups. If a placement isn't provably safe, the transaction refuses to commit.
 - **Semantic diffing and auditing.** `diff` compares two binaries by meaning and can fail CI on breaking changes; `audit` surfaces signing and configuration findings with stable diagnostic codes.
-- **Pick only what you need.** A feature-gated façade over 18 focused leaf crates means a narrow consumer can depend on just the parser, or just the demangler, without pulling in the CLI, mutation, or workflow layers.
+- **Pick only what you need.** One package exposes feature-gated parser, metadata, analysis, mutation, workflow, and CLI modules, so narrow consumers do not compile capabilities they did not select.
 
 ## Install
 
 ```bash
-cargo add macho-lib --rename macho  # library façade: package `macho-lib`, imported as `macho`
-cargo install macho-cli              # installs the `macho` binary
+cargo add macho
+cargo install macho --features cli  # installs the `macho` binary
 ```
 
-The libraries declare Rust 1.85 as their minimum supported version; the CLI requires Rust 1.88. From a checkout, use `cargo install --path crates/macho-cli` to install that exact source tree.
+The unified package requires Rust 1.88. From a checkout, use `cargo install --path crates/macho --features cli` to install that exact source tree.
 
 Then, from a clone:
 
@@ -93,6 +92,13 @@ macho strings <binary> --min-length 8 --offsets
 macho strings <binary> --search "secret" --exact
 macho xrefs <binary> --import malloc --kind stub
 macho ranges <binary> --name main --source nlist --demangle
+
+# Evidence-accounted program recovery (select stages or use --all)
+macho program <binary> --all --coverage --format json
+macho program <binary> --stage dependencies --stage semantics
+macho program <binary> --load-dependencies --dependency-search-path ./Frameworks --format json
+macho program <binary> --load-dependencies --dyld-cache <dyld-cache> --format json
+macho program <binary> --all --limits-file recovery-limits-v1.json
 
 # Compare, audit, snapshot
 macho diff <old-binary> <new-binary> --ignore-codesign --fail-on breaking
@@ -177,6 +183,7 @@ Generated from the production Clap router and checked by `cargo xtask docs --che
 | `swift` | Swift type metadata |
 | `cpp` | C++ RTTI type hierarchies |
 | `c` | C type declarations from debug info |
+| `program` | Selective whole-program recovery with typed evidence |
 | `disassemble` | Decode selected executable instructions |
 | `diff` | Compare two binaries semantically |
 | `audit` | Security and configuration audit |
@@ -190,7 +197,7 @@ Generated from the production Clap router and checked by `cargo xtask docs --che
 
 ## Library usage
 
-Core parsing is always available. Feature-selected metadata, analysis, mutation, workflow, dyld-cache, and header-inference APIs are re-exported by the `macho` façade; narrow consumers can depend on leaf crates directly.
+Core parsing is always available. Feature-selected evidence, metadata, analysis, mutation, workflow, dyld-cache, and header-inference APIs are exposed by the `macho` façade; narrow consumers can depend on leaf crates directly.
 
 Parse a container and read its first image:
 
@@ -234,6 +241,152 @@ imports, fixups, code signing, strings, ranges, xrefs, audit, and canonical C,
 C++, Objective-C, and Swift recovery reports. Typed reads do not change the
 schema-version-3 snapshot wire representation.
 
+Whole-program recovery is also selective. Each module is independently
+queryable; the request adds only declared prerequisites. Higher-level layers can
+borrow a narrow capability view without copying records or depending on
+unrequested call, transfer, or RTTI analysis:
+
+```rust
+use macho::analysis::program::{
+    ProgramRecoveryLimits, ProgramRecoveryLimitsFile, ProgramRecoveryRequest,
+    ProgramRecoveryStage, RecoveredProgram,
+};
+use macho::analysis::recovery::{RecoveryAddressRange, RecoveryGuide};
+
+let bytes = std::fs::read("/usr/bin/true")?;
+let container = macho::parse(&bytes)?;
+let image = container.first_macho().ok_or("container has no image")?;
+let request = ProgramRecoveryRequest::new(
+    [ProgramRecoveryStage::Strings, ProgramRecoveryStage::Xrefs],
+    ProgramRecoveryLimits::default(),
+);
+let program = RecoveredProgram::recover(image, request.clone())?;
+program.completeness().validate()?;
+let limits_file = ProgramRecoveryLimitsFile::current(request.limits());
+println!("{}", serde_json::to_string_pretty(&limits_file)?);
+let disassembly = program
+    .facts()
+    .disassembly_inputs()
+    .ok_or("disassembly prerequisites were not selected")?;
+
+println!("{} functions", disassembly.functions.functions().len());
+println!("strings selected: {}", disassembly.strings.is_some());
+println!("RTTI selected: {}", disassembly.rtti.is_some());
+
+// Streaming disassemblers can query one address without materializing vectors.
+let annotations = program.annotations_at(0x1000_0000);
+for reference in annotations.references() {
+    if let Some(string) = reference.target_string() {
+        println!("string reference: {}", string.value);
+    }
+}
+
+// Guidance is not limited to questions emitted by the base recovery. A caller
+// can author an exact image-bound premise, validate it against the selected
+// Mach-O layout, and preview its complete cold-recovery consequences.
+let function = program
+    .functions()
+    .and_then(|functions| functions.functions().first())
+    .ok_or("no recovered function")?;
+let extent = function.extent.ok_or("function extent is unresolved")?;
+let guide = RecoveryGuide::builder(program.image().clone())
+    .function_ranges(
+        function.entry,
+        vec![RecoveryAddressRange::new(extent.start, extent.end_exclusive)?],
+    )?
+    .build();
+let validation = program.validate_guide_for_image(image, &guide);
+println!("guide validation: {:?}", validation.applicability);
+let preview = RecoveredProgram::preview_guide(image, request, &guide)?;
+if let Some(application) = preview.application() {
+    println!("{} changed subjects", application.delta.records.len());
+    println!("coverage: {:#?}", application.coverage_delta);
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The concrete `ImageLayoutIndex`, `PointerIndex`, `SymbolInventory`,
+`StringIndex`, `ObjcIndex`, `SwiftIndex`, `DwarfIndex`, `FunctionIndex`,
+`ControlFlowIndex`, `ExecutableByteIndex`, `XrefIndex`, `RttiIndex`, and
+`ExceptionIndex` types remain usable directly by analysis layers that need an
+even narrower dependency. `ExecutableByteIndex` conserves every admitted
+executable-section byte as an instruction, embedded data, padding, alignment,
+stub, literal pool, or an explicitly unresolved span. Proven jump-table bytes
+are removed from the retained instruction stream before the final CFG is built.
+`RecoveryGuide::builder` accepts image-bound function entries, rejections,
+alternate/cold/shared relationships, contiguous or discontiguous function
+ranges, and every executable-byte role without requiring recovery to emit a
+question first. Exact validation rejects stale coordinates, invalid section
+ownership, unsupported alignment, missing range owners, and contradictory
+roles before the immutable base/guided preview is built. Its receipt retains
+caller authority separately from independent evidence and reports causal object
+and multidimensional coverage deltas.
+Closed entry-reachable CFGs can establish derived function extents when every
+reachable exit and local byte is accounted for; adjacency remains candidate
+only. Every graph exposes a non-overlapping byte ledger that classifies its
+admitted coverage as instruction, data, explicit decode gap, or budget-omitted
+range, plus per-kind conservation totals. Supported imported non-returning calls carry typed return behavior and
+are resolved structurally through stub bind slots so stripping names does not
+restore false fallthrough. Bounded jump-table dispatch and terminal dispatch
+through a function pointer loaded from a statically addressed global slot are
+retained as distinct exit kinds; their runtime-selected targets remain
+unresolved, and an unexplained indirect branch still prevents CFG closure.
+`RttiIndex` exposes both exact symbol-backed records and ABI-structural records,
+so stripping `_ZTI` and `_ZTV` names does not discard recoverable type or vtable
+identities. `ExceptionIndex` independently decodes object-file compact unwind,
+linked `__unwind_info`, `__eh_frame`, and bounded Itanium LSDAs. It evaluates
+CFI into CFA/register state rows and retains protected call-site ranges,
+cleanup/catch/specification action chains, landing pads, exceptional CFG edges,
+and outward-unwind exits with exact source evidence and budgets.
+Object compact-unwind and exception-frame records retain true function extents;
+linked-unwind page intervals are explicitly typed as lookup ranges and never
+fabricate function boundaries.
+
+The same selection model is available from the CLI. Only requested stages and
+their declared dependencies are recovered; JSON retains every typed record and
+completion receipt:
+
+```bash
+macho program MyApp --stage functions --stage strings --stage xrefs
+macho program MyApp --stage executable-bytes
+macho program MyApp --coverage
+macho program MyApp --guide recovery.macho-guide.json --validate-guide
+macho program MyApp --guide recovery.macho-guide.json
+macho program MyApp --stage indirect-calls \
+  --max-indirect-value-flow-work 8000000 \
+  --max-indirect-values-per-register 4096 \
+  --max-indirect-loop-values-per-register 64
+macho --format json program MyApp --stage objc --stage swift --stage rtti
+```
+
+On macOS, the checked-in system-corpus receipt runner emits deterministic,
+ordered JSON for the explicit default limits and enforces the per-slice wall
+ceiling:
+
+```bash
+cargo run -p macho --example system_corpus_receipt -- \
+  /bin/ls /bin/cp /usr/bin/file /usr/bin/xcrun
+```
+
+The bounded recovery surface includes allocator-derived heap aliases,
+independently evidenced shared function tails, protocol-qualified Objective-C
+receivers, and anchor-free C++ RTTI with absolute/relative vtables, stripped
+VTTs, and common adjustment thunks. Unsupported computed-branch transforms and
+runtime-populated dispatch slots remain typed frontiers rather than inferred
+targets. The corpus gate combines architecture, stripping, language, exception,
+switch, authentication, malformed-input, container, shared-cache, and debug-info
+fixtures; every serialized nested limit is validated and every stage has a
+deterministic primary-budget monotonicity check.
+
+The current `/bin/ls`, `/bin/cp`, `/usr/bin/file`, and `/usr/bin/xcrun` system
+corpus is stronger than that general frontier rule: all nine
+x86-64/ARM64/ARM64e slices report `Complete` for all 18 stages. Closed
+non-escaping mutable-global store sets resolve initialized and zero-fill
+dispatch slots, bounded strided record-loop proofs resolve parser and
+decompressor callbacks, and exact non-returning import boundaries close the
+small launcher slices. The same targets survive nlist stripping, including
+unnamed/named import-alias reconciliation.
+
 Plan a mutation, validate placement, and rebuild — the transaction borrows the payload and never relocates existing bytes:
 
 ```rust
@@ -253,11 +406,11 @@ File-backed additions extend only the final file-backed segment, and only when i
 
 Injected `SignatureProvider` implementations may declare a known ad-hoc or certificate kind; providers that omit `kind()` are opaque, own their own verification, and never expose credentials. The generic verifier accepts only the ad-hoc and certificate mechanisms it understands. Selective analysis builds an `AnalysisPlan` before execution, and snapshot documents (schema version 3) preserve `not_requested`, `complete`, `unsupported`, and `failed` as distinct states — a gap in the data is never silently rendered as a zero.
 
-External transformation engines see exactly one immutable selected image through `macho::evidence::SelectedImageEvidence` and consume strict, bounded, Macho-owned language evidence — never its report, workflow, mutation, or CLI policy. The Swift ABI parsers and their syntax trees stay private to the Macho leaves; an external engine owns only its downstream semantic projection.
+External transformation engines see exactly one immutable selected image through `macho::evidence::SelectedImageEvidence` and consume strict, bounded, Macho-owned language evidence — never its report, workflow, mutation, or CLI policy. The Swift ABI parsers and their syntax trees stay private to the owning modules; an external engine owns only its downstream semantic projection.
 
 ## Architecture
 
-The workspace is layered so dependencies flow one direction — a byte-safe core at the bottom, metadata leaves and analysis above it, then mutation, format-local in-memory candidate validation, the façade, and the CLI on top. This is enforced, not aspirational:
+The workspace keeps product code in one feature-gated package. Module ownership separates the byte-safe core, instruction support, metadata, analysis, mutation, workflow, and CLI without turning those implementation details into release units:
 
 - `cargo xtask architecture` enforces dependency direction and source ownership.
 - `cargo xtask docs --check` binds this command reference and the diagnostic registry to the code.
@@ -266,7 +419,11 @@ The workspace is layered so dependencies flow one direction — a byte-safe core
 - `cargo xtask verify-fuzz` builds every fuzz target (nightly Rust).
 - `mise run verify` composes both gates, scoping nightly to fuzzing only.
 
-The 21 crates, bottom to top: `macho-core` (parsing) · `macho-symbols` · `macho-demangle` · `macho-codesign` · `macho-dwarf` · `macho-objc` · `macho-swift` · `macho-cpp` · `macho-insn` · `macho-dyld` · `macho-dyld-cache` · `macho-evidence` · `macho-header-syntax` · `macho-header-infer` · `macho-analysis` · `macho-mutate` · `macho-patch` · `macho-workflow` · `macho` (façade) · `macho-cli` · `xtask`.
+The workspace contains five packages: `macho` for all shipped library and CLI
+functionality, private `xtask` for repository automation, private
+`macho-test-support` for shared deterministic fixtures, and two private
+mkasm-generated ARM64/x86-64 codec packages. The generated packages are vendored
+for offline Rust builds and refreshed through `scripts/generate-mkasm-codecs.sh`.
 
 ## Contributing
 

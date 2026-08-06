@@ -9,12 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-macho-core = { path = "../crates/macho-core" }
-macho-insn = { path = "../crates/macho-insn" }
-macho-dyld = { path = "../crates/macho-dyld" }
-macho-codesign = { path = "../crates/macho-codesign" }
-macho-mutate = { path = "../crates/macho-mutate" }
-macho-dyld-cache = { path = "../crates/macho-dyld-cache" }
+macho = { path = "../crates/macho", default-features = false, features = ["dyld-cache", "mutation"] }
 
 [[bin]]
 name = "container"

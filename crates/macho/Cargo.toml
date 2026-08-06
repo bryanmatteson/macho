@@ -1,59 +1,120 @@
 [package]
-name = "macho-lib"
+name = "macho"
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+rust-version = "1.88"
 license.workspace = true
 readme.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Feature-gated Mach-O library façade"
+description = "Feature-gated Mach-O parsing, analysis, mutation, and command-line tools"
 keywords = ["macho", "binary", "dylib", "executable", "macos"]
 categories = ["development-tools::debugging", "development-tools::profiling"]
 
 [lib]
 name = "macho"
 
+[[bin]]
+name = "macho"
+path = "src/bin/macho.rs"
+doc = false
+required-features = ["cli"]
+
 [features]
 default = ["analysis"]
-metadata = [
-  "dep:macho-symbols", "dep:macho-dyld", "dep:macho-codesign",
-  "dep:macho-dwarf", "dep:macho-objc", "dep:macho-swift", "dep:macho-cpp",
-  "dep:macho-evidence", "dep:macho-header-syntax",
+
+# Cohesive low-level capability gates. These replace the former leaf crates.
+insn = [
+  "dep:iced-x86", "dep:mkasm-aarch64", "dep:mkasm-x86-64",
 ]
-analysis = ["metadata", "dep:macho-insn", "dep:macho-analysis"]
-mutation = [
-  "dep:macho-insn", "dep:macho-dyld", "dep:macho-codesign",
-  "dep:macho-mutate", "dep:macho-patch",
+codesign = ["dep:thiserror"]
+demangle = [
+  "dep:cpp_demangle", "dep:rustc-demangle", "dep:sha2", "dep:swift-demangler",
 ]
-workflow = ["analysis", "mutation", "dep:macho-workflow"]
-dyld-cache = ["dep:macho-dyld-cache"]
-header-infer = ["analysis", "dep:macho-header-infer"]
+dwarf = ["dep:gimli", "dep:thiserror"]
+dyld = ["dep:serde"]
+fixups = ["dyld"]
+strict-rtti = ["dyld"]
+abi = ["fixups", "insn"]
+itanium-rtti = ["fixups"]
+objc = ["fixups", "strict-rtti", "dep:thiserror"]
+swift = ["demangle", "strict-rtti", "dep:serde", "dep:sha2", "dep:thiserror"]
+cpp = ["abi", "demangle", "fixups", "itanium-rtti", "dep:serde", "dep:thiserror"]
+symbols = ["demangle"]
+
+# Public product capabilities.
+evidence = ["cpp", "dyld", "objc", "swift"]
+metadata = ["evidence", "codesign", "dwarf", "symbols"]
+dyld-cache = ["dyld", "dep:serde"]
+analysis = [
+  "metadata", "dyld-cache", "insn", "dep:serde_json", "dep:tree-sitter",
+  "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-objc",
+]
+structural = ["codesign", "dep:serde", "dep:thiserror"]
+patch = ["structural", "insn"]
+external-signing = ["structural", "codesign", "dep:sha2"]
+signing = [
+  "external-signing", "dep:apple-codesign", "dep:bytes", "dep:signature",
+  "dep:x509-certificate", "dep:zeroize",
+]
+mutation = ["signing", "patch"]
+workflow = ["analysis", "mutation"]
+header-infer = ["analysis"]
 full = ["analysis", "mutation", "workflow", "dyld-cache", "header-infer"]
+cli = [
+  "full", "dep:anyhow", "dep:clap", "dep:laidout", "dep:memmap2",
+  "dep:termosaic",
+]
 
 [dependencies]
-macho-core.workspace = true
-macho-insn = { workspace = true, optional = true }
-macho-symbols = { workspace = true, optional = true }
-macho-dyld = { workspace = true, optional = true }
-macho-codesign = { workspace = true, optional = true }
-macho-dwarf = { workspace = true, optional = true }
-macho-objc = { workspace = true, optional = true }
-macho-swift = { workspace = true, optional = true }
-macho-cpp = { workspace = true, optional = true, features = ["abi", "fixups", "itanium-rtti"] }
-macho-evidence = { workspace = true, optional = true }
-macho-analysis = { workspace = true, optional = true }
-macho-mutate = { workspace = true, optional = true }
-macho-patch = { workspace = true, optional = true }
-macho-workflow = { workspace = true, optional = true }
-macho-dyld-cache = { workspace = true, optional = true }
-macho-header-infer = { workspace = true, optional = true }
-macho-header-syntax = { workspace = true, optional = true }
+apple-codesign = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+bitflags.workspace = true
+bytes = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+cpp_demangle = { workspace = true, optional = true }
+gimli = { workspace = true, optional = true }
+iced-x86 = { workspace = true, optional = true }
+laidout = { workspace = true, optional = true }
+memmap2 = { workspace = true, optional = true }
+mkasm-aarch64 = { workspace = true, optional = true }
+mkasm-x86-64 = { workspace = true, optional = true }
+rustc-demangle = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+signature = { workspace = true, optional = true }
+swift-demangler = { workspace = true, optional = true }
+termosaic = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+tree-sitter = { workspace = true, optional = true }
+tree-sitter-c = { workspace = true, optional = true }
+tree-sitter-cpp = { workspace = true, optional = true }
+tree-sitter-objc = { workspace = true, optional = true }
+x509-certificate = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
+zerocopy.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
 macho-test-support = { path = "../macho-test-support" }
+tempfile.workspace = true
+trybuild.workspace = true
+trycmd.workspace = true
 
 [[bench]]
 name = "architecture"
 harness = false
+required-features = ["full"]
+
+[[example]]
+name = "typed_analysis"
+required-features = ["analysis"]
+
+[[example]]
+name = "system_corpus_receipt"
+required-features = ["analysis"]
+
+[[example]]
+name = "dwarf_traverse"
+required-features = ["dwarf"]

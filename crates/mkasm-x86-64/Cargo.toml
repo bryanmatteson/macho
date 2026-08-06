@@ -1,0 +1,10 @@
+[package]
+name = "x86_64"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Generated allocation-free x86 encoder, decoder, and Intel formatter"
+publish = false
+
+[lib]
+path = "src/lib.rs"

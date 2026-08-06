@@ -6,6 +6,9 @@ use macho::analysis::disassembly::{
 };
 use macho::analysis::{AnalysisDomain, AnalysisPlan, Analyzer};
 use macho::core::{ParseLimits, ParseMode, ParseOptions};
+use macho::insn::{
+    Arch, X86EncodeFields, decode_one, encode_arm64_fixed, encode_x86_form, identify_encoding,
+};
 use macho::mutate::{PatchOp, PatchPlan, PatchTransaction};
 use macho_test_support::{CPU_TYPE_ARM64, fat32, thin64_arm64};
 
@@ -121,12 +124,46 @@ fn patch_preview(c: &mut Criterion) {
     });
 }
 
+fn instruction_codecs(c: &mut Criterion) {
+    let x86_nop = [0x90];
+    let arm64_nop = 0xD503_201Fu32.to_le_bytes();
+    let x86_form = identify_encoding(&x86_nop, Arch::X86_64)
+        .expect("generated x86 NOP")
+        .form_index
+        .expect("x86 form index");
+    let arm64_id = identify_encoding(&arm64_nop, Arch::Arm64)
+        .expect("generated ARM64 NOP")
+        .encoding_id;
+
+    let mut group = c.benchmark_group("instruction_codecs");
+    group.bench_function("x86_generated_identity", |b| {
+        b.iter(|| identify_encoding(std::hint::black_box(&x86_nop), Arch::X86_64))
+    });
+    group.bench_function("x86_semantic_decode", |b| {
+        b.iter(|| decode_one(std::hint::black_box(&x86_nop), 0x1000, Arch::X86_64))
+    });
+    group.bench_function("x86_generated_encode", |b| {
+        b.iter(|| encode_x86_form(x86_form, std::hint::black_box(X86EncodeFields::default())))
+    });
+    group.bench_function("arm64_generated_identity", |b| {
+        b.iter(|| identify_encoding(std::hint::black_box(&arm64_nop), Arch::Arm64))
+    });
+    group.bench_function("arm64_semantic_decode", |b| {
+        b.iter(|| decode_one(std::hint::black_box(&arm64_nop), 0x1000, Arch::Arm64))
+    });
+    group.bench_function("arm64_generated_encode", |b| {
+        b.iter(|| encode_arm64_fixed(std::hint::black_box(arm64_id)))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     parsing,
     selective_analysis,
     reconstruction_and_diff,
     bounded_disassembly,
-    patch_preview
+    patch_preview,
+    instruction_codecs
 );
 criterion_main!(benches);

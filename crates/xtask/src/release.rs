@@ -26,10 +26,10 @@ pub fn check(root: &Path, require_tag: bool) -> Result<()> {
         .iter()
         .next()
         .context("workspace has no packages")?;
-    if macho_cli::version() != version {
+    if macho::cli::version() != version {
         bail!(
             "CLI version {} differs from workspace version {version}",
-            macho_cli::version()
+            macho::cli::version()
         );
     }
     let changelog = fs::read_to_string(root.join("CHANGELOG.md")).context("read CHANGELOG.md")?;
@@ -99,42 +99,9 @@ fn check_lockfile(root: &Path, version: &str) -> Result<()> {
     check_lockfile_packages(
         &root.join("Cargo.lock"),
         version,
-        &[
-            "macho-core",
-            "macho-insn",
-            "macho-dyld",
-            "macho-evidence",
-            "macho-demangle",
-            "macho-symbols",
-            "macho-codesign",
-            "macho-dwarf",
-            "macho-objc",
-            "macho-swift",
-            "macho-cpp",
-            "macho-analysis",
-            "macho-mutate",
-            "macho-patch",
-            "macho-dyld-cache",
-            "macho-header-infer",
-            "macho-workflow",
-            "macho-lib",
-            "macho-cli",
-            "macho-test-support",
-            "xtask",
-        ],
+        &["macho", "macho-test-support", "xtask"],
     )?;
-    check_lockfile_packages(
-        &root.join("fuzz/Cargo.lock"),
-        version,
-        &[
-            "macho-codesign",
-            "macho-core",
-            "macho-dyld",
-            "macho-dyld-cache",
-            "macho-insn",
-            "macho-mutate",
-        ],
-    )
+    check_lockfile_packages(&root.join("fuzz/Cargo.lock"), version, &["macho"])
 }
 
 fn check_lockfile_packages(path: &Path, version: &str, names: &[&str]) -> Result<()> {
@@ -231,9 +198,9 @@ mod tests {
         let lock = temporary.path().join("Cargo.lock");
         fs::write(
             &lock,
-            "[[package]]\nname = \"macho-core\"\nversion = \"0.2.0\"\n",
+            "[[package]]\nname = \"macho\"\nversion = \"0.2.0\"\n",
         )
         .unwrap();
-        assert!(check_lockfile_packages(&lock, "0.4.0", &["macho-core"]).is_err());
+        assert!(check_lockfile_packages(&lock, "0.4.0", &["macho"]).is_err());
     }
 }
