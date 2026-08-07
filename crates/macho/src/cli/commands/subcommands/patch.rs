@@ -106,6 +106,12 @@ impl SigningConfig {
 
 #[derive(clap::Args)]
 struct OutputOpts {
+    /// PAC assessment policy for arm64e detours
+    #[arg(long, value_enum, default_value_t = PacPolicy::Report)]
+    pac_policy: PacPolicy,
+    /// Maximum pointer records inspected by each arm64e PAC assessment
+    #[arg(long, default_value_t = 16_000_000, value_parser = clap::value_parser!(u64).range(1..))]
+    pac_max_pointers: u64,
     /// Output path (required unless --in-place)
     #[arg(long, short)]
     output: Option<PathBuf>,
@@ -232,7 +238,13 @@ fn run_patch(
                 }
             }
 
-            let prepared = prepare_patch(macho, requests, signing)?;
+            let prepared = prepare_patch(
+                macho,
+                requests,
+                signing,
+                opts.pac_policy,
+                opts.pac_max_pointers,
+            )?;
             let arch_name = arch_name_for_mach(macho);
             if format == OutputFormat::Text {
                 emit_preview(&[(&arch_name, &prepared)], opts.dry_run, out);
@@ -280,7 +292,13 @@ fn run_patch(
                     Ok((
                         index,
                         arch.spec().name(),
-                        prepare_patch(arch.macho(), requests, signing)?,
+                        prepare_patch(
+                            arch.macho(),
+                            requests,
+                            signing,
+                            opts.pac_policy,
+                            opts.pac_max_pointers,
+                        )?,
                     ))
                 })
                 .collect::<Result<_>>()?;
@@ -547,6 +565,8 @@ fn prepare_patch(
     macho: &MachoFile<'_>,
     requests: &[PatchRequest],
     signing: Option<&SigningConfig>,
+    pac_policy: PacPolicy,
+    pac_max_pointers: u64,
 ) -> Result<SlicePrepared> {
     let mut ops = Vec::new();
     let mut expected = Vec::new();
@@ -616,8 +636,31 @@ fn prepare_patch(
                 destination_va,
                 overwrite_len,
             } => {
-                let (plan, instruction_count) =
-                    plan_detour(macho, *entry_va, *destination_va, *overwrite_len)?;
+                let (plan, instruction_count, pac) = plan_detour(
+                    macho,
+                    *entry_va,
+                    *destination_va,
+                    *overwrite_len,
+                    pac_policy != PacPolicy::Off,
+                    pac_max_pointers,
+                )?;
+                if pac_policy == PacPolicy::Require
+                    && pac
+                        .as_ref()
+                        .is_some_and(|assessment| !assessment.is_compatible())
+                {
+                    let assessment = pac.as_ref().expect("checked as present");
+                    let findings = assessment
+                        .findings
+                        .iter()
+                        .map(|finding| finding.code.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    anyhow::bail!(
+                        "arm64e detour failed required PAC policy ({:?}): {findings}",
+                        assessment.verdict
+                    );
+                }
                 let offset = u64::try_from(plan.entry_offset)
                     .map_err(|_| usage_message("detour file offset exceeds u64"))?;
                 ops.push(PatchOp::PatchBytes {
@@ -625,7 +668,7 @@ fn prepare_patch(
                     bytes: plan.patch_bytes.clone(),
                 });
                 expected.push((offset, plan.original_bytes.clone()));
-                details.push(Some(detour_detail(&plan, instruction_count)));
+                details.push(Some(detour_detail(&plan, instruction_count, pac)));
             }
         }
     }

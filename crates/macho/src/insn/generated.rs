@@ -1,6 +1,7 @@
 //! Fast instruction identity and physical encoding backed by mkasm-generated tables.
 
-use super::{Arch, DecodeError, EncodeError};
+use super::codecs::{aarch64 as mkasm_aarch64, x86_64 as mkasm_x86_64};
+use super::{Arch, DecodeError, DecodeErrorKind, EncodeError};
 
 /// Architecture-neutral identity returned by the generated decoder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +103,13 @@ pub fn encode_x86_form(
 
 fn identify_arm64(bytes: &[u8]) -> Result<EncodingIdentity, DecodeError> {
     let word = bytes.get(..4).ok_or_else(|| DecodeError {
+        kind: DecodeErrorKind::Truncated,
         message: "truncated ARM64 instruction".to_string(),
     })?;
     let decoded =
         mkasm_aarch64::decode(u32::from_le_bytes(word.try_into().unwrap())).map_err(|error| {
             DecodeError {
+                kind: DecodeErrorKind::UnknownEncoding,
                 message: error.to_string(),
             }
         })?;
@@ -125,6 +128,11 @@ fn identify_arm64(bytes: &[u8]) -> Result<EncodingIdentity, DecodeError> {
 fn identify_x86(bytes: &[u8]) -> Result<EncodingIdentity, DecodeError> {
     let decoded =
         mkasm_x86_64::decode(bytes, mkasm_x86_64::Mode::Mode64).map_err(|error| DecodeError {
+            kind: match error {
+                mkasm_x86_64::DecodeError::Truncated => DecodeErrorKind::Truncated,
+                mkasm_x86_64::DecodeError::TooLong => DecodeErrorKind::TooLong,
+                mkasm_x86_64::DecodeError::Unknown => DecodeErrorKind::UnknownEncoding,
+            },
             message: format!("{error:?}"),
         })?;
     let encoding = decoded.encoding();

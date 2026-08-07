@@ -3,8 +3,6 @@
     members  = [
         "crates/macho",
         "crates/macho-test-support",
-        "crates/mkasm-aarch64",
-        "crates/mkasm-x86-64",
         "crates/xtask",
     ]
     resolver = "2"
@@ -21,9 +19,6 @@
 [workspace.dependencies]
     apple-codesign = { version = "0.29.0", default-features = false }
     macho          = { path = "crates/macho", version = "1", default-features = false }
-    mkasm-aarch64  = { package = "aarch64", path = "crates/mkasm-aarch64" }
-    mkasm-x86-64   = { package = "x86_64", path = "crates/mkasm-x86-64" }
-
     anyhow           = "1"
     base64           = "0.23.1"
     bitflags         = "2"
@@ -33,7 +28,6 @@
     cpp_demangle     = "0.5.1"
     criterion        = "0.8.2"
     gimli            = { version = "0.34.0", features = ["read"] }
-    iced-x86         = { version = "1.21", default-features = false, features = ["std", "decoder", "encoder", "op_code_info", "instr_info"] }
     laidout          = "0.3"
     memmap2          = "0.9"
     rustc-demangle   = "0.1"

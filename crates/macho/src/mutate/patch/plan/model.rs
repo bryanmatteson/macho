@@ -13,6 +13,7 @@ const X86_64_REL32_JUMP_LEN: usize = 5;
 const X86_64_ABSOLUTE_JUMP_LEN: usize = 14;
 const ARM64_DIRECT_BRANCH_LEN: usize = 4;
 const ARM64_ABSOLUTE_JUMP_LEN: usize = 16;
+const ARM64E_MATERIALIZED_JUMP_LEN: usize = 20;
 const ARM64_LDR_X16_LITERAL_8: [u8; 4] = [0x50, 0x00, 0x00, 0x58];
 const ARM64_BR_X16: [u8; 4] = [0x00, 0x02, 0x1F, 0xD6];
 
@@ -184,6 +185,11 @@ pub enum HookJumpEncoding {
     Arm64BranchImmediate,
     /// arm64/arm64e `ldr x16, #8; br x16; .quad target`.
     Arm64AbsoluteLiteral,
+    /// arm64e `movz`/`movk` address materialization followed by `br x16`.
+    ///
+    /// Unlike the literal form, this does not introduce an unauthenticated
+    /// pointer field into executable bytes.
+    Arm64eMaterializedAddress,
 }
 
 impl HookJumpEncoding {
@@ -194,6 +200,7 @@ impl HookJumpEncoding {
             Self::X86_64Absolute => X86_64_ABSOLUTE_JUMP_LEN,
             Self::Arm64BranchImmediate => ARM64_DIRECT_BRANCH_LEN,
             Self::Arm64AbsoluteLiteral => ARM64_ABSOLUTE_JUMP_LEN,
+            Self::Arm64eMaterializedAddress => ARM64E_MATERIALIZED_JUMP_LEN,
         }
     }
 

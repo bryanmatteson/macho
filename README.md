@@ -34,10 +34,16 @@ Inspecting Apple binaries usually means juggling `otool`, `nm`, `dyld_info`, `co
 | `class-dump` | `macho objc --headers` |
 | a Swift metadata reader + demangler | `macho swift --headers` |
 | `otool -tV` / a standalone disassembler | `macho disassemble` |
+| manual arm64e fixup and opcode auditing | `macho pac` |
 | `codesign -d`, `codesign -s` | `macho codesign`, `macho patch --sign-*` |
 | `install_name_tool`, `otool` byte-patching | `macho patch` |
 | diffing two builds by hand | `macho diff` |
 | a shared-cache extractor | `macho cache` |
+
+Measured comparisons against Apple CLIs, class-dump-style dumpers, `ipsw`, and
+interactive RE suites — plus host-captured demos on Calculator arm64e (ObjC /
+Swift recovery, PAC completeness, fail-closed patch, SARIF audit) — live in
+[`docs/comparison-evidence.md`](docs/comparison-evidence.md).
 
 Report-producing commands speak `--format text` for humans and `--format json` for pipelines; `audit` also emits **SARIF 2.1** so findings drop straight into GitHub code scanning. Artifact-producing `header-infer` actions use their explicit output files or emit source/prompt text instead.
 
@@ -82,6 +88,11 @@ macho objc <binary> --kind class --presence defined --selector viewDidLoad
 macho swift <binary> --state metadata-defined --name MyModule
 macho swift <binary> --arch arm64 --name MyModule.Record --exact --headers
 
+# Pointer authentication inventory and code-site recovery
+macho pac <binary> --arch arm64e
+macho pac <binary> --arch arm64e --pointers --gadgets
+macho pac <binary> --arch arm64e --format json
+
 # Disassembly
 macho disassemble <binary> --arch arm64e --symbol _main
 macho disassemble <binary> --address 0x100003f50 --count 8 --format json
@@ -109,7 +120,7 @@ macho snapshot <binary> --format json
 macho patch <binary> --add-rpath @executable_path/../Frameworks --dry-run
 macho patch <binary> --add-section __LINKEDIT,__meta,3,metadata.bin --output <patched-binary>
 macho patch <binary> --add-zerofill-section __DATA,__scratch,4,0x100 --output <patched-binary>
-macho patch <fat-binary> --arch arm64e --detour 0x100003f50,0x100004100,4 --dry-run --format json
+macho patch <fat-binary> --arch arm64e --detour 0x100003f50,0x100004100,4 --pac-policy require --dry-run --format json
 macho patch <binary> --sign-adhoc --output <signed-binary>
 macho patch <binary> --sign-p12 <identity.p12> --p12-password-file <password-file> --output <signed-binary>
 
@@ -142,7 +153,7 @@ Either input may also be a JSON file emitted by `macho snapshot`; `--arch`
 selects the same family or qualified slice whether the input is a binary or a
 saved snapshot.
 
-Most report-producing commands accept `--format text|json`; JSON reports use a versioned envelope. `disassemble --format json` deliberately streams newline-delimited JSON (one object per line) so large binaries do not need to materialize one document; use `jq -s` when a collected array is needed. `audit` also accepts `sarif`. The `header-infer export`, `prompt`, and `apply` actions produce fixed bundle, prompt, header, or sidecar artifacts and intentionally require text mode, while `inspect`, `check-bundle`, and `validate` support text and JSON. Machine formats never contain ANSI escapes, and errors go only to stderr. Semantic roles and the terminal theme come from the pinned Termosaic presentation library; the reusable Mach-O crates stay output-neutral.
+Most report-producing commands accept `--format text|json`; JSON reports use a versioned envelope. `disassemble --format json` deliberately streams NDJSON with exactly one self-contained instruction object per line, so large binaries do not need to materialize one document. Each object carries its architecture, location, mnemonic, operands, classification, and instruction-local metadata such as section, labels, and resolved direct target. A complete AArch64 word whose encoding boundary is exact but whose formatter has no match is retained as `kind: "other"`; `metadata.encoding` records `status: "unknown"`, exact boundary confidence, unavailable semantics, and its architecture source. Ambiguous or invalid x86 bytes remain recovery gaps and never enter the instruction stream. Stream headers, trailers, gaps, and issues are excluded from stdout; use `jq -s` when a collected instruction array is needed. `audit` also accepts `sarif`. The `header-infer export`, `prompt`, and `apply` actions produce fixed bundle, prompt, header, or sidecar artifacts and intentionally require text mode, while `inspect`, `check-bundle`, and `validate` support text and JSON. Machine formats never contain ANSI escapes, and errors go only to stderr. Semantic roles and the terminal theme come from the pinned Termosaic presentation library; the reusable Mach-O crates stay output-neutral.
 
 `macho patch` plans and reparses the complete candidate before it writes. Section
 specifications name an existing segment and carry an explicit base-two alignment
@@ -152,12 +163,26 @@ architecture-aware executable planner and requires one exact `--arch` for a fat
 binary. Its preview reports the encoding, slice-relative file offset, original
 bytes, replacement bytes, and decoded instruction count. Before planning the
 branch, the CLI strictly decodes the entire overwrite window and refuses an
-invalid instruction or a window ending partway through an instruction. Raw byte writes are deliberately guarded:
+invalid instruction or a window ending partway through an instruction. On
+arm64e, the default `--pac-policy report` attaches a typed compatibility
+assessment to each detour. `--pac-policy require` rejects plans that replace an
+entry BTI contract, cannot establish a jump-compatible landing pad for an
+indirect far destination, lose a recovered return-address signing contract, or
+cannot complete the required pointer evidence; `off` skips the assessment.
+`--pac-max-pointers` makes the planner's pointer-evidence bound explicit and
+strict mode rejects a truncated inventory.
+Existing BTI entry instructions are preserved automatically. Far arm64e
+detours materialize the destination from instruction immediates instead of
+embedding a plain pointer literal. PAC instructions replaced at the entry are
+disclosed as evidence because a detour permanently supersedes them. Raw byte writes are deliberately guarded:
 `--bytes OFFSET,EXPECTED_HEX,REPLACEMENT_HEX` refuses a changed input instead of
 blindly overwriting it. Modifying a signed image reports `invalidated` unless
 the same transaction strips or successfully re-signs it. Use `--dry-run` for a
 no-write preview, `--output` for an atomic new artifact, or `--in-place
 --backup` for an atomic replacement with a recoverable original.
+
+The complete PAC evidence and detour-policy contract is documented in
+[`crates/macho/docs/pac.md`](crates/macho/docs/pac.md).
 
 ## Command reference
 
@@ -184,6 +209,7 @@ Generated from the production Clap router and checked by `cargo xtask docs --che
 | `cpp` | C++ RTTI type hierarchies |
 | `c` | C type declarations from debug info |
 | `program` | Selective whole-program recovery with typed evidence |
+| `pac` | Pointer-authentication inventory and authenticated control-flow sites |
 | `disassemble` | Decode selected executable instructions |
 | `diff` | Compare two binaries semantically |
 | `audit` | Security and configuration audit |
@@ -419,10 +445,10 @@ The workspace keeps product code in one feature-gated package. Module ownership 
 - `cargo xtask verify-fuzz` builds every fuzz target (nightly Rust).
 - `mise run verify` composes both gates, scoping nightly to fuzzing only.
 
-The workspace contains five packages: `macho` for all shipped library and CLI
-functionality, private `xtask` for repository automation, private
-`macho-test-support` for shared deterministic fixtures, and two private
-mkasm-generated ARM64/x86-64 codec packages. The generated packages are vendored
+The workspace contains three packages: `macho` for all shipped library and CLI
+functionality, private `xtask` for repository automation, and private
+`macho-test-support` for shared deterministic fixtures. The mkasm-generated
+ARM64/x86-64 codecs are private `macho::insn` implementation modules, vendored
 for offline Rust builds and refreshed through `scripts/generate-mkasm-codecs.sh`.
 
 ## Contributing

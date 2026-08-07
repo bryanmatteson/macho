@@ -207,9 +207,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
 
 fn permitted_edges() -> BTreeMap<&'static str, BTreeSet<&'static str>> {
     let rows: &[(&str, &[&str])] = &[
-        ("macho", &["aarch64", "x86_64"]),
-        ("aarch64", &[]),
-        ("x86_64", &[]),
+        ("macho", &[]),
         ("xtask", &["macho"]),
         ("macho-test-support", &[]),
     ];
@@ -532,7 +530,7 @@ mod tests {
         {
             assert!(graph.contains_key(*name), "missing graph row for {name}");
         }
-        assert_eq!(graph["macho"], BTreeSet::from(["aarch64", "x86_64"]));
+        assert!(graph["macho"].is_empty());
         assert_eq!(graph["xtask"], BTreeSet::from(["macho"]));
 
         let workspace_names = graph.keys().copied().collect();

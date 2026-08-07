@@ -163,7 +163,9 @@ pub struct FunctionImageIdentity {
 impl FunctionImageIdentity {
     pub(crate) fn from_macho(macho: &MachoFile<'_>) -> Self {
         Self {
-            content_sha256: crate::analysis::report::sha256_hex(macho.bytes()),
+            content_sha256: macho
+                .content_sha256(|| crate::analysis::report::sha256_hex(macho.bytes()))
+                .to_owned(),
             byte_len: macho.file_size() as u64,
             cpu_type: macho.header().cpu_type().0,
             cpu_subtype: macho.header().cpu_subtype().0,
@@ -655,6 +657,234 @@ pub struct FunctionIndex {
     ownership: Vec<OwnershipSpan>,
 }
 
+pub(crate) struct FunctionControlFlowRefinement {
+    recovered_table_ranges: BTreeSet<(u64, u64)>,
+    closed_extents: BTreeMap<u64, u64>,
+    relevant_sources: BTreeSet<u64>,
+    observed_source_starts: BTreeSet<u64>,
+    relevant_targets: BTreeSet<u64>,
+    interior_targets: BTreeSet<u64>,
+}
+
+impl FunctionControlFlowRefinement {
+    pub(crate) fn new(index: &FunctionIndex) -> Self {
+        let alternatives = index.entry_candidates.iter().filter(|candidate| {
+            !candidate.evidence.is_empty()
+                && candidate.evidence.iter().all(|evidence| {
+                    evidence.detail == "decoded_alternative_direct_call_target"
+                        && evidence.source_location.is_some()
+                })
+        });
+        let relevant_targets = alternatives
+            .clone()
+            .map(|candidate| candidate.address)
+            .collect();
+        let relevant_sources = alternatives
+            .flat_map(|candidate| {
+                candidate
+                    .evidence
+                    .iter()
+                    .filter_map(|evidence| evidence.source_location)
+            })
+            .collect();
+        Self {
+            recovered_table_ranges: BTreeSet::new(),
+            closed_extents: BTreeMap::new(),
+            relevant_sources,
+            observed_source_starts: BTreeSet::new(),
+            relevant_targets,
+            interior_targets: BTreeSet::new(),
+        }
+    }
+
+    pub(crate) fn observe(&mut self, index: &FunctionIndex, graph: &FunctionControlFlow) {
+        self.recovered_table_ranges.extend(
+            graph
+                .data_ranges
+                .iter()
+                .filter(|range| range.reason == ControlFlowDataRangeReason::RecoveredJumpTable)
+                .map(|range| (range.start, range.end_exclusive)),
+        );
+        if let Some(function) = index.by_entry(graph.function_entry)
+            && let Some(end_exclusive) = closed_control_flow_extent(graph, function)
+        {
+            self.closed_extents
+                .insert(graph.function_entry, end_exclusive);
+        }
+        for instruction in &graph.instructions {
+            if self.relevant_sources.contains(&instruction.address) {
+                self.observed_source_starts.insert(instruction.address);
+            }
+        }
+        let Some(first) = graph.instructions.first() else {
+            return;
+        };
+        let Some(last) = graph.instructions.last() else {
+            return;
+        };
+        let end = last.address.saturating_add(u64::from(last.byte_len));
+        for target in self.relevant_targets.range(first.address..end) {
+            let preceding = graph
+                .instructions
+                .partition_point(|instruction| instruction.address < *target);
+            if preceding > 0 {
+                let instruction = &graph.instructions[preceding - 1];
+                if instruction
+                    .address
+                    .saturating_add(u64::from(instruction.byte_len))
+                    > *target
+                {
+                    self.interior_targets.insert(*target);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn finish_if_changed(self, index: &FunctionIndex) -> Option<FunctionIndex> {
+        if !self.would_change(index) {
+            return None;
+        }
+        Some(self.finish(index))
+    }
+
+    pub(crate) fn may_change(index: &FunctionIndex) -> bool {
+        index.functions.iter().any(|function| {
+            function_starts_only(function) || can_refine_control_flow_extent(function)
+        }) || index.entry_candidates.iter().any(|candidate| {
+            !candidate.evidence.is_empty()
+                && candidate
+                    .evidence
+                    .iter()
+                    .all(|evidence| evidence.detail == "decoded_alternative_direct_call_target")
+        })
+    }
+
+    fn would_change(&self, index: &FunctionIndex) -> bool {
+        let removes_recovered_data_entry = index.functions.iter().any(|function| {
+            function_starts_only(function)
+                && self
+                    .recovered_table_ranges
+                    .iter()
+                    .any(|(start, _)| *start == function.entry)
+        });
+        let promotes_extent = index.functions.iter().any(|function| {
+            can_refine_control_flow_extent(function)
+                && self.closed_extents.contains_key(&function.entry)
+        });
+        let rejects_alternative = index.entry_candidates.iter().any(|candidate| {
+            let alternative_only = !candidate.evidence.is_empty()
+                && candidate.evidence.iter().all(|evidence| {
+                    evidence.detail == "decoded_alternative_direct_call_target"
+                        && evidence
+                            .source_location
+                            .is_some_and(|source| !self.observed_source_starts.contains(&source))
+                });
+            alternative_only
+                && self.interior_targets.contains(&candidate.address)
+                && (candidate.disposition
+                    != FunctionEntryCandidateDisposition::RejectedAlternativeInterpretation
+                    || candidate.reason
+                        != "self_supporting_alternative_decode_conflicts_with_closed_cfg")
+        });
+        removes_recovered_data_entry || promotes_extent || rejects_alternative
+    }
+
+    pub(crate) fn finish(self, index: &FunctionIndex) -> FunctionIndex {
+        let mut refined = index.clone();
+        let mut rejected_data_entries = Vec::new();
+        refined.functions.retain(|function| {
+            let Some(&(range_start, range_end_exclusive)) = self
+                .recovered_table_ranges
+                .iter()
+                .find(|(start, _)| *start == function.entry)
+            else {
+                return true;
+            };
+            if !function_starts_only(function) {
+                return true;
+            }
+            rejected_data_entries.push(FunctionEntryCandidate {
+                address: function.entry,
+                disposition: FunctionEntryCandidateDisposition::RejectedRecoveredData,
+                reason: "function_starts_entry_is_bounded_jump_table".into(),
+                possible_owners: Vec::new(),
+                evidence: function.evidence.clone(),
+            });
+            debug_assert!(range_end_exclusive > range_start);
+            false
+        });
+        refined.entry_candidates.extend(rejected_data_entries);
+        refined
+            .entry_candidates
+            .sort_by_key(|candidate| candidate.address);
+        for function in &mut refined.functions {
+            if !can_refine_control_flow_extent(function) {
+                continue;
+            }
+            let Some(&end_exclusive) = self.closed_extents.get(&function.entry) else {
+                continue;
+            };
+            function.extent = Some(FunctionExtent {
+                start: function.entry,
+                end_exclusive,
+                confidence: FunctionEvidenceConfidence::Derived,
+            });
+            function.evidence.push(FunctionEvidence {
+                ordinal: function.evidence.len() as u64,
+                source: FunctionEvidenceSource::ControlFlow,
+                roles: vec![FunctionEvidenceRole::Extent],
+                confidence: FunctionEvidenceConfidence::Derived,
+                entry: function.entry,
+                extent_start: Some(function.entry),
+                end_exclusive: Some(end_exclusive),
+                name: None,
+                source_location: Some(function.entry),
+                detail: "entry_reachable_cfg_closed_extent".into(),
+            });
+            function.completeness.extent_is_authoritative = true;
+        }
+        refresh_entry_candidate_ownership(&mut refined.entry_candidates, &refined.functions);
+        for candidate in &mut refined.entry_candidates {
+            let alternative_only = !candidate.evidence.is_empty()
+                && candidate.evidence.iter().all(|evidence| {
+                    evidence.detail == "decoded_alternative_direct_call_target"
+                        && evidence
+                            .source_location
+                            .is_some_and(|source| !self.observed_source_starts.contains(&source))
+                });
+            if alternative_only && self.interior_targets.contains(&candidate.address) {
+                candidate.disposition =
+                    FunctionEntryCandidateDisposition::RejectedAlternativeInterpretation;
+                candidate.reason =
+                    "self_supporting_alternative_decode_conflicts_with_closed_cfg".into();
+            }
+        }
+        refined.shared_ranges = independently_shared_ranges(&refined.functions);
+        refined.ownership = build_ownership(&refined.functions);
+        refined
+    }
+}
+
+fn function_starts_only(function: &RecoveredFunction) -> bool {
+    function.evidence.iter().all(|evidence| {
+        matches!(
+            evidence.source,
+            FunctionEvidenceSource::FunctionStarts | FunctionEvidenceSource::ExecutableSection
+        )
+    }) && function.evidence.iter().any(|evidence| {
+        evidence.source == FunctionEvidenceSource::FunctionStarts
+            && evidence.roles.contains(&FunctionEvidenceRole::Entry)
+    })
+}
+
+fn can_refine_control_flow_extent(function: &RecoveredFunction) -> bool {
+    function.authority == FunctionRecoveryAuthority::Independent
+        && function
+            .extent
+            .is_none_or(|extent| extent.confidence == FunctionEvidenceConfidence::Candidate)
+        && function.conflicts.is_empty()
+}
+
 impl FunctionIndex {
     /// Recover one function inventory using explicit caller-provided limits.
     pub fn recover(
@@ -764,88 +994,11 @@ impl FunctionIndex {
         if control_flow.image() != &self.image {
             return Err(FunctionRecoveryError::EvidenceImageMismatch);
         }
-        let mut refined = self.clone();
-        let recovered_table_ranges = control_flow
-            .functions()
-            .iter()
-            .flat_map(|graph| graph.data_ranges.iter())
-            .filter(|range| range.reason == ControlFlowDataRangeReason::RecoveredJumpTable)
-            .map(|range| (range.start, range.end_exclusive))
-            .collect::<BTreeSet<_>>();
-        let mut rejected_data_entries = Vec::new();
-        refined.functions.retain(|function| {
-            let Some(&(range_start, range_end_exclusive)) = recovered_table_ranges
-                .iter()
-                .find(|(start, _)| *start == function.entry)
-            else {
-                return true;
-            };
-            let function_starts_only = function.evidence.iter().all(|evidence| {
-                matches!(
-                    evidence.source,
-                    FunctionEvidenceSource::FunctionStarts
-                        | FunctionEvidenceSource::ExecutableSection
-                )
-            }) && function.evidence.iter().any(|evidence| {
-                evidence.source == FunctionEvidenceSource::FunctionStarts
-                    && evidence.roles.contains(&FunctionEvidenceRole::Entry)
-            });
-            if !function_starts_only {
-                return true;
-            }
-            rejected_data_entries.push(FunctionEntryCandidate {
-                address: function.entry,
-                disposition: FunctionEntryCandidateDisposition::RejectedRecoveredData,
-                reason: "function_starts_entry_is_bounded_jump_table".into(),
-                possible_owners: Vec::new(),
-                evidence: function.evidence.clone(),
-            });
-            debug_assert!(range_end_exclusive > range_start);
-            false
-        });
-        refined.entry_candidates.extend(rejected_data_entries);
-        refined
-            .entry_candidates
-            .sort_by_key(|candidate| candidate.address);
-        for function in &mut refined.functions {
-            if function.authority != FunctionRecoveryAuthority::Independent
-                || function
-                    .extent
-                    .is_none_or(|extent| extent.confidence != FunctionEvidenceConfidence::Candidate)
-                || !function.conflicts.is_empty()
-            {
-                continue;
-            }
-            let Some(graph) = control_flow.by_entry(function.entry) else {
-                continue;
-            };
-            let Some(end_exclusive) = closed_control_flow_extent(graph, function) else {
-                continue;
-            };
-            function.extent = Some(FunctionExtent {
-                start: function.entry,
-                end_exclusive,
-                confidence: FunctionEvidenceConfidence::Derived,
-            });
-            function.evidence.push(FunctionEvidence {
-                ordinal: function.evidence.len() as u64,
-                source: FunctionEvidenceSource::ControlFlow,
-                roles: vec![FunctionEvidenceRole::Extent],
-                confidence: FunctionEvidenceConfidence::Derived,
-                entry: function.entry,
-                extent_start: Some(function.entry),
-                end_exclusive: Some(end_exclusive),
-                name: None,
-                source_location: Some(function.entry),
-                detail: "entry_reachable_cfg_closed_extent".into(),
-            });
-            function.completeness.extent_is_authoritative = true;
+        let mut refinement = FunctionControlFlowRefinement::new(self);
+        for graph in control_flow.functions() {
+            refinement.observe(self, graph);
         }
-        refresh_entry_candidate_ownership(&mut refined.entry_candidates, &refined.functions);
-        reject_self_supporting_alternatives(&mut refined.entry_candidates, control_flow);
-        refined.shared_ranges = independently_shared_ranges(&refined.functions);
-        refined.ownership = build_ownership(&refined.functions);
-        Ok(refined)
+        Ok(refinement.finish(self))
     }
 
     /// Recovered functions sorted by entry address.
@@ -1873,63 +2026,6 @@ fn refresh_entry_candidate_ownership(
             )
         };
         candidate.possible_owners = owners;
-    }
-}
-
-fn reject_self_supporting_alternatives(
-    candidates: &mut [FunctionEntryCandidate],
-    control_flow: &ControlFlowIndex,
-) {
-    let instruction_starts = control_flow
-        .functions()
-        .iter()
-        .flat_map(|graph| {
-            graph
-                .instructions
-                .iter()
-                .map(|instruction| instruction.address)
-        })
-        .collect::<BTreeSet<_>>();
-    let instruction_ranges = control_flow
-        .functions()
-        .iter()
-        .flat_map(|graph| {
-            graph.instructions.iter().map(|instruction| {
-                (
-                    instruction.address,
-                    instruction
-                        .address
-                        .saturating_add(u64::from(instruction.byte_len)),
-                )
-            })
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let mut prefix_max_end = Vec::with_capacity(instruction_ranges.len());
-    let mut max_end = 0;
-    for (_, end) in &instruction_ranges {
-        max_end = max_end.max(*end);
-        prefix_max_end.push(max_end);
-    }
-    for candidate in candidates {
-        let alternative_only = !candidate.evidence.is_empty()
-            && candidate.evidence.iter().all(|evidence| {
-                evidence.detail == "decoded_alternative_direct_call_target"
-                    && evidence
-                        .source_location
-                        .is_some_and(|source| !instruction_starts.contains(&source))
-            });
-        let preceding_range_count =
-            instruction_ranges.partition_point(|(start, _)| *start < candidate.address);
-        let target_is_instruction_interior = preceding_range_count > 0
-            && prefix_max_end[preceding_range_count - 1] > candidate.address;
-        if alternative_only && target_is_instruction_interior {
-            candidate.disposition =
-                FunctionEntryCandidateDisposition::RejectedAlternativeInterpretation;
-            candidate.reason =
-                "self_supporting_alternative_decode_conflicts_with_closed_cfg".into();
-        }
     }
 }
 
@@ -3871,25 +3967,25 @@ fn collect_direct_calls(macho: &MachoFile<'_>, context: &mut CollectionContext) 
             // discarded when another valid instruction crosses the byte.
             let mut canonical_starts = BTreeSet::new();
             let mut canonical_offset = 0_usize;
+            let mut canonical_decoder = crate::insn::DecodeCursor::new(bytes, span.start, arch);
             while canonical_offset < bytes.len() {
                 canonical_starts.insert(canonical_offset);
-                canonical_offset += crate::insn::decode_one(
-                    &bytes[canonical_offset..],
-                    span.start + canonical_offset as u64,
-                    arch,
-                )
-                .map_or(1, |instruction| {
-                    instruction.len.max(1).min(bytes.len() - canonical_offset)
-                });
+                canonical_offset += canonical_decoder
+                    .probe_direct_call_at(canonical_offset)
+                    .map_or(1, |(length, _)| {
+                        length.max(1).min(bytes.len() - canonical_offset)
+                    });
             }
+            let mut alternative_decoder = crate::insn::DecodeCursor::new(bytes, span.start, arch);
             for offset in 0..bytes.len() {
                 let va = span.start + offset as u64;
-                let Ok(instruction) = crate::insn::decode_one(&bytes[offset..], va, arch) else {
+                if !crate::insn::could_start_direct_call(&bytes[offset..], arch) {
+                    continue;
+                }
+                let Ok((_, target)) = alternative_decoder.probe_direct_call_at(offset) else {
                     continue;
                 };
-                if let InsnKind::Call(_) = instruction.kind
-                    && let Some(target) = crate::insn::resolve_branch_target(&instruction, va)
-                {
+                if let Some(target) = target {
                     if context.retained(source) as usize >= context.limits.max_evidence_per_source {
                         evidence_limited = true;
                         break;
@@ -4000,6 +4096,16 @@ mod tests {
             crate::core::model::container::MachoContainer::Thin(macho) => macho,
             crate::core::model::container::MachoContainer::Fat(_) => panic!("expected thin image"),
         }
+    }
+
+    #[test]
+    fn exact_image_digest_is_cached_per_parsed_image() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let macho = image(&bytes);
+        let first = FunctionImageIdentity::from_macho(&macho);
+        let cached = macho.content_sha256(|| panic!("digest was recomputed"));
+        assert_eq!(cached, first.content_sha256);
+        assert_eq!(first, FunctionImageIdentity::from_macho(&macho));
     }
 
     #[test]

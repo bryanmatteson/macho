@@ -1,10 +1,9 @@
 #![cfg(feature = "cli")]
 
-//! F1 collected-equality: the NDJSON stream the CLI writes under `--format json`
-//! losslessly encodes the materialized `DisassemblyReport`. For every fixture and
-//! request used by the suite, reassembling the report from the stream lines must
-//! equal `macho::analysis::disassembly::disassemble(&container, &request)` for
-//! the same request.
+//! The NDJSON contract is an instruction projection, not a serialized
+//! `DisassemblyReport`. Every output line must correspond one-for-one with a
+//! decoded instruction from the materialized API; report framing and recovery
+//! gaps are intentionally absent.
 
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -14,31 +13,24 @@ use macho::cli::analysis::disassembly::{
     AddressExtent, DecodeMode, DisassemblyRequest, DisassemblySelection, NonEmpty, SectionSelector,
     SliceSelection, disassemble,
 };
-use macho::cli::analysis::report::disassembly::{
-    DisassemblyIssue, DisassemblyLabel, DisassemblyRecord, DisassemblyRegion, DisassemblyReport,
-    DisassemblyReportRequest, DisassemblySchemaVersion, DisassemblySlice, DisassemblyStatus,
-    InstructionFlags, RangeEndSource, SelectionSource, SymbolSource,
-};
-use macho::cli::analysis::report::{Architecture, ReportContainerIdentity, ReportSliceIdentity};
+use macho::cli::analysis::report::Architecture;
+use macho::cli::analysis::report::disassembly::DisassemblyRecord;
 use macho::cli::model::addr::Va;
-use serde::Deserialize;
 
 fn fixture_path(name: &str, bytes: &[u8]) -> PathBuf {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("time moved forward")
+        .expect("time moved backwards")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("macho-collected-{name}-{nonce}"));
+    let path = std::env::temp_dir().join(format!("macho-instruction-stream-{name}-{nonce}"));
     std::fs::write(&path, bytes).expect("write fixture");
     path
 }
 
-/// The default per-slice examined-byte limit the CLI applies (`--max-decoded-bytes`).
 fn default_max_decoded_bytes() -> NonZeroUsize {
     NonZeroUsize::new(67_108_864).unwrap()
 }
 
-/// The default per-slice symbol-observation limit the CLI applies (`--max-ranges`).
 fn default_max_ranges() -> NonZeroUsize {
     NonZeroUsize::new(1_000_000).unwrap()
 }
@@ -61,9 +53,6 @@ fn sections(pairs: &[(&str, &str)]) -> DisassemblySelection {
     )
 }
 
-/// One fixture, the CLI arguments that select it, and the equivalent request the
-/// materialized API receives. The two must stay in lockstep; drift surfaces as a
-/// report inequality, never as a silent pass.
 struct Case {
     name: &'static str,
     bytes: Vec<u8>,
@@ -175,205 +164,8 @@ fn cases() -> Vec<Case> {
     ]
 }
 
-/// One decoded NDJSON stream line. Mirrors the CLI emitter so the payload of each
-/// event deserializes straight into the real report DTOs.
-#[derive(Deserialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-enum StreamLine {
-    Header {
-        schema_version: DisassemblySchemaVersion,
-        container: ReportContainerIdentity,
-        request: DisassemblyReportRequest,
-    },
-    Slice {
-        identity: ReportSliceIdentity,
-        container_offset: u64,
-        slice_size: u64,
-    },
-    Region {
-        segment: String,
-        section: String,
-        selection_source: SelectionSource,
-        range_source: Option<SymbolSource>,
-        end_source: Option<RangeEndSource>,
-        start_va: u64,
-        requested_end_va: Option<u64>,
-        requested_instruction_count: Option<u64>,
-        instruction_flags: InstructionFlags,
-    },
-    Record {
-        record: DisassemblyRecord,
-    },
-    Label {
-        label: DisassemblyLabel,
-    },
-    RegionEnd {
-        emitted_instruction_count: u64,
-        examined_end_va: u64,
-        next_unexamined_va: Option<u64>,
-    },
-    SliceEnd {
-        status: DisassemblyStatus,
-        decoded_bytes: u64,
-        decoded_bytes_truncated: bool,
-        symbol_ranges_truncated: bool,
-    },
-    Issue {
-        issue: DisassemblyIssue,
-    },
-}
-
-/// Region header fields carried until the matching `region_end` completes them.
-struct RegionParts {
-    segment: String,
-    section: String,
-    selection_source: SelectionSource,
-    range_source: Option<SymbolSource>,
-    end_source: Option<RangeEndSource>,
-    start_va: u64,
-    requested_end_va: Option<u64>,
-    requested_instruction_count: Option<u64>,
-    instruction_flags: InstructionFlags,
-    labels: Vec<DisassemblyLabel>,
-    records: Vec<DisassemblyRecord>,
-}
-
-/// Reassemble a `DisassemblyReport` purely from the ordered NDJSON stream.
-fn reassemble(stdout: &[u8]) -> DisassemblyReport {
-    let mut schema_version: Option<DisassemblySchemaVersion> = None;
-    let mut container: Option<ReportContainerIdentity> = None;
-    let mut request: Option<DisassemblyReportRequest> = None;
-    let mut slices: Vec<DisassemblySlice> = Vec::new();
-
-    let mut slice_identity: Option<(ReportSliceIdentity, u64, u64)> = None;
-    let mut slice_regions: Vec<DisassemblyRegion> = Vec::new();
-    let mut region: Option<RegionParts> = None;
-
-    for raw in stdout
-        .split(|byte| *byte == b'\n')
-        .filter(|line| !line.is_empty())
-    {
-        match serde_json::from_slice::<StreamLine>(raw).expect("each line is a valid stream event")
-        {
-            StreamLine::Header {
-                schema_version: version,
-                container: identity,
-                request: echoed,
-            } => {
-                schema_version = Some(version);
-                container = Some(identity);
-                request = Some(echoed);
-            }
-            StreamLine::Slice {
-                identity,
-                container_offset,
-                slice_size,
-            } => {
-                slice_identity = Some((identity, container_offset, slice_size));
-                slice_regions = Vec::new();
-            }
-            StreamLine::Region {
-                segment,
-                section,
-                selection_source,
-                range_source,
-                end_source,
-                start_va,
-                requested_end_va,
-                requested_instruction_count,
-                instruction_flags,
-            } => {
-                region = Some(RegionParts {
-                    segment,
-                    section,
-                    selection_source,
-                    range_source,
-                    end_source,
-                    start_va,
-                    requested_end_va,
-                    requested_instruction_count,
-                    instruction_flags,
-                    labels: Vec::new(),
-                    records: Vec::new(),
-                });
-            }
-            StreamLine::Record { record: value } => {
-                region
-                    .as_mut()
-                    .expect("a region precedes every record")
-                    .records
-                    .push(value);
-            }
-            StreamLine::Label { label } => {
-                region
-                    .as_mut()
-                    .expect("a region precedes every label")
-                    .labels
-                    .push(label);
-            }
-            StreamLine::RegionEnd {
-                emitted_instruction_count,
-                examined_end_va,
-                next_unexamined_va,
-            } => {
-                let parts = region.take().expect("a region precedes region_end");
-                slice_regions.push(DisassemblyRegion {
-                    segment: parts.segment,
-                    section: parts.section,
-                    selection_source: parts.selection_source,
-                    range_source: parts.range_source,
-                    end_source: parts.end_source,
-                    start_va: parts.start_va,
-                    requested_end_va: parts.requested_end_va,
-                    requested_instruction_count: parts.requested_instruction_count,
-                    emitted_instruction_count,
-                    examined_end_va,
-                    next_unexamined_va,
-                    instruction_flags: parts.instruction_flags,
-                    labels: parts.labels,
-                    records: parts.records,
-                });
-            }
-            StreamLine::SliceEnd {
-                status,
-                decoded_bytes,
-                decoded_bytes_truncated,
-                symbol_ranges_truncated,
-            } => {
-                let (identity, container_offset, slice_size) =
-                    slice_identity.take().expect("a slice precedes slice_end");
-                slices.push(DisassemblySlice {
-                    identity,
-                    container_offset,
-                    slice_size,
-                    status,
-                    decoded_bytes,
-                    decoded_bytes_truncated,
-                    symbol_ranges_truncated,
-                    regions: std::mem::take(&mut slice_regions),
-                    issues: Vec::new(),
-                });
-            }
-            StreamLine::Issue { issue } => {
-                slices
-                    .last_mut()
-                    .expect("slice_end precedes its issues")
-                    .issues
-                    .push(issue);
-            }
-        }
-    }
-
-    DisassemblyReport {
-        schema_version: schema_version.expect("the stream begins with a header"),
-        container: container.expect("the stream begins with a header"),
-        request: request.expect("the stream begins with a header"),
-        slices,
-    }
-}
-
 #[test]
-fn ndjson_stream_reassembles_to_the_materialized_report() {
+fn ndjson_stream_is_a_one_line_per_instruction_projection() {
     for case in cases() {
         let path = fixture_path(case.name, &case.bytes);
         let mut args = vec!["disassemble".to_owned(), path.to_str().unwrap().to_owned()];
@@ -393,18 +185,75 @@ fn ndjson_stream_reassembles_to_the_materialized_report() {
         );
         assert!(output.stderr.is_empty(), "{}: unexpected stderr", case.name);
 
-        let streamed = reassemble(&output.stdout);
+        let lines = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<serde_json::Value>(line).unwrap())
+            .collect::<Vec<_>>();
 
         let container = macho::cli::parse(&case.bytes).expect("fixture parses");
-        let materialized =
-            disassemble(&container, &case.request).expect("materialized disassembly succeeds");
+        let report = disassemble(&container, &case.request).expect("materialized disassembly");
+        let expected = report
+            .slices
+            .iter()
+            .flat_map(|slice| &slice.regions)
+            .flat_map(|region| {
+                region
+                    .records
+                    .iter()
+                    .filter_map(move |record| match record {
+                        DisassemblyRecord::Instruction { .. } => Some((region, record)),
+                        DisassemblyRecord::Gap { .. } => None,
+                    })
+            })
+            .collect::<Vec<_>>();
 
-        assert_eq!(
-            streamed, materialized,
-            "{}: the NDJSON stream must reassemble to the materialized report",
-            case.name
-        );
+        assert_eq!(lines.len(), expected.len(), "{}", case.name);
+        for (line, (region, record)) in lines.iter().zip(expected) {
+            let DisassemblyRecord::Instruction {
+                va,
+                thin_file_offset,
+                container_file_offset,
+                size,
+                bytes,
+                kind,
+                direct_target,
+                ..
+            } = record
+            else {
+                unreachable!()
+            };
 
-        std::fs::remove_file(&path).unwrap();
+            assert_eq!(line["schema_version"], 1);
+            assert!(line.get("event").is_none(), "{}", case.name);
+            assert!(line.get("text").is_none(), "{}", case.name);
+            assert_eq!(line["va"], *va);
+            assert_eq!(line["thin_file_offset"], *thin_file_offset);
+            assert_eq!(line["container_file_offset"], *container_file_offset);
+            assert_eq!(line["size"], *size);
+            assert_eq!(line["bytes"], bytes.as_str());
+            assert_eq!(line["kind"], serde_json::to_value(kind).unwrap());
+            assert!(
+                line["mnemonic"]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty())
+            );
+            assert!(line["operands"].is_array());
+            assert!(line["architecture"]["name"].is_string());
+            assert!(line["architecture"]["cpu_type"].is_i64());
+            assert!(line["architecture"]["cpu_subtype"].is_i64());
+            assert_eq!(line["metadata"]["segment"], region.segment);
+            assert_eq!(line["metadata"]["section"], region.section);
+            assert_eq!(
+                line["metadata"].get("target"),
+                direct_target
+                    .as_ref()
+                    .map(|target| serde_json::to_value(target).unwrap())
+                    .as_ref()
+            );
+        }
+
+        std::fs::remove_file(path).unwrap();
     }
 }

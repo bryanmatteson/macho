@@ -449,6 +449,21 @@ mod tests {
     }
 
     #[test]
+    fn relocate_x86_64_out_of_range_fails() {
+        let bytes = [0xE8, 0x00, 0x00, 0x00, 0x00];
+        assert!(relocate_insn(&bytes, 0, 0x1_0000_0000, Arch::X86_64).is_err());
+    }
+
+    #[test]
+    fn relocate_x86_64_non_pc_relative_preserves_bytes() {
+        let bytes = [0x48, 0x01, 0xC8];
+        assert_eq!(
+            relocate_insn(&bytes, 0x1000, 0x2000, Arch::X86_64).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
     fn relocate_identity_arm64() {
         let original = crate::insn::arm64::encode_branch_insn(0x4000, 0x4100, true).unwrap();
         let result = relocate_insn(&original, 0x4000, 0x4000, Arch::Arm64).unwrap();

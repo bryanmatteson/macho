@@ -1,7 +1,29 @@
 # Changelog
 
-## Unreleased
+## 1.0.0
 
+- Make `disassemble --format json` a strict instruction-only NDJSON stream:
+  every line is one self-contained decoded instruction with architecture,
+  location, mnemonic, operands, classification, and instruction-local symbol
+  and target metadata; report framing, gaps, and issues are never mixed into
+  stdout.
+
+- Reduce large-binary analysis cost without changing deterministic output:
+  buffered disassembly lowers bounded wall time by 40.9%, compact control-flow
+  storage lowers peak memory by 21.1%, and refinement-aware xref recovery lowers
+  bounded wall time by 16.0% while retaining full function, jump-table,
+  indirect-call, and shared-tail semantics.
+
+- Add bounded arm64e PAC analysis with key/diversity inventory, authenticated
+  versus plain pointer maps, evidence-tagged PAC instruction and authenticated
+  transfer recovery (including separated authenticate-then-branch gadgets),
+  lossless dyld provenance, and versioned text/JSON reports. arm64e detour
+  planning now preserves entry BTI, materializes far addresses without a raw
+  pointer literal, reports source/destination PAC and BTI contracts by default,
+  and can fail closed with `--pac-policy require` when the contract or evidence
+  is insufficient. PAC code scanning uses an AArch64 word prefilter so ordinary
+  instructions remain conservative evidence barriers without paying full
+  decode-and-format cost.
 - Consolidate every shipped library and CLI capability into the single
   feature-gated `macho` package. Parsing, instructions, metadata, shared-cache
   support, analysis, mutation, evidence, workflow, and CLI delivery remain

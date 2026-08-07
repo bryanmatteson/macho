@@ -144,6 +144,7 @@ fn validate_slice(
     }
     let mut decoded = 0u64;
     let mut has_gap = false;
+    let mut has_opaque_instruction = false;
     let mut previous_end = None;
     let mut has_unexamined = false;
     for region in &slice.regions {
@@ -158,6 +159,13 @@ fn validate_slice(
                 .checked_add(record.byte_len())
                 .ok_or_else(|| invalid("decoded byte count overflows"))?;
             has_gap |= matches!(record, DisassemblyRecord::Gap { .. });
+            has_opaque_instruction |= matches!(
+                record,
+                DisassemblyRecord::Instruction {
+                    encoding: Some(_),
+                    ..
+                }
+            );
         }
     }
     if decoded != slice.decoded_bytes {
@@ -180,6 +188,7 @@ fn validate_slice(
         ));
     }
     let partial = has_gap
+        || has_opaque_instruction
         || !slice.issues.is_empty()
         || slice.decoded_bytes_truncated
         || slice.symbol_ranges_truncated;
@@ -292,7 +301,12 @@ fn validate_region(
         if let DisassemblyRecord::Gap { code, .. } = record
             && !matches!(
                 code.as_str(),
-                "insn.decode.invalid" | "analysis.disassembly.selection.partial_instruction"
+                "insn.decode.invalid"
+                    | "insn.decode.invalid_encoding"
+                    | "insn.decode.unknown_encoding"
+                    | "insn.decode.truncated"
+                    | "insn.decode.too_long"
+                    | "analysis.disassembly.selection.partial_instruction"
             )
         {
             return Err(invalid("gap code is not defined by schema version 2"));
@@ -328,6 +342,7 @@ fn validate_region(
             bytes,
             kind,
             direct_target,
+            encoding,
             ..
         } = record
         {
@@ -357,6 +372,16 @@ fn validate_region(
                 .count();
                 if option_count != 0 && option_count != 4 {
                     return Err(invalid("direct target symbol fields are not all-or-none"));
+                }
+            }
+            if let Some(encoding) = encoding {
+                if *kind != InstructionKind::Other || direct_target.is_some() {
+                    return Err(invalid(
+                        "opaque instruction encoding must not carry authoritative semantics",
+                    ));
+                }
+                if encoding.source.is_empty() {
+                    return Err(invalid("opaque instruction encoding source is empty"));
                 }
             }
         }

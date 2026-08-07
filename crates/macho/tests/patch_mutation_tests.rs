@@ -14,6 +14,27 @@ fn stdout_json(output: &support::CliOutput) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("JSON report")
 }
 
+fn arm64e_far_detour_fixture(destination_instruction: u32) -> Vec<u8> {
+    let mut bytes = macho_test_support::disassembly_arm64e();
+    // Replace LC_SYMTAB with a tiny executable segment beyond B's signed
+    // 28-bit byte range. It fits in existing load-command slack.
+    let far_file_offset = bytes.len() as u64;
+    bytes.extend_from_slice(&destination_instruction.to_le_bytes());
+    let command = 32 + (72 + 80);
+    bytes[20..24].copy_from_slice(&224_u32.to_le_bytes());
+    bytes[command..command + 72].fill(0);
+    bytes[command..command + 4].copy_from_slice(&0x19_u32.to_le_bytes());
+    bytes[command + 4..command + 8].copy_from_slice(&72_u32.to_le_bytes());
+    bytes[command + 8..command + 13].copy_from_slice(b"__FAR");
+    bytes[command + 24..command + 32].copy_from_slice(&0x1_1000_0100_u64.to_le_bytes());
+    bytes[command + 32..command + 40].copy_from_slice(&4_u64.to_le_bytes());
+    bytes[command + 40..command + 48].copy_from_slice(&far_file_offset.to_le_bytes());
+    bytes[command + 48..command + 56].copy_from_slice(&4_u64.to_le_bytes());
+    bytes[command + 56..command + 60].copy_from_slice(&5_u32.to_le_bytes());
+    bytes[command + 60..command + 64].copy_from_slice(&5_u32.to_le_bytes());
+    bytes
+}
+
 #[test]
 fn file_section_is_reparsed_and_preview_reports_final_placement() {
     let input_bytes = macho_test_support::signable_thin64_x86_64(2);
@@ -233,6 +254,148 @@ fn valid_multi_instruction_x86_detour_uses_exact_planner_bytes() {
     );
     assert_eq!(&output_bytes[..0x400], &input_bytes[..0x400]);
     let _ = std::fs::remove_file(output_path);
+}
+
+#[test]
+fn arm64e_detour_preview_carries_compatible_pac_assessment() {
+    let input = write_macho_fixture(
+        &macho_test_support::disassembly_arm64e(),
+        "arm64e-detour-pac",
+        false,
+    );
+    let output = run_cli([
+        "patch",
+        "--format",
+        "json",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x100000104,4",
+        "--pac-policy",
+        "require",
+        "--dry-run",
+    ]);
+    let report = stdout_json(&output);
+    let detail = &report["data"]["previews"][0]["operation_details"][0];
+    assert_eq!(detail["arch"], "arm64e");
+    assert_eq!(detail["pac"]["verdict"], "compatible");
+    assert_eq!(detail["pac"]["findings"], serde_json::json!([]));
+}
+
+#[test]
+fn arm64e_detour_can_explicitly_disable_pac_reporting() {
+    let input = write_macho_fixture(
+        &macho_test_support::disassembly_arm64e(),
+        "arm64e-detour-pac-off",
+        false,
+    );
+    let output = run_cli([
+        "patch",
+        "--format",
+        "json",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x100000104,4",
+        "--pac-policy",
+        "off",
+        "--dry-run",
+    ]);
+    let report = stdout_json(&output);
+    let detail = &report["data"]["previews"][0]["operation_details"][0];
+    assert!(detail.get("pac").is_none());
+}
+
+#[test]
+fn arm64e_detour_preserves_existing_bti_entry_contract() {
+    let mut bytes = macho_test_support::disassembly_arm64e();
+    bytes[0x100..0x104].copy_from_slice(&0xD503_245F_u32.to_le_bytes()); // bti c
+    let input = write_macho_fixture(&bytes, "arm64e-detour-bti", false);
+    let output = run_cli([
+        "patch",
+        "--format",
+        "json",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x100000120,8",
+        "--pac-policy",
+        "require",
+        "--dry-run",
+    ]);
+    let report = stdout_json(&output);
+    let detail = &report["data"]["previews"][0]["operation_details"][0];
+    assert!(
+        detail["replacement_bytes"]
+            .as_str()
+            .unwrap()
+            .starts_with("5f2403d5")
+    );
+    assert_eq!(detail["pac"]["source_contract"]["bti"], "call");
+    assert_eq!(detail["pac"]["mechanism"]["preserves_entry_bti"], true);
+    assert_eq!(detail["pac"]["verdict"], "compatible");
+}
+
+#[test]
+fn arm64e_required_policy_rejects_lost_return_address_contract() {
+    let mut bytes = macho_test_support::disassembly_arm64e();
+    bytes[0x100..0x104].copy_from_slice(&0xD503_233F_u32.to_le_bytes()); // paciasp
+    let input = write_macho_fixture(&bytes, "arm64e-detour-return-contract", false);
+    let output = run_cli([
+        "patch",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x100000108,4",
+        "--pac-policy",
+        "require",
+        "--dry-run",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pac.detour.return_address_contract_not_preserved"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn arm64e_required_pac_policy_rejects_far_destination_without_bti() {
+    let bytes = arm64e_far_detour_fixture(0xD503_201F); // nop
+    let input = write_macho_fixture(&bytes, "arm64e-detour-pac-far", false);
+    let output = run_cli([
+        "patch",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x110000100,20",
+        "--pac-policy",
+        "require",
+        "--dry-run",
+    ]);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("pac.detour.indirect_destination_bti_unproven"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn arm64e_required_pac_policy_accepts_materialized_far_jump_to_bti() {
+    let bytes = arm64e_far_detour_fixture(0xD503_249F); // bti j
+    let input = write_macho_fixture(&bytes, "arm64e-detour-pac-far-bti", false);
+    let output = run_cli([
+        "patch",
+        "--format",
+        "json",
+        input.path().to_str().expect("path"),
+        "--detour",
+        "0x100000100,0x110000100,20",
+        "--pac-policy",
+        "require",
+        "--dry-run",
+    ]);
+    let report = stdout_json(&output);
+    let detail = &report["data"]["previews"][0]["operation_details"][0];
+    assert_eq!(detail["encoding"], "arm64e_materialized_address");
+    assert_eq!(detail["pac"]["verdict"], "compatible");
+    assert_eq!(detail["pac"]["destination_contract"]["bti"], "jump");
 }
 
 #[test]

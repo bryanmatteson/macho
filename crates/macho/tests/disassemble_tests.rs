@@ -41,9 +41,23 @@ fn ndjson(stdout: &[u8]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Borrow every line whose `event` tag equals `event`, in emission order.
-fn events<'a>(lines: &'a [serde_json::Value], event: &str) -> Vec<&'a serde_json::Value> {
-    lines.iter().filter(|line| line["event"] == event).collect()
+fn assert_instruction_lines(lines: &[serde_json::Value]) {
+    for line in lines {
+        assert_eq!(line["schema_version"], 1);
+        assert!(line.get("event").is_none());
+        assert!(line.get("record").is_none());
+        assert!(line.get("record_type").is_none());
+        assert!(line.get("text").is_none());
+        assert!(line["architecture"]["name"].is_string());
+        assert!(line["architecture"]["cpu_type"].is_i64());
+        assert!(line["architecture"]["cpu_subtype"].is_i64());
+        assert!(line["va"].is_u64());
+        assert!(line["bytes"].is_string());
+        assert!(line["mnemonic"].is_string());
+        assert!(line["operands"].is_array());
+        assert!(line["metadata"]["segment"].is_string());
+        assert!(line["metadata"]["section"].is_string());
+    }
 }
 
 fn assert_json_error(path: &str, extra: &[&str], expected_code: &str, expected_exit: u8) {
@@ -84,7 +98,7 @@ fn help_is_canonical_and_documents_defaults_and_examples() {
 }
 
 #[test]
-fn thin_x86_64_default_selection_has_text_and_gap_json_goldens() {
+fn thin_x86_64_json_is_only_self_contained_instruction_lines() {
     let path = fixture_path(
         "thin-x86-default",
         &macho_test_support::disassembly_x86_64(),
@@ -112,24 +126,88 @@ fn thin_x86_64_default_selection_has_text_and_gap_json_goldens() {
     ]);
     assert_eq!(json.code, 0, "{}", String::from_utf8_lossy(&json.stderr));
     assert!(json.stderr.is_empty());
-    assert_eq!(
-        json.stdout,
-        include_str!("goldens/disassemble-thin-x86-default.json").as_bytes()
-    );
     let lines = ndjson(&json.stdout);
-    let gap = events(&lines, "record")
-        .into_iter()
-        .map(|line| &line["record"])
-        .find(|record| record["record_type"] == "gap")
-        .expect("recovering output must retain the invalid trailing byte as a gap");
-    assert_eq!(gap["bytes"], "0f");
-    assert_eq!(gap["code"], "insn.decode.invalid");
-    assert_eq!(gap["message"], "decode: invalid instruction");
+    assert_instruction_lines(&lines);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().all(|line| line["bytes"] != "0f"));
+    assert_eq!(lines[0]["mnemonic"], "jmp");
+    assert_eq!(lines[0]["operands"], serde_json::json!(["0x100000104"]));
+    assert_eq!(lines[0]["metadata"]["labels"][0]["raw_name"], "_main");
+    assert_eq!(lines[0]["metadata"]["target"]["raw_symbol"], "_helper");
     std::fs::remove_file(path).unwrap();
 }
 
 #[test]
-fn empty_executable_selection_has_a_complete_machine_and_text_shape() {
+fn ndjson_excludes_reserved_x86_bytes_and_resumes_at_local_instruction() {
+    let mut bytes = macho_test_support::disassembly_x86_64();
+    bytes[0x100..0x104].copy_from_slice(&[0x0f, 0xa7, 0xc1, 0x90]);
+    let path = fixture_path("opaque-x86", &bytes);
+    let output = macho::cli::run_captured([
+        "disassemble",
+        path.to_str().unwrap(),
+        "--address",
+        "0x100000100",
+        "--length",
+        "4",
+        "--format",
+        "json",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(
+        output.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let lines = ndjson(&output.stdout);
+    assert_instruction_lines(&lines);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["bytes"], "90");
+    assert_eq!(lines[0]["mnemonic"], "nop");
+    assert!(lines[0]["metadata"].get("encoding").is_none());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn ndjson_marks_exact_boundary_arm64_formatter_recovery() {
+    let mut bytes = macho_test_support::disassembly_arm64();
+    bytes[0x100..0x104].copy_from_slice(&0x0001_0000u32.to_le_bytes());
+    let path = fixture_path("opaque-arm64", &bytes);
+    let output = macho::cli::run_captured([
+        "disassemble",
+        path.to_str().unwrap(),
+        "--address",
+        "0x100000100",
+        "--count",
+        "1",
+        "--format",
+        "json",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(
+        output.code,
+        0,
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = ndjson(&output.stdout);
+    assert_instruction_lines(&lines);
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["mnemonic"], ".inst");
+    assert_eq!(lines[0]["metadata"]["encoding"]["status"], "unknown");
+    assert_eq!(
+        lines[0]["metadata"]["encoding"]["boundary_confidence"],
+        "exact"
+    );
+    assert_eq!(lines[0]["metadata"]["encoding"]["source"], "architecture");
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn empty_executable_selection_has_empty_machine_output() {
     let path = fixture_path("empty", &macho_test_support::thin64_x86_64(2));
     let text =
         macho::cli::run_captured(["disassemble", path.to_str().unwrap(), "--color", "never"]);
@@ -143,14 +221,9 @@ fn empty_executable_selection_has_a_complete_machine_and_text_shape() {
         "--color",
         "never",
     ]);
-    let lines = ndjson(&json.stdout);
     assert_eq!(json.code, 0);
-    let slice_ends = events(&lines, "slice_end");
-    assert_eq!(slice_ends.len(), 1);
-    assert_eq!(slice_ends[0]["status"], "complete");
-    // No executable sections means the slice carries no region and no record.
-    assert!(events(&lines, "region").is_empty());
-    assert!(events(&lines, "record").is_empty());
+    assert!(json.stderr.is_empty());
+    assert!(json.stdout.is_empty());
     std::fs::remove_file(path).unwrap();
 }
 
@@ -357,8 +430,18 @@ fn section_symbol_and_address_failures_keep_exact_codes_and_channels() {
         "never",
     ]);
     assert_eq!(repeated.code, 0);
-    let lines = ndjson(&repeated.stdout);
-    assert_eq!(events(&lines, "region").len(), 1);
+    let single_section = macho::cli::run_captured([
+        "disassemble",
+        x86,
+        "--section",
+        "__TEXT,__text",
+        "--format",
+        "json",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(repeated.stdout, single_section.stdout);
+    assert_instruction_lines(&ndjson(&repeated.stdout));
 
     let repeated_symbols = macho::cli::run_captured([
         "disassemble",
@@ -375,13 +458,20 @@ fn section_symbol_and_address_failures_keep_exact_codes_and_channels() {
         "never",
     ]);
     assert_eq!(repeated_symbols.code, 0);
-    let lines = ndjson(&repeated_symbols.stdout);
-    let header = events(&lines, "header");
-    assert_eq!(
-        header[0]["request"]["selection"]["names"],
-        serde_json::json!(["_helper", "_main"])
-    );
-    assert_eq!(events(&lines, "region").len(), 2);
+    let unique_symbols = macho::cli::run_captured([
+        "disassemble",
+        x86,
+        "--symbol",
+        "_helper",
+        "--symbol",
+        "_main",
+        "--format",
+        "json",
+        "--color",
+        "never",
+    ]);
+    assert_eq!(repeated_symbols.stdout, unique_symbols.stdout);
+    assert_instruction_lines(&ndjson(&repeated_symbols.stdout));
 
     assert_json_error(
         x86,
@@ -526,24 +616,18 @@ fn recovering_text_json_and_color_share_one_report() {
         "never",
     ]);
     let lines = ndjson(&json.stdout);
-    // D1: the enveloped `{command, ok, data}` document is gone; success is a
-    // zero exit with a clean stderr and a well-formed NDJSON stream whose header
-    // carries the schema version the old `data.schema_version` asserted.
     assert_eq!(json.code, 0);
     assert!(json.stderr.is_empty());
-    let header = events(&lines, "header");
-    assert_eq!(header.len(), 1);
-    assert_eq!(header[0]["schema_version"], 2);
-    assert_eq!(events(&lines, "region")[0]["selection_source"], "address");
-    assert_eq!(
-        json.stdout,
-        include_str!("goldens/disassemble-address-count2.json").as_bytes()
-    );
+    assert_instruction_lines(&lines);
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["va"], 0x1_0000_0100_u64);
+    assert_eq!(lines[0]["mnemonic"], "jmp");
+    assert_eq!(lines[1]["mnemonic"], "nop");
     std::fs::remove_file(path).unwrap();
 }
 
 #[test]
-fn objc_boundary_parser_path_has_text_and_json_goldens() {
+fn objc_boundary_parser_path_has_text_and_instruction_json() {
     let path = fixture_path(
         "objc-boundary",
         &macho_test_support::disassembly_objc_boundary(),
@@ -572,12 +656,14 @@ fn objc_boundary_parser_path_has_text_and_json_goldens() {
         text.stdout,
         include_str!("goldens/disassemble-objc-boundary.txt").as_bytes()
     );
-    assert_eq!(
-        json.stdout,
-        include_str!("goldens/disassemble-objc-boundary.json").as_bytes()
-    );
     let lines = ndjson(&json.stdout);
-    assert_eq!(events(&lines, "region")[0]["end_source"], "objc_metadata");
+    assert_instruction_lines(&lines);
+    assert!(!lines.is_empty());
+    assert!(lines.iter().any(|line| {
+        line["metadata"]["labels"]
+            .as_array()
+            .is_some_and(|labels| labels.iter().any(|label| label["raw_name"] == "_main"))
+    }));
     std::fs::remove_file(path).unwrap();
 }
 
@@ -595,21 +681,17 @@ fn strict_failure_streams_a_typed_prefix_in_both_io_routes() {
     ];
     let captured = macho::cli::run_captured(args);
     assert_eq!(captured.code, 1);
-    // D3: a stream cannot retract already-written lines, so the records decoded
-    // before the invalid byte precede the typed error on stdout. The prefix is
-    // well-formed NDJSON and, because strict aborts instead of recovering, it
-    // never contains the invalid byte as a gap record.
+    // A stream cannot retract instructions already written before strict mode
+    // reaches an invalid byte. The prefix remains instruction-only NDJSON.
     assert!(!captured.stdout.is_empty());
     let lines = ndjson(&captured.stdout);
-    assert!(!events(&lines, "record").is_empty());
-    assert!(
-        !events(&lines, "record")
-            .iter()
-            .any(|line| line["record"]["record_type"] == "gap"),
-        "strict mode must abort on the invalid byte, not emit it as a gap"
-    );
+    assert_instruction_lines(&lines);
+    assert!(lines.iter().all(|line| line["bytes"] != "0f"));
     let diagnostic: serde_json::Value = serde_json::from_slice(&captured.stderr).unwrap();
-    assert_eq!(diagnostic["diagnostics"][0]["code"], "insn.decode.invalid");
+    assert_eq!(
+        diagnostic["diagnostics"][0]["code"],
+        "insn.decode.truncated"
+    );
 
     let process = Command::new(env!("CARGO_BIN_EXE_macho"))
         .args(args)
@@ -690,11 +772,12 @@ fn fat_requires_arch_for_addresses_and_raw_tuple_selects_exactly() {
         String::from_utf8_lossy(&selected.stderr)
     );
     let lines = ndjson(&selected.stdout);
-    let slices = events(&lines, "slice");
-    assert_eq!(slices.len(), 1);
-    assert_eq!(
-        slices[0]["identity"]["image"]["architecture"]["cpu_subtype"],
-        2
+    assert_instruction_lines(&lines);
+    assert!(!lines.is_empty());
+    assert!(
+        lines
+            .iter()
+            .all(|line| line["architecture"]["cpu_subtype"] == 2)
     );
     std::fs::remove_file(path).unwrap();
 }
@@ -720,43 +803,25 @@ fn fat_all_slice_json_order_offsets_and_process_route_are_stable() {
         String::from_utf8_lossy(&captured.stderr)
     );
     let lines = ndjson(&captured.stdout);
-    assert_eq!(
-        captured.stdout,
-        include_str!("goldens/disassemble-fat-all.json").as_bytes()
-    );
-    let slices = events(&lines, "slice");
-    assert_eq!(slices.len(), 2);
-    assert_eq!(
-        slices[0]["identity"]["image"]["architecture"]["cpu_type"],
-        0x0100_0007
-    );
-    assert_eq!(
-        slices[1]["identity"]["image"]["architecture"]["cpu_type"],
-        0x0100_000c
-    );
-    // Walk the ordered stream: every record's container_file_offset equals its
-    // owning slice's container_offset plus its thin_file_offset.
-    let mut container_offset: Option<u64> = None;
-    let mut records_checked = 0usize;
+    assert_instruction_lines(&lines);
+    let mut slice_identities = lines
+        .iter()
+        .map(|line| {
+            (
+                line["slice_index"].as_u64().unwrap(),
+                line["architecture"]["cpu_type"].as_i64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    slice_identities.dedup();
+    assert_eq!(slice_identities, [(0, 0x0100_0007), (1, 0x0100_000c)]);
+    let mut bases = std::collections::BTreeMap::new();
     for line in &lines {
-        match line["event"].as_str().unwrap() {
-            "slice" => container_offset = Some(line["container_offset"].as_u64().unwrap()),
-            "record" => {
-                let base = container_offset.expect("a slice precedes every record");
-                let record = &line["record"];
-                assert_eq!(
-                    record["container_file_offset"].as_u64().unwrap(),
-                    base + record["thin_file_offset"].as_u64().unwrap()
-                );
-                records_checked += 1;
-            }
-            _ => {}
-        }
+        let slice_index = line["slice_index"].as_u64().unwrap();
+        let base = line["container_file_offset"].as_u64().unwrap()
+            - line["thin_file_offset"].as_u64().unwrap();
+        assert_eq!(*bases.entry(slice_index).or_insert(base), base);
     }
-    assert!(
-        records_checked >= slices.len(),
-        "both slices must contribute at least one checked record"
-    );
     let process = Command::new(env!("CARGO_BIN_EXE_macho"))
         .args(args)
         .output()
@@ -786,15 +851,14 @@ fn family_architecture_selection_retains_colliding_subtypes_and_raw_selection_is
     ]);
     assert_eq!(family.code, 0);
     let family = ndjson(&family.stdout);
+    assert_instruction_lines(&family);
+    let mut family_subtypes = family
+        .iter()
+        .map(|line| line["architecture"]["cpu_subtype"].as_i64().unwrap())
+        .collect::<Vec<_>>();
+    family_subtypes.dedup();
     assert_eq!(
-        events(&family, "slice")
-            .iter()
-            .map(|slice| {
-                slice["identity"]["image"]["architecture"]["cpu_subtype"]
-                    .as_i64()
-                    .unwrap()
-            })
-            .collect::<Vec<_>>(),
+        family_subtypes,
         [3, 8],
         "the CPU-family selector must retain both subtype slices"
     );
@@ -811,9 +875,11 @@ fn family_architecture_selection_retains_colliding_subtypes_and_raw_selection_is
     ]);
     assert_eq!(selected.code, 0);
     let lines = ndjson(&selected.stdout);
-    assert_eq!(
-        events(&lines, "slice")[0]["identity"]["image"]["architecture"]["cpu_subtype"],
-        8
+    assert_instruction_lines(&lines);
+    assert!(
+        lines
+            .iter()
+            .all(|line| line["architecture"]["cpu_subtype"] == 8)
     );
 
     let malformed_tuple = macho::cli::run_captured([
@@ -983,10 +1049,10 @@ fn colored_disassembly_styles_tokens_without_changing_plain_text() {
     // The invalid trailing byte keeps its diagnostic styling.
     let gap = colored_text
         .lines()
-        .find(|line| strip_ansi(line).contains("insn.decode.invalid"))
+        .find(|line| strip_ansi(line).contains("insn.decode.truncated"))
         .expect("a gap record");
     assert!(
-        gap.contains("\u{1b}[1;33m<insn.decode.invalid>\u{1b}[0m"),
+        gap.contains("\u{1b}[1;33m<insn.decode.truncated>\u{1b}[0m"),
         "{gap:?}"
     );
 

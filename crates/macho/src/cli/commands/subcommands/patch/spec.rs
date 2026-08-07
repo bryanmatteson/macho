@@ -4,6 +4,18 @@ use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
 
+use crate::analysis::pac::PacDetourAssessment;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(super) enum PacPolicy {
+    /// Do not assess arm64e detours.
+    Off,
+    /// Report PAC findings without rejecting the patch.
+    Report,
+    /// Require a compatible PAC assessment.
+    Require,
+}
+
 #[derive(Debug)]
 pub(super) enum PatchRequest {
     Operation(PatchOp<'static>),
@@ -61,6 +73,8 @@ pub(super) enum OperationDetail {
         encoding: &'static str,
         original_bytes: String,
         replacement_bytes: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pac: Option<PacDetourAssessment>,
     },
 }
 
@@ -214,8 +228,16 @@ pub(super) fn format_operation_detail(detail: &OperationDetail) -> String {
             encoding,
             original_bytes,
             replacement_bytes,
+            pac,
         } => format!(
-            "    detour {arch} {entry_va:#x} (offset {entry_offset:#x}) -> {destination_va:#x}, {overwrite_len} bytes across {instruction_count} complete instruction(s), {encoding}: {original_bytes} -> {replacement_bytes}\n"
+            "    detour {arch} {entry_va:#x} (offset {entry_offset:#x}) -> {destination_va:#x}, {overwrite_len} bytes across {instruction_count} complete instruction(s), {encoding}: {original_bytes} -> {replacement_bytes}\n{}",
+            pac.as_ref().map_or_else(String::new, |assessment| {
+                let mut rendered = format!("      PAC: {:?}\n", assessment.verdict);
+                for finding in &assessment.findings {
+                    rendered.push_str(&format!("        [{}] {}\n", finding.code, finding.message));
+                }
+                rendered
+            })
         ),
     }
 }

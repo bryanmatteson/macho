@@ -1480,16 +1480,30 @@ impl RecoveredProgram {
         } else {
             None
         };
-        if let (Some(functions_index), Some(provisional_control_flow)) =
-            (functions.as_ref(), control_flow.as_ref())
-        {
-            let refined =
-                functions_index.refine_extents_from_control_flow(provisional_control_flow)?;
-            if &refined != functions_index {
+        if functions.is_some() && control_flow.is_some() {
+            let refined = functions
+                .as_ref()
+                .expect("checked function inventory")
+                .refine_extents_from_control_flow(
+                    control_flow
+                        .as_ref()
+                        .expect("checked provisional control flow"),
+                )?;
+            if Some(&refined) != functions.as_ref() {
+                // Refinement changes the function inventory consumed by the final
+                // graph, so the provisional graph cannot be reused. Release both
+                // superseded retained structures before rebuilding instead of
+                // holding two complete CFGs and two function inventories at the
+                // construction peak.
+                drop(control_flow.take());
+                functions = Some(refined);
+                let refined = functions
+                    .as_ref()
+                    .expect("refined function inventory was just installed");
                 let rebuilt = match control_flow_guidance.as_ref() {
                     Some(guidance) => ControlFlowIndex::recover_with_guidance(
                         macho,
-                        &refined,
+                        refined,
                         pointers.as_ref(),
                         exceptions.as_ref(),
                         limits.control_flow,
@@ -1497,13 +1511,12 @@ impl RecoveredProgram {
                     )?,
                     None => ControlFlowIndex::recover_with_evidence(
                         macho,
-                        &refined,
+                        refined,
                         pointers.as_ref(),
                         exceptions.as_ref(),
                         limits.control_flow,
                     )?,
                 };
-                functions = Some(refined);
                 control_flow = Some(rebuilt);
             }
         }
@@ -7084,6 +7097,34 @@ mod tests {
                                                 implementation,
                                                 ..
                                             } => (3, *implementation, None),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::CppVirtualMethod {
+                                                implementation,
+                                                ..
+                                            } => (4, *implementation, None),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::SwiftProtocolWitness {
+                                                implementation,
+                                                ..
+                                            } => (5, *implementation, None),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::BlockInvoke {
+                                                implementation,
+                                                ..
+                                            } => (6, *implementation, None),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::SwiftClosure {
+                                                implementation,
+                                                ..
+                                            } => (7, *implementation, None),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::CppVirtualMethodImport {
+                                                library_ordinal,
+                                                ..
+                                            } => (8, 0, *library_ordinal),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::SwiftProtocolWitnessImport {
+                                                library_ordinal,
+                                                ..
+                                            } => (9, 0, *library_ordinal),
+                                            crate::analysis::indirect_calls::IndirectCallTarget::BlockInvokeImport {
+                                                library_ordinal,
+                                                ..
+                                            } => (10, 0, *library_ordinal),
                                         };
                                         (
                                             kind,

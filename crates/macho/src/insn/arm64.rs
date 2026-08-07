@@ -1,9 +1,11 @@
 //! AArch64 instruction decoding and disassembly with locally lowered semantics
 //! and mkasm-generated text formatting.
 
+use super::codecs::aarch64 as mkasm_aarch64;
 use crate::insn::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, MemoryEffect, Operand,
-    PcRelInfo, PcRelKind, Reg, RegisterShift, ValueEffect,
+    BoundaryConfidence, BranchInfo, BranchTarget, DecodeError, DecodeErrorKind, Insn, InsnKind,
+    InstructionRecovery, MAX_OPERANDS, MemoryEffect, Operand, PcRelInfo, PcRelKind, Reg,
+    RegisterShift, ValueEffect,
 };
 
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
@@ -13,14 +15,37 @@ pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
 pub(crate) fn decode_and_disassemble_one(
     bytes: &[u8],
     va: u64,
-) -> Result<(Insn, String), DecodeError> {
+) -> Result<(Insn, String, Option<InstructionRecovery>), DecodeError> {
     let word = read_word(bytes)?;
-    Ok((lower(word, va), format_word(word, va)))
+    let (text, unknown) = format_word(word, va);
+    let instruction = if unknown {
+        Insn::with_ops(
+            4,
+            InsnKind::Other,
+            [Operand::Imm(0); MAX_OPERANDS],
+            0,
+            false,
+            false,
+            ValueEffect::None,
+            MemoryEffect::None,
+        )
+    } else {
+        lower(word, va)
+    };
+    Ok((
+        instruction,
+        text,
+        unknown.then_some(InstructionRecovery {
+            boundary_confidence: BoundaryConfidence::Exact,
+            source: "architecture",
+        }),
+    ))
 }
 
 fn read_word(bytes: &[u8]) -> Result<u32, DecodeError> {
     if bytes.len() < 4 {
         return Err(DecodeError {
+            kind: DecodeErrorKind::Truncated,
             message: "need at least 4 bytes for arm64 instruction".into(),
         });
     }
@@ -983,19 +1008,20 @@ pub(crate) fn relocate(
 // ───────────────── disassembly ─────────────────
 
 pub(crate) fn disassemble_one(bytes: &[u8], va: u64) -> Result<String, DecodeError> {
-    Ok(format_word(read_word(bytes)?, va))
+    Ok(format_word(read_word(bytes)?, va).0)
 }
 
-fn format_word(word: u32, va: u64) -> String {
+fn format_word(word: u32, va: u64) -> (String, bool) {
     match mkasm_aarch64::format(word, va) {
-        Ok(text) => text,
-        Err(_) => format!(".inst 0x{word:08x}"),
+        Ok(text) => (text, false),
+        Err(_) => (format!(".inst 0x{word:08x}"), true),
     }
 }
 
 pub(crate) fn disassemble(bytes: &[u8], base_va: u64) -> Result<Vec<(u64, String)>, DecodeError> {
     if bytes.len() % 4 != 0 {
         return Err(DecodeError {
+            kind: DecodeErrorKind::Truncated,
             message: "arm64 instruction stream must be 4-byte aligned".into(),
         });
     }

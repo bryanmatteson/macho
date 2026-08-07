@@ -2,7 +2,8 @@ use crate::core::model::addr::ThinFileOffset;
 use crate::insn::{BranchTarget, Insn, InsnKind};
 
 use crate::analysis::report::disassembly::{
-    DirectTarget, DisassemblyRecord, DisassemblyStatus, InstructionKind,
+    DirectTarget, DisassemblyRecord, DisassemblyStatus, InstructionBoundaryConfidence,
+    InstructionEncoding, InstructionEncodingStatus, InstructionKind, InstructionSemanticsStatus,
 };
 use crate::analysis::report::{
     CanonicalUuid, ContainerKind, ContentHash, HexBytes, ImageIdentity, ReportSliceIdentity,
@@ -276,14 +277,16 @@ fn decode_region(
             usize::try_from(cursor - plan.start).expect("slice-backed offset fits usize");
         let tail = &natural_bytes[relative..];
         let attempts_before = work.decode_attempts;
-        match decode_for_display_at(
+        let decoded = decode_for_display_at(
             tail,
             cursor,
             &mut disassembler,
             max_instruction_len,
             &mut work,
-        ) {
+        );
+        match decoded {
             Ok(decoded) => {
+                has_gap |= decoded.recovery.is_some();
                 let instruction = decoded.instruction;
                 let len = instruction.len as u64;
                 let instruction_end = cursor.checked_add(len).ok_or_else(|| {
@@ -342,6 +345,7 @@ fn decode_region(
                         bytes,
                         decoded.text,
                         &instruction,
+                        decoded.recovery,
                         metadata,
                     )?,
                 )?;
@@ -353,8 +357,8 @@ fn decode_region(
             Err(error) => {
                 if request.mode == DecodeMode::Strict {
                     return Err(DisassemblyError::new(
-                        crate::insn::DecodeError::CODE,
-                        format!("invalid instruction at {cursor:#x}: {error}"),
+                        error.code(),
+                        format!("instruction decode failed at {cursor:#x}: {error}"),
                     ));
                 }
                 let mut gap_len = if slice.arch.is_arm64() {
@@ -388,7 +392,7 @@ fn decode_region(
                         plan,
                         cursor,
                         &tail[..gap_len as usize],
-                        crate::insn::DecodeError::CODE,
+                        error.code(),
                         &error.to_string(),
                     )?,
                 )?;
@@ -455,31 +459,50 @@ fn extend_x86_gap(
     budget: u64,
     work: &mut DecodeWork,
 ) -> ExtendedGap {
-    let selected_len = byte_end
+    let hard_len = byte_end
         .map(|end| end - va)
         .unwrap_or(tail.len() as u64)
-        .min(tail.len() as u64)
+        .min(tail.len() as u64);
+    let selected_len = hard_len
         // Inspect one byte beyond the remaining accounting budget. If that
         // byte is also invalid, the recovery unit crosses the boundary and
         // the caller must leave the entire unit unexamined.
         .min(budget.saturating_add(1));
     let mut length = 1u64;
+    let mut first_single = None;
     while length < selected_len {
         let offset = length as usize;
-        if decode_at(
+        if let Ok(instruction) = decode_at(
             &tail[offset..],
             va + length,
             crate::insn::Arch::X86_64,
             work,
-        )
-        .is_ok()
-        {
-            return ExtendedGap {
-                length,
-                next_valid_va: Some(va + length),
-            };
+        ) {
+            first_single.get_or_insert(length);
+            let next = length.saturating_add(instruction.len as u64);
+            let confirmed = next == hard_len
+                || (next < selected_len
+                    && decode_at(
+                        &tail[next as usize..selected_len as usize],
+                        va + next,
+                        crate::insn::Arch::X86_64,
+                        work,
+                    )
+                    .is_ok());
+            if confirmed {
+                return ExtendedGap {
+                    length,
+                    next_valid_va: Some(va + length),
+                };
+            }
         }
         length += 1;
+    }
+    if let Some(length) = first_single {
+        return ExtendedGap {
+            length,
+            next_valid_va: Some(va + length),
+        };
     }
     ExtendedGap {
         length,
@@ -518,6 +541,7 @@ fn instruction_record(
     bytes: &[u8],
     text: String,
     instruction: &Insn,
+    recovery: Option<crate::insn::InstructionRecovery>,
     metadata: &Metadata,
 ) -> Result<DisassemblyRecord, DisassemblyError> {
     let thin_file_offset = thin_offset(plan, va)?;
@@ -531,6 +555,14 @@ fn instruction_record(
             )
         })?;
     let direct_target = direct_target(instruction, va, metadata);
+    let encoding = recovery.map(|recovery| InstructionEncoding {
+        status: InstructionEncodingStatus::Unknown,
+        boundary_confidence: match recovery.boundary_confidence {
+            crate::insn::BoundaryConfidence::Exact => InstructionBoundaryConfidence::Exact,
+        },
+        semantics: InstructionSemanticsStatus::Unavailable,
+        source: recovery.source.to_owned(),
+    });
     Ok(DisassemblyRecord::Instruction {
         va,
         thin_file_offset,
@@ -540,6 +572,7 @@ fn instruction_record(
         text,
         kind: instruction_kind(&instruction.kind),
         direct_target,
+        encoding,
     })
 }
 

@@ -7,6 +7,8 @@ use crate::core::model::load_command::{LoadCommand, ParsedLoadCommand};
 use crate::core::model::names::SegmentName;
 use crate::core::model::section::Section;
 use crate::core::model::segment::Segment;
+#[cfg(feature = "analysis")]
+use std::sync::OnceLock;
 
 /// The MachoFile type.
 pub struct MachoFile<'data> {
@@ -23,6 +25,8 @@ struct DerivedIndexes {
     address_map: AddressMap,
     uuid: Option<[u8; 16]>,
     image_base: Va,
+    #[cfg(feature = "analysis")]
+    content_sha256: OnceLock<String>,
 }
 
 impl DerivedIndexes {
@@ -59,6 +63,8 @@ impl DerivedIndexes {
             address_map,
             uuid,
             image_base,
+            #[cfg(feature = "analysis")]
+            content_sha256: OnceLock::new(),
         })
     }
 }
@@ -116,6 +122,13 @@ impl<'data> MachoFile<'data> {
     /// Performs bytes.
     pub fn bytes(&self) -> &'data [u8] {
         self.bytes
+    }
+
+    /// Return the cached exact-image SHA-256, computing it at most once for
+    /// this parsed thin image.
+    #[cfg(feature = "analysis")]
+    pub(crate) fn content_sha256(&self, compute: impl FnOnce() -> String) -> &str {
+        self.derived.content_sha256.get_or_init(compute).as_str()
     }
 
     /// Performs file_size.
@@ -231,7 +244,7 @@ impl std::fmt::Debug for MachoFile<'_> {
 
 // Safety: MachFile is Send + Sync because:
 // - &[u8] is Send + Sync
-// - OnceLock<DerivedIndexes> is Sync (and Send)
+// - the optional OnceLock<String> cache is Sync (and Send)
 // - All other fields are Send + Sync
 // This is verified by the static assertions below.
 const _: fn() = || {

@@ -1,17 +1,17 @@
-use std::io::Write;
+use std::fmt::Write as _;
+use std::io::{BufWriter, Write};
 use std::num::NonZeroUsize;
 
 use crate::analysis::disassembly::{
-    AddressExtent, DecodeMode, DisassemblyRequest, DisassemblySelection, DisassemblySink, NonEmpty,
-    RegionHeader, RegionSummary, SectionSelector, SliceHeader, SliceSelection, SliceSummary,
-    disassemble_streaming, resolve_slice_selection,
+    AddressExtent, DecodeMode, DisassemblyError, DisassemblyRequest, DisassemblySelection,
+    DisassemblySink, NonEmpty, RegionHeader, RegionSummary, SectionSelector, SliceHeader,
+    SliceSelection, SliceSummary, disassemble_streaming, resolve_slice_selection,
 };
 use crate::analysis::report::disassembly::{
-    DisassemblyIssue, DisassemblyLabel, DisassemblyRecord, DisassemblyReportRequest,
-    DisassemblySchemaVersion, DisassemblyStatus, InstructionFlags, RangeEndSource, SelectionSource,
-    SymbolSource,
+    DirectTarget, DisassemblyIssue, DisassemblyLabel, DisassemblyRecord, DisassemblyReportRequest,
+    InstructionEncoding, InstructionKind,
 };
-use crate::analysis::report::{Architecture, ReportContainerIdentity, ReportSliceIdentity};
+use crate::analysis::report::{Architecture, ReportContainerIdentity};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -22,9 +22,44 @@ use crate::cli::commands::output::{ADDRESS_TOKEN, Format, Options, RAW_BYTES_TOK
 use crate::cli::commands::subcommands::common::map_input;
 use crate::cli::commands::usage_message;
 
+const STREAM_BUFFER_CAPACITY: usize = 64 * 1024;
+const INSTRUCTION_STREAM_SCHEMA_VERSION: u32 = 1;
+
+fn with_stream_buffer<T>(
+    out: &mut dyn Write,
+    stream: impl FnOnce(&mut dyn Write) -> Result<T, DisassemblyError>,
+) -> Result<T, DisassemblyError> {
+    let mut buffered = BufWriter::with_capacity(STREAM_BUFFER_CAPACITY, out);
+    let stream_result = stream(&mut buffered);
+    let flush_result = buffered.flush().map_err(DisassemblyError::from);
+    match stream_result {
+        Err(error) => Err(error),
+        Ok(value) => {
+            flush_result?;
+            Ok(value)
+        }
+    }
+}
+
+fn append_sanitized(output: &mut String, text: &str) {
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\u{0000}'..='\u{001f}'
+                | '\u{007f}'..='\u{009f}'
+                | '\u{202a}'..='\u{202e}'
+                | '\u{2066}'..='\u{2069}'
+        ) {
+            output.push('\u{fffd}');
+        } else {
+            output.push(character);
+        }
+    }
+}
+
 #[derive(Debug, clap::Args)]
 #[command(
-    after_help = "Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --address 0x100003f50 --end-address 0x100003f80\n  macho disassemble app --symbol _main --no-addresses --no-bytes\n  macho disassemble app --section __TEXT,__text --no-labels --no-targets\n  macho disassemble app --section __TEXT,__text --format json"
+    after_help = "Output streams with constant memory: pretty text by default, or exactly one self-contained instruction object per line with --format json (NDJSON). JSON instruction metadata includes its section, labels, and resolved direct target when available; headers, trailers, gaps, and issues are never written to stdout. SARIF output is supported only by the audit command.\n\nExamples:\n  macho disassemble app\n  macho disassemble app --arch arm64e --symbol _main\n  macho disassemble app --address 0x100003f50 --count 8\n  macho disassemble app --address 0x100003f50 --end-address 0x100003f80\n  macho disassemble app --symbol _main --no-addresses --no-bytes\n  macho disassemble app --section __TEXT,__text --no-labels --no-targets\n  macho disassemble app --section __TEXT,__text --format json"
 )]
 /// Arguments for bounded instruction disassembly.
 pub struct DisassembleArgs {
@@ -92,9 +127,9 @@ pub struct DisassembleArgs {
     max_ranges: NonZeroUsize,
 }
 
-/// Execute the disassembly command, streaming one line per record directly to
-/// `out` with output-side memory constant in the instruction count. Text is the
-/// default; `--format json` emits newline-delimited JSON (one object per line).
+/// Execute the disassembly command, streaming directly to `out` with
+/// output-side memory constant in the instruction count. Text is the default;
+/// `--format json` emits one instruction object per line as NDJSON.
 pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write) -> Result<()> {
     let mmap = map_input(&args.input.path)?;
     let container = crate::parse(&mmap)?;
@@ -172,10 +207,10 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
         args.max_decoded_bytes,
         args.max_ranges,
     )?;
-    match output.format() {
+    with_stream_buffer(out, |out| match output.format() {
         Format::Json => {
             let mut sink = NdjsonSink::new(out);
-            disassemble_streaming(&container, &request, &mut sink)?;
+            disassemble_streaming(&container, &request, &mut sink)
         }
         Format::Text => {
             let mut sink = TextLineSink::new(
@@ -186,10 +221,10 @@ pub fn run_streaming(args: DisassembleArgs, output: Options, out: &mut dyn Write
                 args.no_targets,
                 out,
             );
-            disassemble_streaming(&container, &request, &mut sink)?;
+            disassemble_streaming(&container, &request, &mut sink)
         }
         Format::Sarif => unreachable!("central output policy rejects disassembly SARIF"),
-    }
+    })?;
     Ok(())
 }
 
@@ -209,6 +244,8 @@ struct TextLineSink<'a> {
     /// Reused across records so tokenizing a streamed instruction does not
     /// allocate per line.
     spans: Vec<termosaic::Span>,
+    /// Reused for each directly assembled line when ANSI styling is disabled.
+    plain_line: String,
 }
 
 impl<'a> TextLineSink<'a> {
@@ -232,6 +269,7 @@ impl<'a> TextLineSink<'a> {
             pending_titles: Vec::new(),
             emitted_any_region: false,
             spans: Vec::new(),
+            plain_line: String::new(),
         }
     }
 }
@@ -284,6 +322,31 @@ impl DisassemblySink for TextLineSink<'_> {
             self.emitted_any_region = true;
         }
         let style = self.options.style();
+        if !style.enabled() {
+            self.plain_line.clear();
+            append_sanitized(&mut self.plain_line, &header.segment);
+            self.plain_line.push(',');
+            append_sanitized(&mut self.plain_line, &header.section);
+            write!(self.plain_line, "  {:#018x}", header.start_va)
+                .expect("writing to a String cannot fail");
+            match header.requested_end_va {
+                Some(end) => {
+                    write!(self.plain_line, "..{end:#018x}")
+                        .expect("writing to a String cannot fail");
+                }
+                None => {
+                    write!(
+                        self.plain_line,
+                        " ({} instructions)",
+                        header.requested_instruction_count.unwrap_or(0)
+                    )
+                    .expect("writing to a String cannot fail");
+                }
+            }
+            self.plain_line.push('\n');
+            self.out.write_all(self.plain_line.as_bytes())?;
+            return Ok(());
+        }
         self.spans.clear();
         self.spans.push(Span::new(
             termosaic::tokens::TEXT_SUBHEADING,
@@ -322,6 +385,66 @@ impl DisassemblySink for TextLineSink<'_> {
         labels: &[DisassemblyLabel],
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
         let style = self.options.style();
+        if !style.enabled() {
+            if !self.no_labels {
+                for label in labels {
+                    self.plain_line.clear();
+                    append_sanitized(&mut self.plain_line, &label.display_name);
+                    self.plain_line.push_str(":\n");
+                    self.out.write_all(self.plain_line.as_bytes())?;
+                }
+            }
+
+            self.plain_line.clear();
+            self.plain_line.push_str("  ");
+            let (va, bytes) = match record {
+                DisassemblyRecord::Instruction { va, bytes, .. }
+                | DisassemblyRecord::Gap { va, bytes, .. } => (*va, bytes.as_str()),
+            };
+            if !self.no_addresses {
+                write!(self.plain_line, "{va:#018x}  ").expect("writing to a String cannot fail");
+            }
+            if !self.no_bytes {
+                let padding = self.raw_width.saturating_sub(bytes.len());
+                self.plain_line.push_str(bytes);
+                self.plain_line
+                    .extend(std::iter::repeat_n(' ', padding + 2));
+            }
+            match record {
+                DisassemblyRecord::Instruction {
+                    text,
+                    direct_target,
+                    ..
+                } => {
+                    append_sanitized(&mut self.plain_line, text);
+                    if !self.no_targets
+                        && let Some(target) = direct_target
+                    {
+                        self.plain_line.push_str("  ; ");
+                        if let Some(name) = &target.display_symbol {
+                            append_sanitized(&mut self.plain_line, name);
+                            let offset = target.offset.unwrap_or(0);
+                            if offset != 0 {
+                                write!(self.plain_line, "+{offset:#x}")
+                                    .expect("writing to a String cannot fail");
+                            }
+                        } else {
+                            write!(self.plain_line, "{:#x}", target.va)
+                                .expect("writing to a String cannot fail");
+                        }
+                    }
+                }
+                DisassemblyRecord::Gap { code, message, .. } => {
+                    self.plain_line.push('<');
+                    append_sanitized(&mut self.plain_line, code);
+                    self.plain_line.push_str("> ");
+                    append_sanitized(&mut self.plain_line, message);
+                }
+            }
+            self.plain_line.push('\n');
+            self.out.write_all(self.plain_line.as_bytes())?;
+            return Ok(());
+        }
         if !self.no_labels {
             for label in labels {
                 writeln!(
@@ -439,115 +562,117 @@ impl DisassemblySink for TextLineSink<'_> {
         if !self.emitted_any_region {
             writeln!(self.out, "No executable sections found.")?;
         }
-        self.out.flush()?;
         Ok(())
     }
 }
 
-// ───────────────────────── NDJSON line sink ─────────────────────────
+// ───────────────────────── NDJSON instruction sink ─────────────────────────
+
+/// One self-contained machine-readable instruction. Stream framing, slice
+/// headers, region trailers, gaps, and issues never appear on stdout.
+#[derive(Serialize)]
+struct InstructionLine<'a> {
+    schema_version: u32,
+    architecture: &'a InstructionArchitecture,
+    slice_index: u32,
+    va: u64,
+    thin_file_offset: u64,
+    container_file_offset: u64,
+    size: u64,
+    bytes: &'a str,
+    mnemonic: String,
+    operands: Vec<&'a str>,
+    kind: InstructionKind,
+    metadata: InstructionMetadata<'a>,
+}
 
 #[derive(Serialize)]
-#[serde(tag = "event", rename_all = "snake_case")]
-enum Line<'a> {
-    Header {
-        schema_version: u32,
-        container: &'a ReportContainerIdentity,
-        request: &'a DisassemblyReportRequest,
-    },
-    Slice {
-        identity: &'a ReportSliceIdentity,
-        container_offset: u64,
-        slice_size: u64,
-    },
-    Region {
-        segment: &'a str,
-        section: &'a str,
-        selection_source: SelectionSource,
-        range_source: Option<SymbolSource>,
-        end_source: Option<RangeEndSource>,
-        start_va: u64,
-        requested_end_va: Option<u64>,
-        requested_instruction_count: Option<u64>,
-        instruction_flags: InstructionFlags,
-    },
-    Record {
-        record: &'a DisassemblyRecord,
-    },
-    Label {
-        label: &'a DisassemblyLabel,
-    },
-    RegionEnd {
-        emitted_instruction_count: u64,
-        examined_end_va: u64,
-        next_unexamined_va: Option<u64>,
-    },
-    SliceEnd {
-        status: DisassemblyStatus,
-        decoded_bytes: u64,
-        decoded_bytes_truncated: bool,
-        symbol_ranges_truncated: bool,
-    },
-    Issue {
-        issue: &'a DisassemblyIssue,
-    },
+struct InstructionArchitecture {
+    name: String,
+    cpu_type: i32,
+    cpu_subtype: i32,
+}
+
+#[derive(Serialize)]
+struct InstructionMetadata<'a> {
+    segment: &'a str,
+    section: &'a str,
+    #[serde(skip_serializing_if = "<[DisassemblyLabel]>::is_empty")]
+    labels: &'a [DisassemblyLabel],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a DirectTarget>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    encoding: Option<&'a InstructionEncoding>,
+}
+
+/// Split the decoder's canonical assembly spelling into its mnemonic and
+/// logical top-level operands. Commas inside memory references, register
+/// lists, or parenthesized expressions do not create additional operands.
+fn instruction_syntax(text: &str) -> (String, Vec<&str>) {
+    let text = text.trim();
+    let mnemonic_end = text.find(char::is_whitespace).unwrap_or(text.len());
+    let mnemonic = text[..mnemonic_end].to_ascii_lowercase();
+    let tail = text[mnemonic_end..].trim();
+    if tail.is_empty() {
+        return (mnemonic, Vec::new());
+    }
+
+    let mut operands = Vec::new();
+    let mut start = 0usize;
+    let mut square_depth = 0u32;
+    let mut brace_depth = 0u32;
+    let mut paren_depth = 0u32;
+    for (index, character) in tail.char_indices() {
+        match character {
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            ',' if square_depth == 0 && brace_depth == 0 && paren_depth == 0 => {
+                let operand = tail[start..index].trim();
+                if !operand.is_empty() {
+                    operands.push(operand);
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    let operand = tail[start..].trim();
+    if !operand.is_empty() {
+        operands.push(operand);
+    }
+    (mnemonic, operands)
 }
 
 struct NdjsonSink<'a> {
     out: &'a mut dyn Write,
-    container: Option<ReportContainerIdentity>,
-    request: Option<DisassemblyReportRequest>,
-    header_emitted: bool,
+    architecture: Option<InstructionArchitecture>,
+    slice_index: u32,
+    segment: Option<String>,
+    section: Option<String>,
 }
 
 impl<'a> NdjsonSink<'a> {
     fn new(out: &'a mut dyn Write) -> Self {
         Self {
             out,
-            container: None,
-            request: None,
-            header_emitted: false,
+            architecture: None,
+            slice_index: 0,
+            segment: None,
+            section: None,
         }
-    }
-
-    fn write_line(
-        &mut self,
-        line: &Line<'_>,
-    ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        serde_json::to_writer(&mut *self.out, line).map_err(std::io::Error::other)?;
-        self.out.write_all(b"\n")?;
-        Ok(())
-    }
-
-    /// Emit the container/request header exactly once, before the first slice.
-    /// Leaving it until first emission keeps stdout empty when a pre-decode
-    /// error aborts the run.
-    fn ensure_header(&mut self) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        if self.header_emitted {
-            return Ok(());
-        }
-        self.header_emitted = true;
-        let container = self.container.take().expect("begin() runs before slices");
-        let request = self.request.take().expect("begin() runs before slices");
-        let line = Line::Header {
-            schema_version: DisassemblySchemaVersion::CURRENT.get(),
-            container: &container,
-            request: &request,
-        };
-        self.write_line(&line)?;
-        self.container = Some(container);
-        self.request = Some(request);
-        Ok(())
     }
 }
 
 impl DisassemblySink for NdjsonSink<'_> {
     fn begin(
         &mut self,
-        container: &ReportContainerIdentity,
-        request: &DisassemblyReportRequest,
+        _container: &ReportContainerIdentity,
+        _request: &DisassemblyReportRequest,
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.container = Some(container.clone());
-        self.request = Some(request.clone());
         Ok(())
     }
 
@@ -555,73 +680,104 @@ impl DisassemblySink for NdjsonSink<'_> {
         &mut self,
         header: SliceHeader,
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.ensure_header()?;
-        self.write_line(&Line::Slice {
-            identity: &header.identity,
-            container_offset: header.container_offset,
-            slice_size: header.slice_size,
-        })
+        let architecture = header.identity.image.architecture;
+        self.architecture = Some(InstructionArchitecture {
+            name: architecture_name(architecture),
+            cpu_type: architecture.cpu_type,
+            cpu_subtype: architecture.cpu_subtype,
+        });
+        self.slice_index = header.identity.image.slice_index;
+        Ok(())
     }
 
     fn region_start(
         &mut self,
         header: RegionHeader,
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.write_line(&Line::Region {
-            segment: &header.segment,
-            section: &header.section,
-            selection_source: header.selection_source,
-            range_source: header.range_source,
-            end_source: header.end_source,
-            start_va: header.start_va,
-            requested_end_va: header.requested_end_va,
-            requested_instruction_count: header.requested_instruction_count,
-            instruction_flags: header.instruction_flags,
-        })
+        self.segment = Some(header.segment);
+        self.section = Some(header.section);
+        Ok(())
     }
 
     fn record(
         &mut self,
         record: &DisassemblyRecord,
-        _labels: &[DisassemblyLabel],
+        labels: &[DisassemblyLabel],
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.write_line(&Line::Record { record })
+        let DisassemblyRecord::Instruction {
+            va,
+            thin_file_offset,
+            container_file_offset,
+            size,
+            bytes,
+            text,
+            kind,
+            direct_target,
+            encoding,
+        } = record
+        else {
+            // Recovering gaps are not instructions and therefore are not part
+            // of the machine stream. Strict mode still fails through stderr.
+            return Ok(());
+        };
+        let (mnemonic, operands) = instruction_syntax(text);
+        let architecture = self
+            .architecture
+            .as_ref()
+            .expect("slice_start() runs before record()");
+        let segment = self
+            .segment
+            .as_deref()
+            .expect("region_start() runs before record()");
+        let section = self
+            .section
+            .as_deref()
+            .expect("region_start() runs before record()");
+        let line = InstructionLine {
+            schema_version: INSTRUCTION_STREAM_SCHEMA_VERSION,
+            architecture,
+            slice_index: self.slice_index,
+            va: *va,
+            thin_file_offset: *thin_file_offset,
+            container_file_offset: *container_file_offset,
+            size: *size,
+            bytes: bytes.as_str(),
+            mnemonic,
+            operands,
+            kind: *kind,
+            metadata: InstructionMetadata {
+                segment,
+                section,
+                labels,
+                target: direct_target.as_ref(),
+                encoding: encoding.as_ref(),
+            },
+        };
+        serde_json::to_writer(&mut *self.out, &line).map_err(std::io::Error::other)?;
+        self.out.write_all(b"\n")?;
+        Ok(())
     }
 
     fn region_end(
         &mut self,
-        summary: RegionSummary,
-        labels: &[DisassemblyLabel],
+        _summary: RegionSummary,
+        _labels: &[DisassemblyLabel],
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        for label in labels {
-            self.write_line(&Line::Label { label })?;
-        }
-        self.write_line(&Line::RegionEnd {
-            emitted_instruction_count: summary.emitted_instruction_count,
-            examined_end_va: summary.examined_end_va,
-            next_unexamined_va: summary.next_unexamined_va,
-        })
+        self.segment = None;
+        self.section = None;
+        Ok(())
     }
 
     fn slice_end(
         &mut self,
-        summary: SliceSummary,
-        issues: &[DisassemblyIssue],
+        _summary: SliceSummary,
+        _issues: &[DisassemblyIssue],
     ) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.write_line(&Line::SliceEnd {
-            status: summary.status,
-            decoded_bytes: summary.decoded_bytes,
-            decoded_bytes_truncated: summary.decoded_bytes_truncated,
-            symbol_ranges_truncated: summary.symbol_ranges_truncated,
-        })?;
-        for issue in issues {
-            self.write_line(&Line::Issue { issue })?;
-        }
+        self.architecture = None;
         Ok(())
     }
 
     fn finish(&mut self) -> Result<(), crate::analysis::disassembly::DisassemblyError> {
-        self.out.flush()?;
         Ok(())
     }
 }
@@ -684,4 +840,146 @@ fn parse_raw_arch(value: &str) -> Option<Architecture> {
         cpu_type: u32::from_str_radix(&cpu[2..], 16).ok()? as i32,
         cpu_subtype: u32::from_str_radix(&subtype[2..], 16).ok()? as i32,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STREAM_BUFFER_CAPACITY, append_sanitized, instruction_syntax, with_stream_buffer};
+    use std::io::{self, Write};
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        bytes: Vec<u8>,
+        write_sizes: Vec<usize>,
+        flushes: usize,
+        fail_write_once: bool,
+        fail_flush: bool,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.write_sizes.push(bytes.len());
+            if self.fail_write_once {
+                self.fail_write_once = false;
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "stream write failed",
+                ));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            if self.fail_flush {
+                return Err(io::Error::other("outer flush failed"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stream_buffer_preserves_exact_output() {
+        let mut writer = RecordingWriter::default();
+        with_stream_buffer(&mut writer, |out| {
+            out.write_all(b"alpha")?;
+            out.write_all(b"\0beta\n")?;
+            Ok(())
+        })
+        .expect("buffered writes should succeed");
+
+        assert_eq!(writer.bytes, b"alpha\0beta\n");
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn stream_buffer_coalesces_many_logical_writes() {
+        const LOGICAL_WRITES: usize = 4096;
+        const CHUNK: &[u8] = &[b'x'; 64];
+        let mut writer = RecordingWriter::default();
+        with_stream_buffer(&mut writer, |out| {
+            for _ in 0..LOGICAL_WRITES {
+                out.write_all(CHUNK)?;
+            }
+            Ok(())
+        })
+        .expect("buffered writes should succeed");
+
+        assert_eq!(writer.bytes.len(), LOGICAL_WRITES * CHUNK.len());
+        assert!(writer.write_sizes.len() < LOGICAL_WRITES / 100);
+        assert!(
+            writer
+                .write_sizes
+                .iter()
+                .all(|&size| size <= STREAM_BUFFER_CAPACITY)
+        );
+    }
+
+    #[test]
+    fn stream_buffer_returns_flush_failure() {
+        let mut writer = RecordingWriter {
+            fail_flush: true,
+            ..RecordingWriter::default()
+        };
+        let error = with_stream_buffer(&mut writer, |out| {
+            out.write_all(b"complete")?;
+            Ok(())
+        })
+        .expect_err("the explicit flush should fail");
+
+        assert!(error.message().contains("outer flush failed"));
+        assert_eq!(writer.bytes, b"complete");
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn stream_buffer_prefers_mid_stream_write_failure() {
+        let mut writer = RecordingWriter {
+            fail_write_once: true,
+            fail_flush: true,
+            ..RecordingWriter::default()
+        };
+        let error = with_stream_buffer(&mut writer, |out| {
+            for _ in 0..=STREAM_BUFFER_CAPACITY / 64 {
+                out.write_all(&[b'x'; 64])?;
+            }
+            Ok(())
+        })
+        .expect_err("the buffered stream write should fail");
+
+        assert!(error.message().contains("stream write failed"));
+        assert_eq!(writer.flushes, 1);
+    }
+
+    #[test]
+    fn sanitized_append_replaces_unsafe_ranges_and_preserves_neighbors() {
+        let source = concat!(
+            "A", "\u{0000}", "\u{001f}", " ", "~", "\u{007f}", "\u{009f}", "\u{00a0}", "\u{2029}",
+            "\u{202a}", "\u{202e}", "\u{202f}", "\u{2065}", "\u{2066}", "\u{2069}", "\u{206a}",
+            "Z"
+        );
+        let mut output = String::from("prefix:");
+        append_sanitized(&mut output, source);
+
+        assert_eq!(
+            output,
+            concat!(
+                "prefix:A", "\u{fffd}", "\u{fffd}", " ", "~", "\u{fffd}", "\u{fffd}", "\u{00a0}",
+                "\u{2029}", "\u{fffd}", "\u{fffd}", "\u{202f}", "\u{2065}", "\u{fffd}", "\u{fffd}",
+                "\u{206a}", "Z"
+            )
+        );
+    }
+
+    #[test]
+    fn instruction_syntax_preserves_nested_operand_commas() {
+        let (mnemonic, operands) = instruction_syntax("STP x29, x30, [sp, #-0x10]!  ");
+        assert_eq!(mnemonic, "stp");
+        assert_eq!(operands, ["x29", "x30", "[sp, #-0x10]!"]);
+
+        let (mnemonic, operands) = instruction_syntax("nop");
+        assert_eq!(mnemonic, "nop");
+        assert!(operands.is_empty());
+    }
 }

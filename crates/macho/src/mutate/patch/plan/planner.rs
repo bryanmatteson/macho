@@ -211,19 +211,29 @@ impl MachoPatcher {
             })?
             .to_vec();
 
-        let jump = Self::encode_hook_jump(arch, entry_va, destination_va)?;
-        if overwrite_len < jump.len() {
+        let preserve_bti = arch == PatchArch::Arm64e && is_arm64_bti_landing_pad(&original_bytes);
+        let jump_source = entry_va.saturating_add(if preserve_bti { 4 } else { 0 });
+        let jump = Self::encode_hook_jump(arch, jump_source, destination_va)?;
+        let required_len = jump.len() + if preserve_bti { 4 } else { 0 };
+        if overwrite_len < required_len {
             return Err(Error::invalid(format!(
-                "function entry patch at {entry_va:#x} needs {} bytes for {:?}, but overwrite_len is {}",
-                jump.len(),
+                "function entry patch at {entry_va:#x} needs {required_len} bytes for {:?}{}, but overwrite_len is {}",
                 jump.encoding,
+                if preserve_bti {
+                    " while preserving BTI"
+                } else {
+                    ""
+                },
                 overwrite_len,
             )));
         }
 
         let mut patch_bytes = Vec::with_capacity(overwrite_len);
+        if preserve_bti {
+            patch_bytes.extend_from_slice(&original_bytes[..4]);
+        }
         patch_bytes.extend_from_slice(&jump.bytes);
-        let padding_len = overwrite_len - jump.len();
+        let padding_len = overwrite_len - required_len;
         if padding_len > 0 {
             patch_bytes.extend_from_slice(&nop_bytes_for_arch(arch, padding_len)?);
         }
@@ -304,11 +314,7 @@ impl MachoPatcher {
     /// Write a single byte at `offset`, returning the original byte.
     pub fn write_byte(&mut self, offset: usize, byte: u8) -> Result<u8> {
         if offset >= self.data.len() {
-            return Err(Error::bounds(
-                offset as u64,
-                1,
-                self.data.len() as u64,
-            ));
+            return Err(Error::bounds(offset as u64, 1, self.data.len() as u64));
         }
         let original = self.data[offset];
         self.data[offset] = byte;
@@ -457,12 +463,7 @@ impl MachoPatcher {
     ///
     /// For arm64, uses the 4-byte NOP encoding `0xD503201F`. For x86_64,
     /// uses single-byte `0x90` NOPs.
-    pub fn nop_fill(
-        &mut self,
-        offset: usize,
-        count: usize,
-        arm64: bool,
-    ) -> Result<Vec<u8>> {
+    pub fn nop_fill(&mut self, offset: usize, count: usize, arm64: bool) -> Result<Vec<u8>> {
         if arm64 {
             self.write_bytes(offset, &nop_bytes_for_arch(PatchArch::Arm64, count)?)
         } else {

@@ -5,6 +5,7 @@
 //! gaps remain explicit, and branches outside a recovered function are exits
 //! rather than invented intra-procedural edges.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::core::format::constants::{
@@ -13,8 +14,8 @@ use crate::core::format::constants::{
 use crate::core::model::addr::Va;
 use crate::core::model::macho_file::MachoFile;
 use crate::insn::{
-    Arch, BranchTarget, InsnKind, MemoryEffect, Operand, PcRelKind, Reg, RegClass, RegisterShift,
-    ValueEffect,
+    Arch, BranchTarget, Insn, InsnKind, MemoryEffect, Operand, PcRelKind, Reg, RegClass,
+    RegisterShift, ValueEffect,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -174,7 +175,7 @@ pub struct ControlFlowInstruction {
     /// Direct or indirect control-flow target.
     pub target: Option<InstructionTarget>,
     /// Architecture-neutral decoded operands in source order.
-    pub operands: Vec<ControlFlowOperand>,
+    pub operands: Box<[ControlFlowOperand]>,
     /// First explicitly written register, when represented by the decoder.
     pub written_register: Option<ControlFlowRegister>,
     /// Address-value effect on the written register.
@@ -870,7 +871,7 @@ pub struct FunctionControlFlow {
     /// Function identity copied from the inventory.
     pub identity: FunctionIdentity,
     /// Decoded instructions sorted by address.
-    pub instructions: Vec<ControlFlowInstruction>,
+    pub instructions: Box<[ControlFlowInstruction]>,
     /// Explicit decode gaps sorted by address.
     pub gaps: Vec<ControlFlowGap>,
     /// Caller-guided embedded-data ranges excluded before instruction decoding.
@@ -918,6 +919,107 @@ pub struct ControlFlowIndex {
     decoded_bytes: u64,
     truncated_function_count: u64,
     continuation: Option<ControlFlowContinuation>,
+}
+
+pub(crate) struct ControlFlowFoldSummary {
+    pub(crate) status: ControlFlowIndexStatus,
+    pub(crate) decoded_bytes: u64,
+    pub(crate) truncated_function_count: u64,
+    pub(crate) continuation: Option<ControlFlowContinuation>,
+}
+
+struct CachedControlFlowInstruction {
+    address: u64,
+    instruction: Insn,
+}
+
+pub(crate) struct ControlFlowDecodeArena {
+    entries: Vec<CachedControlFlowInstruction>,
+    maximum_entries: usize,
+    prepared: bool,
+    next_lookup_index: usize,
+    last_lookup_address: Option<u64>,
+}
+
+impl ControlFlowDecodeArena {
+    pub(crate) fn new(maximum_decoded_bytes: usize) -> Self {
+        const MAXIMUM_ARENA_BYTES: usize = 256 * 1024 * 1024;
+        let entry_bytes = size_of::<CachedControlFlowInstruction>().max(1);
+        Self {
+            entries: Vec::new(),
+            maximum_entries: maximum_decoded_bytes.min(MAXIMUM_ARENA_BYTES / entry_bytes),
+            prepared: false,
+            next_lookup_index: 0,
+            last_lookup_address: None,
+        }
+    }
+
+    fn get(&mut self, address: u64) -> Option<Insn> {
+        if !self.prepared {
+            return None;
+        }
+        if self
+            .last_lookup_address
+            .is_none_or(|previous| address < previous)
+        {
+            self.next_lookup_index = self
+                .entries
+                .partition_point(|entry| entry.address < address);
+        } else {
+            while self
+                .entries
+                .get(self.next_lookup_index)
+                .is_some_and(|entry| entry.address < address)
+            {
+                self.next_lookup_index += 1;
+            }
+        }
+        self.last_lookup_address = Some(address);
+        self.entries
+            .get(self.next_lookup_index)
+            .filter(|entry| entry.address == address)
+            .map(|entry| entry.instruction.clone())
+    }
+
+    fn record(&mut self, address: u64, instruction: &Insn) {
+        if self.prepared || self.entries.len() >= self.maximum_entries {
+            return;
+        }
+        if self.entries.len() == self.entries.capacity() {
+            self.entries.reserve_exact(
+                self.maximum_entries
+                    .saturating_sub(self.entries.len())
+                    .min(4096),
+            );
+        }
+        self.entries.push(CachedControlFlowInstruction {
+            address,
+            instruction: instruction.clone(),
+        });
+    }
+
+    fn prepare_for_reuse(&mut self) {
+        if self.prepared {
+            return;
+        }
+        if !self
+            .entries
+            .windows(2)
+            .all(|window| window[0].address <= window[1].address)
+        {
+            self.entries.sort_unstable_by_key(|entry| entry.address);
+        }
+        self.entries.dedup_by_key(|entry| entry.address);
+        self.prepared = true;
+        self.next_lookup_index = 0;
+        self.last_lookup_address = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FunctionRecoveryProjection {
+    Full,
+    Xrefs,
 }
 
 impl ControlFlowIndex {
@@ -978,6 +1080,66 @@ impl ControlFlowIndex {
         limits: ControlFlowLimits,
         guidance: Option<&ControlFlowRecoveryGuidance>,
     ) -> Result<Self, ControlFlowRecoveryError> {
+        let (mut graphs, summary) = Self::fold_internal(
+            macho,
+            functions,
+            pointers,
+            exceptions,
+            limits,
+            guidance,
+            None,
+            FunctionRecoveryProjection::Full,
+            Vec::with_capacity,
+            |graphs, graph| graphs.push(graph),
+        )?;
+        graphs.shrink_to_fit();
+        Ok(Self {
+            image: FunctionImageIdentity::from_macho(macho),
+            limits,
+            functions: graphs,
+            status: summary.status,
+            decoded_bytes: summary.decoded_bytes,
+            truncated_function_count: summary.truncated_function_count,
+            continuation: summary.continuation,
+        })
+    }
+
+    pub(crate) fn fold_with_pointers<T>(
+        macho: &MachoFile<'_>,
+        functions: &FunctionIndex,
+        pointers: &PointerIndex,
+        limits: ControlFlowLimits,
+        decode_arena: Option<&RefCell<ControlFlowDecodeArena>>,
+        initialize: impl FnMut(usize) -> T,
+        fold: impl FnMut(&mut T, FunctionControlFlow),
+    ) -> Result<(T, ControlFlowFoldSummary), ControlFlowRecoveryError> {
+        Self::fold_internal(
+            macho,
+            functions,
+            Some(pointers),
+            None,
+            limits,
+            None,
+            decode_arena,
+            FunctionRecoveryProjection::Xrefs,
+            initialize,
+            fold,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fold_internal<T>(
+        macho: &MachoFile<'_>,
+        functions: &FunctionIndex,
+        pointers: Option<&PointerIndex>,
+        exceptions: Option<&ExceptionIndex>,
+        limits: ControlFlowLimits,
+        guidance: Option<&ControlFlowRecoveryGuidance>,
+        decode_arena: Option<&RefCell<ControlFlowDecodeArena>>,
+        projection: FunctionRecoveryProjection,
+        mut initialize: impl FnMut(usize) -> T,
+        mut fold: impl FnMut(&mut T, FunctionControlFlow),
+    ) -> Result<(T, ControlFlowFoldSummary), ControlFlowRecoveryError> {
         let limits = limits.validate()?;
         let image = FunctionImageIdentity::from_macho(macho);
         if &image != functions.image()
@@ -992,7 +1154,7 @@ impl ControlFlowIndex {
         let non_returning_stubs = non_returning_stub_symbols(macho, arch, pointers);
         let admitted = functions.functions().len().min(limits.max_functions);
         let mut non_returning_functions = BTreeSet::new();
-        let (graphs, decoded_bytes, remaining_bytes) = loop {
+        loop {
             let recovery = FunctionRecoveryContext {
                 macho,
                 function_index: functions,
@@ -1002,71 +1164,75 @@ impl ControlFlowIndex {
                 non_returning_functions: &non_returning_functions,
                 exceptions,
                 guidance,
+                decode_arena,
+                projection,
             };
             let mut remaining_bytes = limits.max_decoded_bytes;
-            let mut graphs = Vec::with_capacity(admitted);
+            let mut accumulated = initialize(admitted);
             let mut decoded_bytes = 0_u64;
+            let mut graph_count = 0_usize;
+            let mut any_truncated = false;
+            let mut any_partial = false;
+            let mut continuation = None;
+            let mut discovered_non_returning = BTreeSet::new();
             for function in functions.functions().iter().take(admitted) {
                 if remaining_bytes == 0 {
                     break;
                 }
                 let graph = recover_function(&recovery, function, &mut remaining_bytes);
                 decoded_bytes = decoded_bytes.saturating_add(graph.completeness.decoded_bytes);
-                graphs.push(graph);
+                graph_count += 1;
+                any_truncated |= graph.completeness.status == FunctionControlFlowStatus::Truncated;
+                any_partial |= graph.completeness.status != FunctionControlFlowStatus::Complete;
+                if continuation.is_none() {
+                    continuation = graph.completeness.continuation.clone();
+                }
+                if graph_proves_non_returning(&graph) {
+                    discovered_non_returning.insert(graph.function_entry);
+                }
+                fold(&mut accumulated, graph);
+            }
+            if let Some(arena) = decode_arena {
+                arena.borrow_mut().prepare_for_reuse();
             }
             let previous = non_returning_functions.len();
-            non_returning_functions.extend(
-                graphs
-                    .iter()
-                    .filter(|graph| graph_proves_non_returning(graph))
-                    .map(|graph| graph.function_entry),
-            );
+            non_returning_functions.extend(discovered_non_returning);
             if non_returning_functions.len() == previous {
-                break (graphs, decoded_bytes, remaining_bytes);
+                let globally_truncated = functions.functions().len() > admitted || any_truncated;
+                let truncated_function_count =
+                    functions.functions().len().saturating_sub(graph_count) as u64;
+                if continuation.is_none() {
+                    continuation = functions.functions().get(graph_count).map(|function| {
+                        if graph_count < admitted && remaining_bytes == 0 {
+                            ControlFlowContinuation::Byte {
+                                function_entry: function.entry,
+                                address: function.entry,
+                            }
+                        } else {
+                            ControlFlowContinuation::Function {
+                                entry: function.entry,
+                            }
+                        }
+                    });
+                }
+                let status = if globally_truncated || truncated_function_count != 0 {
+                    ControlFlowIndexStatus::Truncated
+                } else if any_partial {
+                    ControlFlowIndexStatus::Partial
+                } else {
+                    ControlFlowIndexStatus::Complete
+                };
+                return Ok((
+                    accumulated,
+                    ControlFlowFoldSummary {
+                        status,
+                        decoded_bytes,
+                        truncated_function_count,
+                        continuation,
+                    },
+                ));
             }
-        };
-        let globally_truncated = functions.functions().len() > admitted
-            || graphs
-                .iter()
-                .any(|graph| graph.completeness.status == FunctionControlFlowStatus::Truncated);
-        let truncated_function_count =
-            functions.functions().len().saturating_sub(graphs.len()) as u64;
-        let continuation = graphs
-            .iter()
-            .find_map(|graph| graph.completeness.continuation.clone())
-            .or_else(|| {
-                functions.functions().get(graphs.len()).map(|function| {
-                    if graphs.len() < admitted && remaining_bytes == 0 {
-                        ControlFlowContinuation::Byte {
-                            function_entry: function.entry,
-                            address: function.entry,
-                        }
-                    } else {
-                        ControlFlowContinuation::Function {
-                            entry: function.entry,
-                        }
-                    }
-                })
-            });
-        let status = if globally_truncated || truncated_function_count != 0 {
-            ControlFlowIndexStatus::Truncated
-        } else if graphs
-            .iter()
-            .any(|graph| graph.completeness.status != FunctionControlFlowStatus::Complete)
-        {
-            ControlFlowIndexStatus::Partial
-        } else {
-            ControlFlowIndexStatus::Complete
-        };
-        Ok(Self {
-            image,
-            limits,
-            functions: graphs,
-            status,
-            decoded_bytes,
-            truncated_function_count,
-            continuation,
-        })
+        }
     }
 
     /// Exact image identity shared with the source function inventory.
@@ -1457,6 +1623,8 @@ struct FunctionRecoveryContext<'context, 'image> {
     non_returning_functions: &'context BTreeSet<u64>,
     exceptions: Option<&'context ExceptionIndex>,
     guidance: Option<&'context ControlFlowRecoveryGuidance>,
+    decode_arena: Option<&'context RefCell<ControlFlowDecodeArena>>,
+    projection: FunctionRecoveryProjection,
 }
 
 fn recover_function(
@@ -1473,10 +1641,14 @@ fn recover_function(
         non_returning_functions,
         exceptions,
         guidance,
+        decode_arena,
+        projection,
     } = recovery;
     let arch = *arch;
     let limits = *limits;
     let guidance = *guidance;
+    let projection = *projection;
+    let mut decode_arena = decode_arena.map(|arena| arena.borrow_mut());
     let original_coverage = function_coverage(function);
     let boundary_confidence = original_coverage.iter().map(|range| range.confidence).min();
     let (coverage, mut data_ranges) = partition_guided_data_ranges(
@@ -1571,7 +1743,21 @@ fn recover_function(
                 break;
             }
             let address = range.start + offset as u64;
-            match decoder.decode_at(offset) {
+            let decoded = match decode_arena
+                .as_deref_mut()
+                .and_then(|arena| arena.get(address))
+            {
+                Some(instruction) => Ok(instruction),
+                None => {
+                    let decoded = decoder.decode_at(offset);
+                    if let (Some(arena), Ok(instruction)) = (decode_arena.as_deref_mut(), &decoded)
+                    {
+                        arena.record(address, instruction);
+                    }
+                    decoded
+                }
+            };
+            match decoded {
                 Ok(instruction) if offset.saturating_add(instruction.len) <= admitted_len => {
                     instructions.push(convert_instruction(
                         instruction,
@@ -1781,7 +1967,11 @@ fn recover_function(
         function_index,
         non_returning_stubs,
         non_returning_functions,
-        limits.max_edges_per_function,
+        ConnectBlockOptions {
+            maximum_edges: limits.max_edges_per_function,
+            retain_calls: projection == FunctionRecoveryProjection::Full,
+            retain_exit_ownership: projection == FunctionRecoveryProjection::Full,
+        },
     );
     if let Some(edge) = edge_continuation {
         truncated = true;
@@ -1792,15 +1982,19 @@ fn recover_function(
         });
     }
     let (exceptional_transfers, exceptional_continuation, exceptional_partial) =
-        apply_exception_evidence(
-            exceptions.as_deref(),
-            function.entry,
-            &blocks,
-            &mut edges,
-            &mut exits,
-            &mut calls,
-            limits.max_edges_per_function,
-        );
+        if projection == FunctionRecoveryProjection::Full {
+            apply_exception_evidence(
+                exceptions.as_deref(),
+                function.entry,
+                &blocks,
+                &mut edges,
+                &mut exits,
+                &mut calls,
+                limits.max_edges_per_function,
+            )
+        } else {
+            (Vec::new(), None, false)
+        };
     if exceptional_partial {
         reasons.insert("control_flow.exception_evidence_partial".into());
     }
@@ -1850,28 +2044,26 @@ fn recover_function(
             reasons.insert("control_flow.computed_branch_transform_unsupported".into());
         }
     }
-    let (byte_ranges, byte_classification_conflict) =
-        function_byte_ranges(&original_coverage, &instructions, &data_ranges, &gaps);
+    let retain_byte_ranges = projection == FunctionRecoveryProjection::Full;
+    let byte_classification = function_byte_ranges(
+        &original_coverage,
+        &instructions,
+        &data_ranges,
+        &gaps,
+        retain_byte_ranges,
+    );
+    let byte_ranges = byte_classification.ranges;
+    let byte_classification_conflict = byte_classification.conflict;
     if byte_classification_conflict {
         reasons.insert("control_flow.byte_classification_conflict".into());
     }
-    if byte_ranges
-        .iter()
-        .any(|range| range.kind == ControlFlowByteRangeKind::Omitted)
-    {
+    if byte_classification.omitted_bytes != 0 {
         reasons.insert("control_flow.omitted_bytes".into());
     }
-    let bytes_of_kind = |kind| {
-        byte_ranges
-            .iter()
-            .filter(|range| range.kind == kind)
-            .map(|range| range.end_exclusive - range.start)
-            .sum::<u64>()
-    };
-    let instruction_bytes = bytes_of_kind(ControlFlowByteRangeKind::Instruction);
-    let data_bytes = bytes_of_kind(ControlFlowByteRangeKind::Data);
-    let gap_bytes = bytes_of_kind(ControlFlowByteRangeKind::Gap);
-    let omitted_bytes = bytes_of_kind(ControlFlowByteRangeKind::Omitted);
+    let instruction_bytes = byte_classification.instruction_bytes;
+    let data_bytes = byte_classification.data_bytes;
+    let gap_bytes = byte_classification.gap_bytes;
+    let omitted_bytes = byte_classification.omitted_bytes;
     let observed_bytes = instruction_bytes
         .saturating_add(data_bytes)
         .saturating_add(gap_bytes)
@@ -1888,7 +2080,7 @@ fn recover_function(
     FunctionControlFlow {
         function_entry: function.entry,
         identity: function.identity.clone(),
-        instructions,
+        instructions: instructions.into_boxed_slice(),
         gaps,
         data_ranges,
         byte_ranges,
@@ -2078,12 +2270,22 @@ fn apply_exception_records(
     (transfers, continuation, partial)
 }
 
+struct FunctionByteClassification {
+    ranges: Vec<ControlFlowByteRange>,
+    conflict: bool,
+    instruction_bytes: u64,
+    data_bytes: u64,
+    gap_bytes: u64,
+    omitted_bytes: u64,
+}
+
 fn function_byte_ranges(
     coverage: &[CoverageRange],
     instructions: &[ControlFlowInstruction],
     data_ranges: &[ControlFlowDataRange],
     gaps: &[ControlFlowGap],
-) -> (Vec<ControlFlowByteRange>, bool) {
+    retain_ranges: bool,
+) -> FunctionByteClassification {
     let mut coverage_intervals = coverage
         .iter()
         .map(|range| (range.start, range.end))
@@ -2119,6 +2321,10 @@ fn function_byte_ranges(
     let gap_boundaries = interval_boundaries(&gap_intervals);
     let mut result = Vec::<ControlFlowByteRange>::new();
     let mut conflict = false;
+    let mut instruction_bytes = 0_u64;
+    let mut data_bytes = 0_u64;
+    let mut gap_bytes = 0_u64;
+    let mut omitted_bytes = 0_u64;
     for_each_merged_boundary_window(
         [
             coverage_boundaries.as_slice(),
@@ -2147,21 +2353,37 @@ fn function_byte_ranges(
                 (1, _, _, true) => ControlFlowByteRangeKind::Gap,
                 _ => ControlFlowByteRangeKind::Gap,
             };
-            if let Some(previous) = result.last_mut()
-                && previous.end_exclusive == start
-                && previous.kind == kind
-            {
-                previous.end_exclusive = end_exclusive;
-            } else {
-                result.push(ControlFlowByteRange {
-                    start,
-                    end_exclusive,
-                    kind,
-                });
+            let len = end_exclusive - start;
+            match kind {
+                ControlFlowByteRangeKind::Instruction => instruction_bytes += len,
+                ControlFlowByteRangeKind::Data => data_bytes += len,
+                ControlFlowByteRangeKind::Gap => gap_bytes += len,
+                ControlFlowByteRangeKind::Omitted => omitted_bytes += len,
+            }
+            if retain_ranges {
+                if let Some(previous) = result.last_mut()
+                    && previous.end_exclusive == start
+                    && previous.kind == kind
+                {
+                    previous.end_exclusive = end_exclusive;
+                } else {
+                    result.push(ControlFlowByteRange {
+                        start,
+                        end_exclusive,
+                        kind,
+                    });
+                }
             }
         },
     );
-    (result, conflict)
+    FunctionByteClassification {
+        ranges: result,
+        conflict,
+        instruction_bytes,
+        data_bytes,
+        gap_bytes,
+        omitted_bytes,
+    }
 }
 
 fn interval_prefix_max(intervals: &[(u64, u64)]) -> Vec<u64> {
@@ -2298,11 +2520,13 @@ fn convert_instruction(
     confidence: FunctionEvidenceConfidence,
     architecture: Arch,
 ) -> ControlFlowInstruction {
-    let operands = instruction
-        .operands()
+    let decoded_operands = instruction.operands();
+    let retained_operand_count = decoded_operands
         .iter()
-        .filter_map(convert_operand)
-        .collect();
+        .filter(|operand| convert_operand(operand).is_some())
+        .count();
+    let mut operands = Vec::with_capacity(retained_operand_count);
+    operands.extend(decoded_operands.iter().filter_map(convert_operand));
     let written_register = instruction.op0_write_target().and_then(convert_register);
     let value_effect = match instruction.value_effect {
         ValueEffect::None => ControlFlowValueEffect::None,
@@ -2384,7 +2608,7 @@ fn convert_instruction(
         byte_len: instruction.len as u8,
         kind,
         target,
-        operands,
+        operands: operands.into_boxed_slice(),
         written_register,
         value_effect,
         memory_effect,
@@ -2980,7 +3204,7 @@ fn x86_guarded_entry_range(
             ControlFlowOperand::Register { register },
             ControlFlowOperand::Immediate { value },
             ..,
-        ] = compare.operands.as_slice()
+        ] = compare.operands.as_ref()
         else {
             continue;
         };
@@ -3054,7 +3278,7 @@ fn x86_masked_entry_range(
         ControlFlowOperand::Register { register },
         ControlFlowOperand::Immediate { value },
         ..,
-    ] = mask_instruction.operands.as_slice()
+    ] = mask_instruction.operands.as_ref()
     else {
         return None;
     };
@@ -3102,7 +3326,7 @@ fn x86_shifted_entry_range(
             amount,
         },
         ..,
-    ] = shift_instruction.operands.as_slice()
+    ] = shift_instruction.operands.as_ref()
     else {
         return None;
     };
@@ -3466,6 +3690,13 @@ fn build_blocks(
     (blocks, continuation)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ConnectBlockOptions {
+    maximum_edges: usize,
+    retain_calls: bool,
+    retain_exit_ownership: bool,
+}
+
 fn connect_blocks(
     instructions: &[ControlFlowInstruction],
     blocks: &[BasicBlock],
@@ -3473,13 +3704,18 @@ fn connect_blocks(
     functions: &FunctionIndex,
     non_returning_stubs: &BTreeMap<u64, String>,
     non_returning_functions: &BTreeSet<u64>,
-    maximum_edges: usize,
+    options: ConnectBlockOptions,
 ) -> (
     Vec<ControlFlowEdge>,
     Vec<ControlFlowExit>,
     Vec<ControlFlowCallsite>,
     Option<ControlFlowEdge>,
 ) {
+    let ConnectBlockOptions {
+        maximum_edges,
+        retain_calls,
+        retain_exit_ownership,
+    } = options;
     let block_at = |address| {
         blocks
             .binary_search_by_key(&address, |block| block.start)
@@ -3493,40 +3729,42 @@ fn connect_blocks(
     for block in blocks {
         let start = block.first_instruction as usize;
         let end = start + block.instruction_count as usize;
-        for instruction in &instructions[start..end] {
-            if instruction.kind == ControlFlowInstructionKind::Call
-                && let Some(target) = instruction.target.as_ref()
-            {
-                let non_returning_symbol = match target {
-                    InstructionTarget::Direct { address } => {
-                        non_returning_stubs.get(address).cloned()
-                    }
-                    _ => None,
-                };
-                let non_returning_callee = match target {
-                    InstructionTarget::Direct { address }
-                        if non_returning_functions.contains(address) =>
-                    {
-                        Some(*address)
-                    }
-                    _ => None,
-                };
-                calls.push(ControlFlowCallsite {
-                    block: block.id,
-                    instruction_address: instruction.address,
-                    target: call_target(target, functions),
-                    return_behavior: if non_returning_symbol.is_some()
-                        || non_returning_callee.is_some()
-                    {
-                        ControlFlowCallReturnBehavior::NonReturning
-                    } else {
-                        ControlFlowCallReturnBehavior::MayReturn
-                    },
-                    non_returning_symbol,
-                    non_returning_callee,
-                    exceptional_behavior: ControlFlowCallExceptionBehavior::NotEstablished,
-                    landing_pads: Vec::new(),
-                });
+        if retain_calls {
+            for instruction in &instructions[start..end] {
+                if instruction.kind == ControlFlowInstructionKind::Call
+                    && let Some(target) = instruction.target.as_ref()
+                {
+                    let non_returning_symbol = match target {
+                        InstructionTarget::Direct { address } => {
+                            non_returning_stubs.get(address).cloned()
+                        }
+                        _ => None,
+                    };
+                    let non_returning_callee = match target {
+                        InstructionTarget::Direct { address }
+                            if non_returning_functions.contains(address) =>
+                        {
+                            Some(*address)
+                        }
+                        _ => None,
+                    };
+                    calls.push(ControlFlowCallsite {
+                        block: block.id,
+                        instruction_address: instruction.address,
+                        target: call_target(target, functions),
+                        return_behavior: if non_returning_symbol.is_some()
+                            || non_returning_callee.is_some()
+                        {
+                            ControlFlowCallReturnBehavior::NonReturning
+                        } else {
+                            ControlFlowCallReturnBehavior::MayReturn
+                        },
+                        non_returning_symbol,
+                        non_returning_callee,
+                        exceptional_behavior: ControlFlowCallExceptionBehavior::NotEstablished,
+                        landing_pads: Vec::new(),
+                    });
+                }
             }
         }
         let last = &instructions[end - 1];
@@ -3554,7 +3792,13 @@ fn connect_blocks(
                             &mut continuation,
                         );
                     } else {
-                        let mut exit = direct_exit(block.id, last.address, *address, functions);
+                        let mut exit = direct_exit(
+                            block.id,
+                            last.address,
+                            *address,
+                            functions,
+                            retain_exit_ownership,
+                        );
                         if non_returning_stubs.contains_key(address)
                             || non_returning_functions.contains(address)
                         {
@@ -3595,7 +3839,13 @@ fn connect_blocks(
                             &mut continuation,
                         );
                     } else {
-                        let mut exit = direct_exit(block.id, last.address, *address, functions);
+                        let mut exit = direct_exit(
+                            block.id,
+                            last.address,
+                            *address,
+                            functions,
+                            retain_exit_ownership,
+                        );
                         if non_returning_stubs.contains_key(address)
                             || non_returning_functions.contains(address)
                         {
@@ -3776,14 +4026,22 @@ fn direct_exit(
     instruction_address: u64,
     target: u64,
     functions: &FunctionIndex,
+    retain_ownership: bool,
 ) -> ControlFlowExit {
-    let possible_functions = recovered_function_targets(functions, target);
+    let (recovered_function, possible_functions) = if retain_ownership {
+        (
+            functions.by_entry(target).map(|function| function.entry),
+            recovered_function_targets(functions, target),
+        )
+    } else {
+        (None, Vec::new())
+    };
     ControlFlowExit {
         block,
         instruction_address: Some(instruction_address),
         kind: ControlFlowExitKind::DirectBranch,
         target: Some(target),
-        recovered_function: functions.by_entry(target).map(|function| function.entry),
+        recovered_function,
         possible_functions,
     }
 }
@@ -3970,6 +4228,67 @@ fn instruction_arch(macho: &MachoFile<'_>) -> Option<Arch> {
 mod tests {
     use super::*;
     use crate::analysis::functions::FunctionRecoveryLimits;
+
+    fn instruction_with_operand_count(count: usize) -> ControlFlowInstruction {
+        ControlFlowInstruction {
+            address: 0x1_0000_0100,
+            byte_len: 4,
+            kind: ControlFlowInstructionKind::Other,
+            target: None,
+            operands: (0..count)
+                .map(|value| ControlFlowOperand::Immediate {
+                    value: value as i64,
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+            written_register: None,
+            value_effect: ControlFlowValueEffect::None,
+            memory_effect: ControlFlowMemoryEffect::None,
+            writes_implicit_gpr0: false,
+            pc_relative: None,
+            coverage_confidence: FunctionEvidenceConfidence::Exact,
+        }
+    }
+
+    #[test]
+    fn decode_arena_respects_decode_and_memory_caps() {
+        let entry_bytes = size_of::<CachedControlFlowInstruction>();
+        assert_eq!(ControlFlowDecodeArena::new(17).maximum_entries, 17);
+        let capped = ControlFlowDecodeArena::new(usize::MAX);
+        assert!(capped.maximum_entries > 0);
+        assert!(capped.maximum_entries.saturating_mul(entry_bytes) <= 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn decode_arena_reuses_forward_and_backward_address_sequences() {
+        let instruction = crate::insn::decode_one(&[0x90], 0x1000, Arch::X86_64).unwrap();
+        let mut arena = ControlFlowDecodeArena::new(4);
+        arena.record(0x1001, &instruction);
+        arena.record(0x1000, &instruction);
+        arena.prepare_for_reuse();
+
+        assert!(arena.get(0x1000).is_some());
+        assert!(arena.get(0x1001).is_some());
+        assert!(arena.get(0x1001).is_some());
+        assert!(arena.get(0x1002).is_none());
+        assert!(arena.get(0x1000).is_some());
+    }
+
+    #[test]
+    fn compact_operand_storage_preserves_all_counts_and_serialization() {
+        for count in [0, 2, 7] {
+            let instruction = instruction_with_operand_count(count);
+            assert_eq!(instruction.operands.len(), count);
+
+            let serialized = serde_json::to_value(&instruction).expect("instruction serializes");
+            assert_eq!(serialized["operands"].as_array().unwrap().len(), count);
+            assert_eq!(
+                serde_json::from_value::<ControlFlowInstruction>(serialized)
+                    .expect("instruction deserializes"),
+                instruction
+            );
+        }
+    }
 
     fn image(bytes: &[u8]) -> crate::core::MachoFile<'_> {
         match crate::core::parse(bytes).expect("fixture parses") {
@@ -4244,7 +4563,11 @@ mod tests {
             &functions,
             &BTreeMap::new(),
             &BTreeSet::from([0x1_0000_0120]),
-            usize::MAX,
+            ConnectBlockOptions {
+                maximum_edges: usize::MAX,
+                retain_calls: true,
+                retain_exit_ownership: true,
+            },
         );
         assert!(exits.iter().any(|exit| {
             exit.target == Some(0x1_0000_0120)

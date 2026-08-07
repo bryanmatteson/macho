@@ -64,6 +64,8 @@ pub mod image_layout;
 pub mod indirect_calls;
 /// Bounded strict Objective-C runtime inventory.
 pub mod objc_index;
+/// Pointer-authentication inventory, code-site recovery, and patch assessment.
+pub mod pac;
 /// The paths module.
 pub mod paths;
 pub mod planner;

@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::analysis::Result;
 use crate::analysis::control_flow::{
-    ControlFlowGapKind, ControlFlowIndex, ControlFlowInstruction, ControlFlowInstructionKind,
-    ControlFlowOperand, ControlFlowPcRelativeKind, ControlFlowRegister, ControlFlowValueEffect,
-    FunctionControlFlow, InstructionTarget,
+    ControlFlowDecodeArena, ControlFlowGapKind, ControlFlowIndex, ControlFlowIndexStatus,
+    ControlFlowInstruction, ControlFlowInstructionKind, ControlFlowLimits, ControlFlowOperand,
+    ControlFlowPcRelativeKind, ControlFlowRegister, ControlFlowValueEffect, FunctionControlFlow,
+    InstructionTarget,
 };
 use crate::analysis::dyld::bind::parse_bind_entries;
 use crate::analysis::dyld::chained::parse_chained_fixups;
@@ -14,6 +15,7 @@ use crate::analysis::dyld::types::FixupKind;
 use crate::analysis::ext::MachoExt;
 use crate::analysis::format::constants::*;
 use crate::analysis::format::relocations_for_section;
+use crate::analysis::functions::{FunctionControlFlowRefinement, FunctionIndex};
 use crate::analysis::model::addr::types::{ThinFileOffset, Va};
 use crate::analysis::model::macho_file::MachoFile;
 use crate::analysis::model::relocation::Relocation;
@@ -160,6 +162,110 @@ struct XrefBuild {
     value_flow_truncated: bool,
     partial: bool,
     collectors: Vec<XrefCollectorReceipt>,
+}
+
+struct InstructionXrefAccumulator {
+    limits: XrefRecoveryLimits,
+    instruction_limit: usize,
+    refs: Vec<Xref>,
+    decode_gaps: Vec<crate::insn::DecodeGap>,
+    instruction_truncated: bool,
+    decode_budget_truncated: bool,
+    value_flow_budget: XrefValueFlowBudget,
+    value_flow_truncated: bool,
+    remaining_decoded_bytes: u64,
+    stopped: bool,
+}
+
+impl InstructionXrefAccumulator {
+    fn new(limits: XrefRecoveryLimits, instruction_limit: usize) -> Self {
+        Self {
+            limits,
+            instruction_limit,
+            refs: Vec::new(),
+            decode_gaps: Vec::new(),
+            instruction_truncated: false,
+            decode_budget_truncated: false,
+            value_flow_budget: XrefValueFlowBudget::new(limits.max_value_flow_work),
+            value_flow_truncated: false,
+            remaining_decoded_bytes: limits.max_decoded_bytes as u64,
+            stopped: false,
+        }
+    }
+
+    fn observe(&mut self, graph: &FunctionControlFlow) {
+        if self.stopped {
+            return;
+        }
+        let graph_bytes = graph.completeness.decoded_bytes;
+        if graph_bytes > self.remaining_decoded_bytes {
+            self.decode_budget_truncated = true;
+            self.stopped = true;
+            return;
+        }
+        self.remaining_decoded_bytes -= graph_bytes;
+        for gap in &graph.gaps {
+            self.decode_gaps.push(crate::insn::DecodeGap {
+                offset: 0,
+                len: usize::try_from(gap.end_exclusive.saturating_sub(gap.start))
+                    .unwrap_or(usize::MAX),
+                va: gap.start,
+                error: crate::insn::DecodeError {
+                    kind: crate::insn::DecodeErrorKind::InvalidEncoding,
+                    message: match gap.kind {
+                        ControlFlowGapKind::InvalidInstruction => {
+                            "invalid instruction in recovered function".into()
+                        }
+                        ControlFlowGapKind::UnmappedRange => {
+                            "unmapped recovered function range".into()
+                        }
+                    },
+                },
+            });
+        }
+        for instruction in &graph.instructions {
+            if let Some(InstructionTarget::Direct { address }) = &instruction.target {
+                let _ = push_ref(
+                    &mut self.refs,
+                    self.instruction_limit,
+                    &mut self.instruction_truncated,
+                    Xref {
+                        source: Va(instruction.address),
+                        target: XrefTarget::Internal { va: Va(*address) },
+                        kind: XrefKind::DirectBranch,
+                    },
+                );
+            }
+            if self.instruction_truncated {
+                self.stopped = true;
+                return;
+            }
+        }
+        let data = recover_data_references(
+            graph,
+            self.limits.max_values_per_register,
+            &mut self.value_flow_budget,
+        );
+        self.value_flow_truncated |= data.truncated;
+        for (source, target) in data.references {
+            if !push_ref(
+                &mut self.refs,
+                self.instruction_limit,
+                &mut self.instruction_truncated,
+                Xref {
+                    source: Va(source),
+                    target: XrefTarget::Internal { va: Va(target) },
+                    kind: XrefKind::Data,
+                },
+            ) {
+                break;
+            }
+        }
+        if self.instruction_truncated || self.value_flow_budget.exhausted {
+            self.value_flow_truncated |= self.value_flow_budget.exhausted;
+            self.stopped = true;
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +468,169 @@ impl XrefIndex {
         Self::recover_seeded(macho, control_flow, limits, Some(pointers.format_index()))
     }
 
+    pub(crate) fn recover_streaming_with_pointers(
+        macho: &MachoFile<'_>,
+        functions: &FunctionIndex,
+        pointers: &crate::analysis::pointer_index::PointerIndex,
+        control_flow_limits: ControlFlowLimits,
+        limits: XrefRecoveryLimits,
+    ) -> Result<Self> {
+        let limits = limits.validate()?;
+        let image = crate::analysis::functions::FunctionImageIdentity::from_macho(macho);
+        if functions.image() != &image || pointers.image() != &image {
+            return Err(crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Validation,
+                "function, pointer, and xref image identities differ",
+            ));
+        }
+        let format = pointers.format_index();
+        let mut refs = format.refs.clone();
+        let mut refs_truncated = format.refs_truncated;
+        if refs.len() > limits.max_refs {
+            refs.truncate(limits.max_refs);
+            refs_truncated = true;
+        }
+        let mut collectors = format.completeness.collectors.clone();
+        let instruction_limit = limits.max_refs.saturating_sub(refs.len());
+
+        // Once authoritative format records consume the complete retention
+        // budget, no instruction reference can be admitted.  Do not recover
+        // and refine every function graph merely to rediscover that fixed
+        // budget boundary.
+        if instruction_limit == 0 {
+            return Ok(Self::finish_instruction_saturated(
+                macho, limits, refs, collectors,
+            ));
+        }
+        let refinement_only_provisional = macho.header().cpu_type().0
+            == crate::core::format::constants::CPU_TYPE_X86_64
+            && FunctionControlFlowRefinement::may_change(functions);
+        let decode_arena = refinement_only_provisional.then(|| {
+            std::cell::RefCell::new(ControlFlowDecodeArena::new(
+                control_flow_limits.max_decoded_bytes,
+            ))
+        });
+        struct ProvisionalFold {
+            refinement: FunctionControlFlowRefinement,
+            instructions: InstructionXrefAccumulator,
+        }
+
+        let fold_error = |error: crate::analysis::control_flow::ControlFlowRecoveryError| {
+            let kind = if matches!(
+                error,
+                crate::analysis::control_flow::ControlFlowRecoveryError::UnsupportedArchitecture
+            ) {
+                crate::analysis::AnalysisErrorKind::UnsupportedCapability
+            } else {
+                crate::analysis::AnalysisErrorKind::Parse
+            };
+            crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                kind,
+                format!("recover streaming control flow: {error}"),
+            )
+        };
+        let (mut instructions, summary) = if refinement_only_provisional {
+            let (refinement, _) = ControlFlowIndex::fold_with_pointers(
+                macho,
+                functions,
+                pointers,
+                control_flow_limits,
+                decode_arena.as_ref(),
+                |_| FunctionControlFlowRefinement::new(functions),
+                |refinement, graph| refinement.observe(functions, &graph),
+            )
+            .map_err(&fold_error)?;
+            let refined = refinement.finish_if_changed(functions);
+            ControlFlowIndex::fold_with_pointers(
+                macho,
+                refined.as_ref().unwrap_or(functions),
+                pointers,
+                control_flow_limits,
+                decode_arena.as_ref(),
+                |_| InstructionXrefAccumulator::new(limits, instruction_limit),
+                |accumulator, graph| accumulator.observe(&graph),
+            )
+            .map_err(&fold_error)?
+        } else {
+            let (provisional, provisional_summary) = ControlFlowIndex::fold_with_pointers(
+                macho,
+                functions,
+                pointers,
+                control_flow_limits,
+                None,
+                |_| ProvisionalFold {
+                    refinement: FunctionControlFlowRefinement::new(functions),
+                    instructions: InstructionXrefAccumulator::new(limits, instruction_limit),
+                },
+                |accumulator, graph| {
+                    accumulator.refinement.observe(functions, &graph);
+                    accumulator.instructions.observe(&graph);
+                },
+            )
+            .map_err(&fold_error)?;
+            let refined = provisional.refinement.finish_if_changed(functions);
+            if let Some(refined) = refined {
+                ControlFlowIndex::fold_with_pointers(
+                    macho,
+                    &refined,
+                    pointers,
+                    control_flow_limits,
+                    None,
+                    |_| InstructionXrefAccumulator::new(limits, instruction_limit),
+                    |accumulator, graph| accumulator.observe(&graph),
+                )
+                .map_err(&fold_error)?
+            } else {
+                (provisional.instructions, provisional_summary)
+            }
+        };
+
+        instructions
+            .decode_gaps
+            .sort_by_key(|gap| (gap.va, gap.len));
+        instructions
+            .decode_gaps
+            .dedup_by_key(|gap| (gap.va, gap.len));
+        let control_flow_truncated = summary.status == ControlFlowIndexStatus::Truncated;
+        let control_flow_partial = summary.status == ControlFlowIndexStatus::Partial;
+        collectors.push(instruction_receipt(
+            instructions.refs.len(),
+            if instructions.instruction_truncated {
+                Some("xrefs.retention_budget")
+            } else if instructions.decode_budget_truncated {
+                Some("xrefs.decode_budget")
+            } else if instructions.value_flow_truncated {
+                Some("xrefs.value_flow_budget")
+            } else if control_flow_truncated {
+                Some("xrefs.source_control_flow_truncated")
+            } else {
+                None
+            },
+            control_flow_partial,
+        ));
+        refs.extend(instructions.refs);
+        refs_truncated |= instructions.instruction_truncated;
+        refs.sort_by_key(|reference| reference.source);
+        Ok(Self::finish(
+            macho,
+            limits,
+            XrefBuild {
+                refs,
+                decode_gaps: instructions.decode_gaps,
+                refs_truncated,
+                decoded_bytes_truncated: control_flow_truncated
+                    || instructions.decode_budget_truncated,
+                decode_budget_truncated: instructions.decode_budget_truncated,
+                source_control_flow_truncated: control_flow_truncated,
+                value_flow_truncated: instructions.value_flow_truncated,
+                partial: control_flow_partial,
+                collectors,
+            },
+        ))
+    }
+
     fn recover_seeded(
         macho: &MachoFile<'_>,
         control_flow: &ControlFlowIndex,
@@ -393,6 +662,12 @@ impl XrefIndex {
             (refs, truncated, collectors)
         };
 
+        let instruction_limit = limits.max_refs.saturating_sub(refs.len());
+        if instruction_limit == 0 {
+            return Ok(Self::finish_instruction_saturated(
+                macho, limits, refs, collectors,
+            ));
+        }
         let mut decode_gaps = Vec::new();
         let mut instruction_refs = Vec::new();
         let mut instruction_truncated = false;
@@ -400,7 +675,6 @@ impl XrefIndex {
         let mut value_flow_budget = XrefValueFlowBudget::new(limits.max_value_flow_work);
         let mut value_flow_truncated = false;
         let mut remaining_decoded_bytes = limits.max_decoded_bytes as u64;
-        let instruction_limit = limits.max_refs.saturating_sub(refs.len());
         for graph in control_flow.functions() {
             let graph_bytes = graph.completeness.decoded_bytes;
             if graph_bytes > remaining_decoded_bytes {
@@ -415,6 +689,7 @@ impl XrefIndex {
                         .unwrap_or(usize::MAX),
                     va: gap.start,
                     error: crate::insn::DecodeError {
+                        kind: crate::insn::DecodeErrorKind::InvalidEncoding,
                         message: match gap.kind {
                             ControlFlowGapKind::InvalidInstruction => {
                                 "invalid instruction in recovered function".into()
@@ -664,6 +939,35 @@ impl XrefIndex {
             refs_truncated,
             decoded_bytes_truncated,
         }
+    }
+
+    fn finish_instruction_saturated(
+        macho: &MachoFile<'_>,
+        limits: XrefRecoveryLimits,
+        mut refs: Vec<Xref>,
+        mut collectors: Vec<XrefCollectorReceipt>,
+    ) -> Self {
+        collectors.push(instruction_receipt(
+            0,
+            Some("xrefs.retention_budget"),
+            false,
+        ));
+        refs.sort_by_key(|reference| reference.source);
+        Self::finish(
+            macho,
+            limits,
+            XrefBuild {
+                refs,
+                decode_gaps: Vec::new(),
+                refs_truncated: true,
+                decoded_bytes_truncated: false,
+                decode_budget_truncated: false,
+                source_control_flow_truncated: false,
+                value_flow_truncated: false,
+                partial: false,
+                collectors,
+            },
+        )
     }
 
     /// Exact selected-image identity.
@@ -1838,11 +2142,13 @@ mod targeted_tests {
     use std::collections::BTreeSet;
 
     use super::{
-        XrefIndex, XrefIndexStatus, XrefKind, XrefRecoveryLimits, XrefTarget,
-        arm64_direct_branch_target,
+        Xref, XrefCollectorStatus, XrefEvidenceSource, XrefIndex, XrefIndexStatus, XrefKind,
+        XrefRecoveryLimits, XrefTarget, arm64_direct_branch_target,
     };
     use crate::analysis::control_flow::{ControlFlowIndex, ControlFlowLimits, InstructionTarget};
     use crate::analysis::functions::{FunctionIndex, FunctionRecoveryLimits};
+    use crate::analysis::model::addr::types::Va;
+    use crate::analysis::pointer_index::PointerIndex;
     use crate::analysis::program::{ProgramRecoveryLimits, RecoveredProgram};
 
     #[test]
@@ -1891,6 +2197,194 @@ mod targeted_tests {
             .collect::<BTreeSet<_>>();
         assert!(!expected.is_empty());
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn streaming_projection_matches_retained_cfg_across_architectures() {
+        for bytes in [
+            macho_test_support::disassembly_x86_64(),
+            macho_test_support::disassembly_arm64(),
+        ] {
+            let container = crate::core::parse(&bytes).unwrap();
+            let macho = container.first_macho().unwrap();
+            for control_flow in [
+                ControlFlowLimits::default(),
+                ControlFlowLimits {
+                    max_decoded_bytes: 8,
+                    ..ControlFlowLimits::default()
+                },
+                ControlFlowLimits {
+                    max_instructions_per_function: 1,
+                    ..ControlFlowLimits::default()
+                },
+                ControlFlowLimits {
+                    max_blocks_per_function: 1,
+                    max_edges_per_function: 1,
+                    ..ControlFlowLimits::default()
+                },
+            ] {
+                let limits = ProgramRecoveryLimits {
+                    control_flow,
+                    ..ProgramRecoveryLimits::default()
+                };
+                let functions = FunctionIndex::recover(macho, limits.functions).unwrap();
+                let pointers = PointerIndex::recover(macho, limits.pointers).unwrap();
+                let retained = RecoveredProgram::recover_from_functions(
+                    macho,
+                    functions.clone(),
+                    crate::analysis::program::ProgramRecoveryRequest::new(
+                        [crate::analysis::program::ProgramRecoveryStage::Xrefs],
+                        limits,
+                    ),
+                )
+                .unwrap();
+                let streaming = XrefIndex::recover_streaming_with_pointers(
+                    macho,
+                    &functions,
+                    &pointers,
+                    limits.control_flow,
+                    limits.xrefs,
+                )
+                .unwrap();
+                assert_eq!(Some(&streaming), retained.xrefs());
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires MACHO_XREF_PARITY_FIXTURE"]
+    fn streaming_projection_matches_retained_cfg_on_external_fixture() {
+        let path = std::env::var("MACHO_XREF_PARITY_FIXTURE")
+            .expect("MACHO_XREF_PARITY_FIXTURE names a representative Mach-O binary");
+        let bytes = std::fs::read(path).expect("fixture can be read");
+        let container = crate::core::parse(&bytes).expect("fixture parses");
+        let macho = container
+            .first_macho()
+            .expect("fixture contains a Mach-O image");
+        let limits = ProgramRecoveryLimits {
+            control_flow: ControlFlowLimits {
+                max_decoded_bytes: 4 * 1024 * 1024,
+                ..ControlFlowLimits::default()
+            },
+            xrefs: XrefRecoveryLimits {
+                max_refs: 1_000_000,
+                max_decoded_bytes: 4 * 1024 * 1024,
+                ..XrefRecoveryLimits::default()
+            },
+            ..ProgramRecoveryLimits::default()
+        };
+        let functions = FunctionIndex::recover(macho, limits.functions).unwrap();
+        let pointers = PointerIndex::recover(macho, limits.pointers).unwrap();
+        let retained = RecoveredProgram::recover_from_functions(
+            macho,
+            functions.clone(),
+            crate::analysis::program::ProgramRecoveryRequest::new(
+                [crate::analysis::program::ProgramRecoveryStage::Xrefs],
+                limits,
+            ),
+        )
+        .unwrap();
+        let streaming = XrefIndex::recover_streaming_with_pointers(
+            macho,
+            &functions,
+            &pointers,
+            limits.control_flow,
+            limits.xrefs,
+        )
+        .unwrap();
+        assert_eq!(Some(&streaming), retained.xrefs());
+    }
+
+    #[test]
+    fn saturated_format_budget_skips_instruction_projection_consistently() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let container = crate::core::parse(&bytes).unwrap();
+        let macho = container.first_macho().unwrap();
+        let functions = FunctionIndex::recover(macho, FunctionRecoveryLimits::default()).unwrap();
+        let control_flow =
+            ControlFlowIndex::recover(macho, &functions, ControlFlowLimits::default()).unwrap();
+        assert!(control_flow.functions().iter().any(|graph| {
+            graph.instructions.iter().any(|instruction| {
+                matches!(instruction.target, Some(InstructionTarget::Direct { .. }))
+            })
+        }));
+
+        let mut format = XrefIndex::recover_format(macho, usize::MAX).unwrap();
+        format.refs = vec![Xref {
+            source: Va(0x1000),
+            target: XrefTarget::Internal { va: Va(0x2000) },
+            kind: XrefKind::Stub,
+        }];
+        format.refs_truncated = false;
+        format.completeness.collectors.clear();
+        format.completeness.retained_refs = 1;
+
+        let saturated = XrefIndex::recover_seeded(
+            macho,
+            &control_flow,
+            XrefRecoveryLimits {
+                max_refs: 1,
+                ..XrefRecoveryLimits::default()
+            },
+            Some(&format),
+        )
+        .unwrap();
+        assert_eq!(saturated.all_refs(), format.all_refs());
+        assert_eq!(saturated.status(), XrefIndexStatus::Truncated);
+        assert!(saturated.decode_gaps().is_empty());
+        assert!(saturated.completeness().collectors.iter().any(|receipt| {
+            receipt.source == XrefEvidenceSource::Instructions
+                && receipt.status == XrefCollectorStatus::Truncated
+                && receipt.retained == 0
+                && receipt.diagnostic.as_deref() == Some("xrefs.retention_budget")
+        }));
+    }
+
+    #[test]
+    fn format_budget_edges_are_admitted_deterministically() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let container = crate::core::parse(&bytes).unwrap();
+        let macho = container.first_macho().unwrap();
+        let functions = FunctionIndex::recover(macho, FunctionRecoveryLimits::default()).unwrap();
+        let control_flow =
+            ControlFlowIndex::recover(macho, &functions, ControlFlowLimits::default()).unwrap();
+        let mut format = XrefIndex::recover_format(macho, usize::MAX).unwrap();
+        format.refs = vec![
+            Xref {
+                source: Va(0x1000),
+                target: XrefTarget::Internal { va: Va(0x2000) },
+                kind: XrefKind::Stub,
+            },
+            Xref {
+                source: Va(0x1008),
+                target: XrefTarget::Internal { va: Va(0x2008) },
+                kind: XrefKind::Stub,
+            },
+        ];
+        format.refs_truncated = false;
+        format.completeness.collectors.clear();
+        format.completeness.retained_refs = format.refs.len() as u64;
+
+        for max_refs in [1, 2, 3] {
+            let limits = XrefRecoveryLimits {
+                max_refs,
+                ..XrefRecoveryLimits::default()
+            };
+            let first =
+                XrefIndex::recover_seeded(macho, &control_flow, limits, Some(&format)).unwrap();
+            let repeated =
+                XrefIndex::recover_seeded(macho, &control_flow, limits, Some(&format)).unwrap();
+            assert_eq!(first, repeated);
+            assert_eq!(first.all_refs().len(), max_refs);
+            assert_eq!(
+                first
+                    .all_refs()
+                    .iter()
+                    .filter(|reference| reference.kind == XrefKind::Stub)
+                    .count(),
+                max_refs.min(2)
+            );
+        }
     }
 
     #[test]

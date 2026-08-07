@@ -3,10 +3,6 @@
 version = 4
 
 [[package]]
-name = "aarch64"
-version = "0.1.0"
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1449,15 +1445,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced-x86"
-version = "1.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,17 +1765,14 @@ dependencies = [
 name = "macho"
 version = "1.0.0"
 dependencies = [
- "aarch64",
  "apple-codesign",
  "bitflags 2.13.1",
  "bytes",
- "iced-x86",
  "serde",
  "sha2 0.11.0",
  "signature",
  "thiserror 2.0.19",
  "x509-certificate",
- "x86_64",
  "zerocopy",
  "zeroize",
 ]
@@ -3813,10 +3797,6 @@ dependencies = [
  "thiserror 1.0.69",
  "zeroize",
 ]
-
-[[package]]
-name = "x86_64"
-version = "0.1.0"
 
 [[package]]
 name = "xml-rs"

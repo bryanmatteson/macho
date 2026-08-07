@@ -89,12 +89,77 @@ fn x86_recovery_accounts_for_every_selected_byte() {
     assert_eq!(slice.status, DisassemblyStatus::Partial);
     assert!(matches!(
         slice.regions[0].records.last(),
-        Some(DisassemblyRecord::Gap { code, .. }) if code == "insn.decode.invalid"
+        Some(DisassemblyRecord::Gap { code, .. }) if code == "insn.decode.truncated"
     ));
     let encoded = serde_json::to_vec(&report).unwrap();
     let decoded: crate::analysis::report::disassembly::DisassemblyReport =
         serde_json::from_slice(&encoded).unwrap();
     assert_eq!(decoded, report);
+}
+
+#[test]
+fn recovering_disassembly_keeps_reserved_x86_bytes_out_of_instructions() {
+    let mut bytes = macho_test_support::disassembly_x86_64();
+    bytes[0x100..0x104].copy_from_slice(&[0x0f, 0xa7, 0xc1, 0x90]);
+    let container = crate::core::parse(&bytes).unwrap();
+    let selection = DisassemblySelection::Address {
+        start: Va(0x1_0000_0100),
+        extent: AddressExtent::ByteLength(NonZeroUsize::new(4).unwrap()),
+    };
+    let report = disassemble(&container, &request(selection.clone())).unwrap();
+    let region = &report.slices[0].regions[0];
+    assert_eq!(region.emitted_instruction_count, 1);
+    assert_eq!(region.records.len(), 2);
+    let DisassemblyRecord::Gap { bytes, code, .. } = &region.records[0] else {
+        panic!("expected reserved bytes to remain a gap")
+    };
+    assert_eq!(bytes.as_str(), "0fa7c1");
+    assert_eq!(code, "insn.decode.unknown_encoding");
+    let DisassemblyRecord::Instruction {
+        size,
+        text,
+        encoding,
+        ..
+    } = &region.records[1]
+    else {
+        panic!("expected decode to resume at nop")
+    };
+    assert_eq!(*size, 1);
+    assert_eq!(text, "nop");
+    assert!(encoding.is_none());
+    report.validate().unwrap();
+
+    let mut strict = request(selection);
+    strict.mode = DecodeMode::Strict;
+    let error = disassemble(&container, &strict).unwrap_err();
+    assert_eq!(error.code(), "insn.decode.unknown_encoding");
+}
+
+#[test]
+fn x86_resynchronization_prefers_a_confirmed_decode_run() {
+    let mut bytes = macho_test_support::disassembly_x86_64();
+    bytes[0x100..0x105].copy_from_slice(&[0x06, 0x90, 0x06, 0x90, 0x90]);
+    let container = crate::core::parse(&bytes).unwrap();
+    let report = disassemble(
+        &container,
+        &request(DisassemblySelection::Address {
+            start: Va(0x1_0000_0100),
+            extent: AddressExtent::ByteLength(NonZeroUsize::new(5).unwrap()),
+        }),
+    )
+    .unwrap();
+    let records = &report.slices[0].regions[0].records;
+    assert_eq!(records.len(), 3);
+    assert!(matches!(
+        &records[0],
+        DisassemblyRecord::Gap { bytes, .. } if bytes.as_str() == "069006"
+    ));
+    assert!(
+        matches!(&records[1], DisassemblyRecord::Instruction { va, .. } if *va == 0x1_0000_0103)
+    );
+    assert!(
+        matches!(&records[2], DisassemblyRecord::Instruction { va, .. } if *va == 0x1_0000_0104)
+    );
 }
 
 #[test]
@@ -307,6 +372,7 @@ fn supported_architecture_records_and_targets_are_complete() {
                 text,
                 kind,
                 direct_target,
+                encoding,
             } => {
                 assert_eq!(*va, 0x1_0000_0100);
                 assert_eq!(*thin_file_offset, 0x100);
@@ -314,6 +380,7 @@ fn supported_architecture_records_and_targets_are_complete() {
                 assert_eq!(*actual_size, size);
                 assert_eq!(bytes.as_str(), raw);
                 assert!(!text.is_empty());
+                assert!(encoding.is_none());
                 assert_eq!(
                     *kind,
                     crate::analysis::report::disassembly::InstructionKind::Branch
@@ -386,7 +453,7 @@ fn strict_decode_is_fail_closed() {
         ..DisassemblyRequest::default()
     };
     let error = disassemble(&container, &request).unwrap_err();
-    assert_eq!(error.code(), "insn.decode.invalid");
+    assert_eq!(error.code(), "insn.decode.truncated");
 }
 
 #[test]

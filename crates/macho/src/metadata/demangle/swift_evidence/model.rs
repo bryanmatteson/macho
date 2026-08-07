@@ -185,6 +185,10 @@ pub enum SwiftCallableVariantRole {
     DispatchThunk,
     /// Reabstraction thunk.
     ReabstractionThunk,
+    /// Partial-apply forwarder for a native Swift closure context.
+    PartialApplyForwarder,
+    /// Partial-apply forwarder bridging an Objective-C block context.
+    PartialApplyObjcForwarder,
     /// Specialization.
     Specialization,
     /// Prespecialization.
@@ -207,6 +211,28 @@ pub enum SwiftCallableVariantRole {
     MetadataAccessor,
     /// Witness accessor.
     WitnessAccessor,
+}
+
+/// Physical closure or closure-adapter role encoded directly by a Swift symbol.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum SwiftClosureSymbolKind {
+    /// Body entry for an explicit or implicit closure.
+    ClosureEntry,
+    /// Reabstraction thunk adapting one Swift closure representation to another.
+    ReabstractionThunk,
+    /// Partial-apply forwarder unpacking a native Swift closure context.
+    PartialApplyForwarder,
+    /// Partial-apply forwarder unpacking an Objective-C block context.
+    PartialApplyObjcForwarder,
+}
+
+/// Bounded structural classification of a closure-related Swift linkage name.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SwiftClosureSymbolEvidence {
+    /// Physical role carried by the mangling.
+    pub kind: SwiftClosureSymbolKind,
+    /// Process-free parser spelling.
+    pub display: String,
 }
 
 /// Swift function representation.

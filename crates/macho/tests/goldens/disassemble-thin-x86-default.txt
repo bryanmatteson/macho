@@ -63,4 +63,4 @@ _helper:
   0x000000010000013c  90                              nop
   0x000000010000013d  90                              nop
   0x000000010000013e  90                              nop
-  0x000000010000013f  0f                              <insn.decode.invalid> decode: invalid instruction
+  0x000000010000013f  0f                              <insn.decode.truncated> decode: truncated instruction

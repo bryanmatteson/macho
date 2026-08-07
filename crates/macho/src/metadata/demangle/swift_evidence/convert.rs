@@ -1,6 +1,6 @@
 use swift_demangler::raw::{Node, NodeKind};
 use swift_demangler::{
-    Accessor, AccessorKind, AsyncSymbol, AsyncSymbolKind, ContextComponent, Destructor,
+    Accessor, AccessorKind, AsyncSymbol, AsyncSymbolKind, Closure, ContextComponent, Destructor,
     DestructorKind, Function, FunctionConvention, HasFunctionSignature, HasGenericSignature,
     HasModule, ImplFunctionType, ReabstractionThunk, SpecializationKind, SpecializedSymbol, Symbol,
     Thunk, TypeKind, TypeRef,
@@ -87,11 +87,97 @@ pub(super) fn thunk_entity(
             Ok(ast)
         }
         Thunk::Reabstraction(thunk) => reabstraction_entity(thunk, limits),
+        Thunk::PartialApply { inner, is_objc, .. } => {
+            let inner = inner.ok_or_else(|| {
+                (
+                    SwiftManglingGap::UnsupportedNode,
+                    "Swift partial-apply forwarder has no callable target".into(),
+                )
+            })?;
+            let mut ast = match *inner {
+                Symbol::Function(function) => function_entity(function, limits),
+                Symbol::Closure(closure) => closure_entity(closure, limits),
+                Symbol::Accessor(accessor) => accessor_entity(accessor, limits),
+                Symbol::Destructor(destructor) => destructor_entity(destructor, limits),
+                _ => Err((
+                    SwiftManglingGap::UnsupportedNode,
+                    "Swift partial-apply target is not an admitted callable".into(),
+                )),
+            }?;
+            ast.variant_role = Some(if is_objc {
+                SwiftCallableVariantRole::PartialApplyObjcForwarder
+            } else {
+                SwiftCallableVariantRole::PartialApplyForwarder
+            });
+            Ok(ast)
+        }
         _ => Err((
             SwiftManglingGap::UnsupportedNode,
             "Swift thunk kind is not structurally admitted".into(),
         )),
     }
+}
+
+pub(super) fn closure_entity(
+    closure: Closure<'_>,
+    limits: &SwiftCallableEvidenceLimits,
+) -> Result<SwiftMangledEntityEvidence, ManglingError> {
+    if closure
+        .generic_signature()
+        .is_some_and(|signature| !signature.requirements().is_empty())
+    {
+        return Err((
+            SwiftManglingGap::UnsupportedRequirement,
+            "generic closure requirements are not yet admitted".into(),
+        ));
+    }
+    let module = required_text(closure.module(), "closure module", limits)?;
+    let (declaration_path, declaration, _) =
+        declaration_context(closure.parent_context().components(), &module, limits)?;
+    let signature = closure.signature().ok_or_else(|| {
+        (
+            SwiftManglingGap::UnsupportedRepresentation,
+            "closure has no complete formal signature".into(),
+        )
+    })?;
+    let parameters = signature
+        .parameters()
+        .into_iter()
+        .map(|parameter| {
+            Ok(SwiftFormalParameter {
+                label: parameter.label.map(str::to_owned),
+                r#type: convert_type(parameter.type_ref, limits)?,
+                variadic: parameter.is_variadic,
+            })
+        })
+        .collect::<Result<Vec<_>, ManglingError>>()?;
+    let result = signature.return_type().ok_or_else(|| {
+        (
+            SwiftManglingGap::UnsupportedRepresentation,
+            "closure result type is absent".into(),
+        )
+    })?;
+    Ok(SwiftMangledEntityEvidence {
+        module,
+        declaration_path,
+        declaration,
+        callable_kind: Some(SwiftCallableKind::Closure),
+        base_name: Some(format!("$closure{}", closure.index().unwrap_or(0))),
+        formal_type: Some(SwiftFormalTypeEvidence {
+            representation: representation(signature.convention(), false),
+            parameters,
+            result: convert_type(result, limits)?,
+            r#async: signature.is_async(),
+            throwing: signature.is_throwing(),
+        }),
+        generic_requirements: Vec::new(),
+        variant_role: Some(if signature.is_async() {
+            SwiftCallableVariantRole::AsyncEntry
+        } else {
+            SwiftCallableVariantRole::DirectEntry
+        }),
+        specialization: None,
+    })
 }
 
 pub(super) fn reabstraction_entity(

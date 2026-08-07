@@ -30,7 +30,7 @@ fn onboarding_distinguishes_installation_msrv_and_machine_output_contracts() {
     assert!(readme.contains("cargo install macho --features cli"));
     assert!(readme.contains("unified package requires Rust 1.88"));
     assert!(readme.contains("disassemble --format json"));
-    assert!(readme.contains("newline-delimited JSON"));
+    assert!(readme.contains("exactly one self-contained instruction object per line"));
     assert!(readme.contains("header-infer export"));
     assert!(readme.contains("intentionally require text mode"));
     assert!(!readme.contains("Complete header reconstruction"));
@@ -44,5 +44,6 @@ fn onboarding_distinguishes_installation_msrv_and_machine_output_contracts() {
         .expect("live disassemble command")
         .render_long_help()
         .to_string();
-    assert!(disassemble_help.contains("newline-delimited JSON, not a single document"));
+    assert!(disassemble_help.contains("exactly one self-contained instruction object per line"));
+    assert!(disassemble_help.contains("headers, trailers, gaps, and issues are never written"));
 }

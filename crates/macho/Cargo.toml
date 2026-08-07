@@ -24,9 +24,7 @@ required-features = ["cli"]
 default = ["analysis"]
 
 # Cohesive low-level capability gates. These replace the former leaf crates.
-insn = [
-  "dep:iced-x86", "dep:mkasm-aarch64", "dep:mkasm-x86-64",
-]
+insn = []
 codesign = ["dep:thiserror"]
 demangle = [
   "dep:cpp_demangle", "dep:rustc-demangle", "dep:sha2", "dep:swift-demangler",
@@ -74,11 +72,8 @@ bytes = { workspace = true, optional = true }
 clap = { workspace = true, optional = true }
 cpp_demangle = { workspace = true, optional = true }
 gimli = { workspace = true, optional = true }
-iced-x86 = { workspace = true, optional = true }
 laidout = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
-mkasm-aarch64 = { workspace = true, optional = true }
-mkasm-x86-64 = { workspace = true, optional = true }
 rustc-demangle = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

@@ -1,8 +1,41 @@
 use swift_demangler::raw::{Node, NodeKind};
-use swift_demangler::{Context, Symbol, SymbolAttribute};
+use swift_demangler::{Context, Symbol, SymbolAttribute, Thunk};
 
 use super::convert::*;
 use super::model::*;
+
+/// Classify closure bodies and closure-adapter thunks without requiring their
+/// complete formal type to be admitted by the richer evidence converter.
+#[must_use]
+pub fn classify_swift_closure_symbol(raw: &str) -> Option<SwiftClosureSymbolEvidence> {
+    let (_, parseable) = swift_mangling_scheme(raw)?;
+    let context = Context::new();
+    let root = Node::parse(&context, parseable)?;
+    let display = root.to_string();
+    let mut symbol = Symbol::from_node(root)?;
+    loop {
+        symbol = match symbol {
+            Symbol::Attributed(attributed) => *attributed.inner,
+            Symbol::Suffixed(suffixed) => *suffixed.inner,
+            other => {
+                let kind = match other {
+                    Symbol::Closure(_) => SwiftClosureSymbolKind::ClosureEntry,
+                    Symbol::Thunk(Thunk::Reabstraction(_)) => {
+                        SwiftClosureSymbolKind::ReabstractionThunk
+                    }
+                    Symbol::Thunk(Thunk::PartialApply { is_objc: false, .. }) => {
+                        SwiftClosureSymbolKind::PartialApplyForwarder
+                    }
+                    Symbol::Thunk(Thunk::PartialApply { is_objc: true, .. }) => {
+                        SwiftClosureSymbolKind::PartialApplyObjcForwarder
+                    }
+                    _ => return None,
+                };
+                return Some(SwiftClosureSymbolEvidence { kind, display });
+            }
+        };
+    }
+}
 
 /// Decode one Swift-looking linkage name into owned ABI evidence.
 #[must_use]
@@ -63,6 +96,7 @@ pub fn decode_swift_mangling(
     };
     let mut ast = match symbol {
         Symbol::Function(function) => function_entity(function, limits),
+        Symbol::Closure(closure) => closure_entity(closure, limits),
         Symbol::Accessor(accessor) => accessor_entity(accessor, limits),
         Symbol::Destructor(destructor) => destructor_entity(destructor, limits),
         Symbol::Async(symbol) => async_symbol_entity(symbol, limits),
@@ -208,4 +242,53 @@ pub fn decode_swift_dynamic_replacement(
                 Ok(entity)
             }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits() -> SwiftCallableEvidenceLimits {
+        SwiftCallableEvidenceLimits {
+            max_mangling_bytes: 4096,
+            max_mangling_nodes: 4096,
+            max_identifier_bytes: 1024,
+            max_context_depth: 128,
+            max_type_ast_depth: 128,
+            max_type_ast_nodes: 4096,
+        }
+    }
+
+    #[test]
+    fn closure_and_partial_apply_symbols_are_typed_evidence() {
+        let closure = "$s14ClosureFixture04makeA0yS2icSiFS2icfU_";
+        let partial = "$s14ClosureFixture04makeA0yS2icSiFS2icfU_TA";
+        assert_eq!(
+            classify_swift_closure_symbol(closure).map(|record| record.kind),
+            Some(SwiftClosureSymbolKind::ClosureEntry)
+        );
+        assert_eq!(
+            classify_swift_closure_symbol(partial).map(|record| record.kind),
+            Some(SwiftClosureSymbolKind::PartialApplyForwarder)
+        );
+        assert!(matches!(
+            decode_swift_mangling(closure, &limits()),
+            SwiftManglingEvidence::Supported { entity, .. }
+                if entity.callable_kind == Some(SwiftCallableKind::Closure)
+        ));
+        assert!(matches!(
+            decode_swift_mangling(partial, &limits()),
+            SwiftManglingEvidence::Supported { entity, .. }
+                if entity.variant_role == Some(SwiftCallableVariantRole::PartialApplyForwarder)
+        ));
+    }
+
+    #[test]
+    fn reabstraction_role_survives_formal_type_complexity() {
+        let reabstraction = "$sS2iIegyd_S2iIeyByd_TR";
+        assert_eq!(
+            classify_swift_closure_symbol(reabstraction).map(|record| record.kind),
+            Some(SwiftClosureSymbolKind::ReabstractionThunk)
+        );
+    }
 }

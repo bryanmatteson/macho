@@ -18,6 +18,9 @@ use crate::core::model::macho_file::MachoFile;
 use crate::core::model::relocation::Relocation;
 use crate::core::model::symbol::SymbolTable;
 use crate::metadata::cpp::vtable::{SlotTarget, VtableIndex};
+use crate::metadata::demangle::swift_evidence::{
+    SwiftClosureSymbolKind, classify_swift_closure_symbol,
+};
 use crate::metadata::dyld::{FixupKind, parse_bind_entries, parse_chained_fixups};
 use crate::metadata::symbols::{
     IndirectBindingKind, IndirectBindingsOutcome, IndirectSymbolTarget, decode_indirect_bindings,
@@ -33,7 +36,8 @@ use crate::analysis::control_flow::{
     FunctionControlFlow, FunctionControlFlowStatus,
 };
 use crate::analysis::functions::{
-    FunctionEvidenceConfidence, FunctionImageIdentity, FunctionIndex, FunctionOwnershipConfidence,
+    FunctionEvidenceConfidence, FunctionIdentity, FunctionImageIdentity, FunctionIndex,
+    FunctionOwnershipConfidence,
 };
 use crate::analysis::objc_index::ObjcIndex;
 use crate::analysis::pointer_index::{PointerIndex, PointerRecordKind};
@@ -164,6 +168,8 @@ pub enum IndirectCallEvidenceSource {
     ObjectiveC,
     /// Swift class vtable, override, or protocol dispatch record.
     Swift,
+    /// Clang block/closure literal recovered from ABI metadata.
+    BlockClosure,
 }
 
 /// Kind of recovered transfer site.
@@ -178,6 +184,14 @@ pub enum IndirectTransferKind {
     ImportStubCall,
     /// Call through an Objective-C messaging gateway.
     ObjectiveCDispatch,
+    /// Call through an RTTI-qualified C++ vtable slot.
+    CppVirtualDispatch,
+    /// Call through Swift class or protocol dispatch metadata.
+    SwiftDispatch,
+    /// Call through a Clang block literal invoke field.
+    BlockInvoke,
+    /// Call to a Swift closure body or closure-adapter thunk.
+    SwiftClosureDispatch,
 }
 
 /// Decoded carrier of an indirect target.
@@ -285,6 +299,163 @@ pub enum IndirectCallTarget {
         functions: Vec<IndirectFunctionCandidate>,
         /// Stable metadata-record description.
         detail: String,
+    },
+    /// C++ virtual method whose vtable and RTTI identities agree.
+    CppVirtualMethod {
+        /// Vtable group start.
+        vtable: u64,
+        /// Address point used by the dispatch.
+        address_point: u64,
+        /// Zero-based function-slot ordinal.
+        slot: u64,
+        /// Exact encoded RTTI type name.
+        type_name: String,
+        /// Method or adjustment-thunk address.
+        implementation: u64,
+        /// Every possible recovered function owner.
+        functions: Vec<IndirectFunctionCandidate>,
+    },
+    /// Imported C++ virtual method whose vtable and RTTI identities agree.
+    CppVirtualMethodImport {
+        /// Vtable group start.
+        vtable: u64,
+        /// Address point used by the dispatch.
+        address_point: u64,
+        /// Zero-based function-slot ordinal.
+        slot: u64,
+        /// Exact encoded RTTI type name.
+        type_name: String,
+        /// Imported method or adjustment-thunk symbol.
+        symbol: String,
+        /// Dyld library ordinal when encoded.
+        library_ordinal: Option<i32>,
+    },
+    /// Swift protocol-witness implementation tied to one conformance pattern.
+    SwiftProtocolWitness {
+        /// Witness-table pattern address.
+        witness_table: u64,
+        /// Zero-based protocol requirement index.
+        requirement: u32,
+        /// Protocol name when decoded.
+        protocol: Option<String>,
+        /// Conforming type name when decoded.
+        conforming_type: Option<String>,
+        /// Whether runtime generic instantiation may replace this pattern entry.
+        runtime_instantiated: bool,
+        /// Witness implementation address.
+        implementation: u64,
+        /// Every possible recovered function owner.
+        functions: Vec<IndirectFunctionCandidate>,
+    },
+    /// Imported Swift protocol-witness implementation tied to one conformance pattern.
+    SwiftProtocolWitnessImport {
+        /// Witness-table pattern address.
+        witness_table: u64,
+        /// Zero-based protocol requirement index.
+        requirement: u32,
+        /// Protocol name when decoded.
+        protocol: Option<String>,
+        /// Conforming type name when decoded.
+        conforming_type: Option<String>,
+        /// Whether runtime generic instantiation may replace this pattern entry.
+        runtime_instantiated: bool,
+        /// Imported witness symbol.
+        symbol: String,
+        /// Dyld library ordinal when encoded.
+        library_ordinal: Option<i32>,
+    },
+    /// Native Swift closure body or closure-adapter trampoline identified by
+    /// exact mangling metadata.
+    SwiftClosure {
+        /// Physical closure-entry or adapter role.
+        role: SwiftClosureRole,
+        /// Exact linkage name carrying the role.
+        symbol: String,
+        /// Process-free demangled spelling.
+        display: String,
+        /// Closure or trampoline implementation address.
+        implementation: u64,
+        /// Every possible recovered function owner.
+        functions: Vec<IndirectFunctionCandidate>,
+    },
+    /// Invoke entry stored in a Clang block literal.
+    BlockInvoke {
+        /// Static, stack, or heap identity of the block literal.
+        literal: BlockLiteralLocation,
+        /// Block descriptor address when materialized.
+        descriptor: Option<u64>,
+        /// Runtime storage class encoded by the literal's isa pointer.
+        storage: BlockStorageKind,
+        /// Invoke implementation address.
+        implementation: u64,
+        /// Every possible recovered function owner.
+        functions: Vec<IndirectFunctionCandidate>,
+    },
+    /// Imported invoke entry stored in a Clang block literal.
+    BlockInvokeImport {
+        /// Static, stack, or heap identity of the block literal.
+        literal: BlockLiteralLocation,
+        /// Block descriptor address when materialized.
+        descriptor: Option<u64>,
+        /// Runtime storage class encoded by the literal's isa pointer.
+        storage: BlockStorageKind,
+        /// Imported invoke symbol.
+        symbol: String,
+        /// Dyld library ordinal when encoded.
+        library_ordinal: Option<i32>,
+    },
+}
+
+/// Physical native-Swift closure role carried by a linkage name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwiftClosureRole {
+    /// Body entry for an explicit or implicit closure.
+    ClosureEntry,
+    /// Reabstraction thunk adapting closure representations.
+    ReabstractionThunk,
+    /// Partial-apply forwarder for a native Swift context.
+    PartialApplyForwarder,
+    /// Partial-apply forwarder bridging an Objective-C block context.
+    PartialApplyObjcForwarder,
+}
+
+/// Runtime storage class of a metadata-backed Clang block literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlockStorageKind {
+    /// `_NSConcreteGlobalBlock`.
+    Global,
+    /// `_NSConcreteStackBlock`.
+    Stack,
+    /// `_NSConcreteMallocBlock`.
+    Malloc,
+    /// Another `_NSConcrete*Block` runtime class.
+    Unknown,
+}
+
+/// Stable identity of a recovered Clang block literal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BlockLiteralLocation {
+    /// Literal materialized at a static virtual address.
+    Static {
+        /// Literal virtual address.
+        address: u64,
+    },
+    /// Literal materialized in one function's stack frame.
+    Stack {
+        /// Owning function entry.
+        function: u64,
+        /// Signed frame-relative base offset.
+        offset: i64,
+    },
+    /// Literal materialized in an abstract heap allocation.
+    Heap {
+        /// Callsite or other stable allocation identity.
+        allocation: u64,
+        /// Signed allocation-relative base offset.
+        offset: i64,
     },
 }
 
@@ -512,6 +683,12 @@ struct Catalog {
     cpp_offsets: BTreeMap<i64, Vec<StaticEvidence>>,
     swift_offsets: BTreeMap<i64, Vec<SwiftDispatch>>,
     swift_unindexed: Vec<SwiftDispatch>,
+    cpp_slots: BTreeMap<u64, Vec<CppDispatch>>,
+    cpp_offsets_agreed: BTreeMap<i64, Vec<CppDispatch>>,
+    swift_witness_slots: BTreeMap<u64, Vec<SwiftWitnessDispatch>>,
+    swift_witness_offsets: BTreeMap<i64, Vec<SwiftWitnessDispatch>>,
+    block_invoke_slots: BTreeMap<u64, Vec<BlockDispatch>>,
+    block_offsets: BTreeMap<i64, Vec<BlockDispatch>>,
     objc_methods: Vec<ObjcDispatch>,
     objc_class_addresses: BTreeMap<u64, String>,
     objc_metaclass_addresses: BTreeMap<u64, String>,
@@ -539,6 +716,37 @@ struct SwiftDispatch {
     authentication: Option<PointerAuthentication>,
     runtime_instantiated: bool,
     detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct CppDispatch {
+    vtable: u64,
+    address_point: u64,
+    slot: u64,
+    type_name: String,
+    implementation: StaticTarget,
+    confidence: FunctionEvidenceConfidence,
+    authentication: Option<PointerAuthentication>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SwiftWitnessDispatch {
+    witness_table: u64,
+    requirement: u32,
+    protocol: Option<String>,
+    conforming_type: Option<String>,
+    runtime_instantiated: bool,
+    implementation: StaticTarget,
+    authentication: Option<PointerAuthentication>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BlockDispatch {
+    literal: BlockLiteralLocation,
+    descriptor: Option<u64>,
+    storage: BlockStorageKind,
+    implementation: StaticTarget,
+    authentication: Option<PointerAuthentication>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -683,6 +891,7 @@ impl IndirectCallIndex {
             return Err(IndirectCallRecoveryError::ImageMismatch);
         }
         let catalog = Catalog::collect_indexes(
+            macho,
             inputs.pointers,
             inputs.rtti,
             inputs.objc,
@@ -1105,6 +1314,7 @@ impl Catalog {
     }
 
     fn collect_indexes(
+        macho: &MachoFile<'_>,
         pointers: &PointerIndex,
         rtti: &RttiIndex,
         objc: &ObjcIndex,
@@ -1116,6 +1326,7 @@ impl Catalog {
         catalog.collect_rtti_index(rtti, limits.max_cpp_vtables);
         catalog.collect_objc_index(objc, limits.max_objc_methods);
         catalog.collect_swift_index(swift, limits.max_swift_dispatch_records);
+        catalog.collect_blocks(macho);
         for evidence in catalog.slots.values_mut() {
             evidence.sort_by(|left, right| {
                 (left.source, &left.target, &left.detail).cmp(&(
@@ -1252,6 +1463,7 @@ impl Catalog {
             }
             groups += 1;
             for point in &record.address_points {
+                let agreed_type_name = agreed_cpp_type_name(rtti, point.va, &point.typeinfo.target);
                 for slot in &point.slots {
                     let target = match &slot.pointer.target {
                         crate::metadata::cpp::StrictPointerTarget::Local { va } => {
@@ -1288,7 +1500,7 @@ impl Catalog {
                     let address = point.va.saturating_add(offset as u64);
                     let evidence = StaticEvidence {
                         source: IndirectCallEvidenceSource::CppVtable,
-                        target,
+                        target: target.clone(),
                         confidence: FunctionEvidenceConfidence::Exact,
                         authentication,
                         detail: record.symbol.clone(),
@@ -1298,6 +1510,25 @@ impl Catalog {
                         .or_default()
                         .push(evidence.clone());
                     self.cpp_offsets.entry(offset).or_default().push(evidence);
+                    if let Some(type_name) = &agreed_type_name {
+                        let dispatch = CppDispatch {
+                            vtable: record.va,
+                            address_point: point.va,
+                            slot: slot.ordinal,
+                            type_name: type_name.clone(),
+                            implementation: target,
+                            confidence: FunctionEvidenceConfidence::Exact,
+                            authentication,
+                        };
+                        self.cpp_slots
+                            .entry(address)
+                            .or_default()
+                            .push(dispatch.clone());
+                        self.cpp_offsets_agreed
+                            .entry(offset)
+                            .or_default()
+                            .push(dispatch);
+                    }
                     retained = retained.saturating_add(1);
                 }
             }
@@ -1333,6 +1564,25 @@ impl Catalog {
                 _ => None,
             }
             .unwrap_or("anonymous_cpp_vtable");
+            let agreed_type_name = match &record.typeinfo.target {
+                crate::metadata::cpp::StrictPointerTarget::Local { va }
+                    if !rtti
+                        .conflicts()
+                        .iter()
+                        .any(|conflict| conflict.address == *va) =>
+                {
+                    rtti.recovered_type_info_by_address(*va)
+                        .map(|type_info| match type_info {
+                            crate::analysis::rtti::RecoveredTypeInfo::Strict(record) => {
+                                record.type_name.clone()
+                            }
+                            crate::analysis::rtti::RecoveredTypeInfo::Structural(record) => {
+                                record.type_name.clone()
+                            }
+                        })
+                }
+                _ => None,
+            };
             for slot in &record.slots {
                 let target = match &slot.pointer.target {
                     crate::metadata::cpp::StrictPointerTarget::Local { va } => {
@@ -1363,7 +1613,7 @@ impl Catalog {
                     i64::try_from(slot.ordinal.saturating_mul(pointer_width)).unwrap_or(i64::MAX);
                 let evidence = StaticEvidence {
                     source: IndirectCallEvidenceSource::CppVtable,
-                    target,
+                    target: target.clone(),
                     confidence: FunctionEvidenceConfidence::Derived,
                     authentication,
                     detail: type_name.to_owned(),
@@ -1373,6 +1623,25 @@ impl Catalog {
                     .or_default()
                     .push(evidence.clone());
                 self.cpp_offsets.entry(offset).or_default().push(evidence);
+                if let Some(type_name) = &agreed_type_name {
+                    let dispatch = CppDispatch {
+                        vtable: record.start,
+                        address_point: record.address_point,
+                        slot: slot.ordinal,
+                        type_name: type_name.clone(),
+                        implementation: target,
+                        confidence: FunctionEvidenceConfidence::Derived,
+                        authentication,
+                    };
+                    self.cpp_slots
+                        .entry(slot.address)
+                        .or_default()
+                        .push(dispatch.clone());
+                    self.cpp_offsets_agreed
+                        .entry(offset)
+                        .or_default()
+                        .push(dispatch);
+                }
                 retained = retained.saturating_add(1);
             }
         }
@@ -1538,18 +1807,18 @@ impl Catalog {
             .saturating_add(batch.class_overrides.len())
             .saturating_add(
                 batch
-                    .protocol_requirements
-                    .iter()
-                    .filter(|record| record.default_implementation_va.is_some())
-                    .count(),
-            )
-            .saturating_add(
-                batch
                     .conformances
                     .iter()
                     .filter_map(|record| record.witness_table_pattern.as_ref())
                     .map(|pattern| pattern.entries.len())
                     .sum::<usize>(),
+            )
+            .saturating_add(
+                batch
+                    .protocol_requirements
+                    .iter()
+                    .filter(|record| record.default_implementation_va.is_some())
+                    .count(),
             );
         let mut retained = 0_usize;
         for record in batch.class_vtable_entries.iter().take(limit) {
@@ -1598,8 +1867,26 @@ impl Catalog {
                 };
                 match &entry.target {
                     crate::metadata::swift::evidence::MachoSwiftWitnessPointerTargetV1::Resolved { va } => {
+                        let witness = SwiftWitnessDispatch {
+                            witness_table: pattern.pattern_va,
+                            requirement: entry.requirement_index,
+                            protocol: conformance.protocol_name.clone(),
+                            conforming_type: conformance.conforming_type_name.clone(),
+                            runtime_instantiated,
+                            implementation: StaticTarget::Internal(*va),
+                            authentication,
+                        };
+                        self.swift_witness_slots
+                            .entry(entry.slot_va)
+                            .or_default()
+                            .push(witness.clone());
+                        let offset = entry.slot_va.saturating_sub(pattern.pattern_va);
+                        self.swift_witness_offsets
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
+                            .or_default()
+                            .push(witness);
                         self.swift_offsets
-                            .entry(i64::from(entry.requirement_index) * 8)
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
                             .or_default()
                             .push(SwiftDispatch {
                                 slot: Some(entry.requirement_index),
@@ -1626,15 +1913,34 @@ impl Catalog {
                     crate::metadata::swift::evidence::MachoSwiftWitnessPointerTargetV1::External {
                         symbol,
                     } => {
+                        let implementation = StaticTarget::Import {
+                            name: symbol.clone(),
+                            ordinal: None,
+                        };
+                        let witness = SwiftWitnessDispatch {
+                            witness_table: pattern.pattern_va,
+                            requirement: entry.requirement_index,
+                            protocol: conformance.protocol_name.clone(),
+                            conforming_type: conformance.conforming_type_name.clone(),
+                            runtime_instantiated,
+                            implementation: implementation.clone(),
+                            authentication,
+                        };
+                        self.swift_witness_slots
+                            .entry(entry.slot_va)
+                            .or_default()
+                            .push(witness.clone());
+                        let offset = entry.slot_va.saturating_sub(pattern.pattern_va);
+                        self.swift_witness_offsets
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
+                            .or_default()
+                            .push(witness);
                         self.slots
                             .entry(entry.slot_va)
                             .or_default()
                             .push(StaticEvidence {
                                 source: IndirectCallEvidenceSource::Swift,
-                                target: StaticTarget::Import {
-                                    name: symbol.clone(),
-                                    ordinal: None,
-                                },
+                                target: implementation,
                                 confidence,
                                 authentication,
                                 detail: if runtime_instantiated {
@@ -1693,13 +1999,110 @@ impl Catalog {
         ));
     }
 
+    fn collect_blocks(&mut self, macho: &MachoFile<'_>) {
+        const INVOKE_OFFSET: u64 = 16;
+        const DESCRIPTOR_OFFSET: u64 = 24;
+        let literals = self
+            .slots
+            .iter()
+            .filter_map(|(&address, evidence)| {
+                if !block_literal_storage_section(macho, address) {
+                    return None;
+                }
+                evidence.iter().find_map(|record| {
+                    let StaticTarget::Import { name, .. } = &record.target else {
+                        return None;
+                    };
+                    block_storage_kind(name).map(|storage| (address, storage))
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut attempted = 0_u64;
+        let mut retained = 0_u64;
+        let mut unresolved = 0_u64;
+        for (literal, storage) in literals.iter().copied() {
+            if storage == BlockStorageKind::Global
+                && read_u32(macho, literal.saturating_add(8))
+                    .is_none_or(|flags| flags & (1 << 28) == 0)
+            {
+                continue;
+            }
+            let Some(invoke_slot) = literal.checked_add(INVOKE_OFFSET) else {
+                continue;
+            };
+            attempted = attempted.saturating_add(1);
+            let mut implementations = self
+                .slots
+                .get(&invoke_slot)
+                .into_iter()
+                .flatten()
+                .map(|record| (record.target.clone(), record.authentication))
+                .collect::<BTreeSet<_>>();
+            if implementations.is_empty()
+                && let Some(raw) = read_pointer(macho, invoke_slot).filter(|address| *address != 0)
+            {
+                implementations.insert((StaticTarget::Internal(raw), None));
+            }
+            if implementations.is_empty() {
+                unresolved = unresolved.saturating_add(1);
+                continue;
+            }
+            let descriptor = literal
+                .checked_add(DESCRIPTOR_OFFSET)
+                .and_then(|slot| {
+                    static_internal_target(&self.slots, slot).or_else(|| read_pointer(macho, slot))
+                })
+                .filter(|address| *address != 0);
+            for (implementation, authentication) in implementations {
+                let dispatch = BlockDispatch {
+                    literal: BlockLiteralLocation::Static { address: literal },
+                    descriptor,
+                    storage,
+                    implementation,
+                    authentication,
+                };
+                self.block_invoke_slots
+                    .entry(invoke_slot)
+                    .or_default()
+                    .push(dispatch.clone());
+                self.block_offsets
+                    .entry(INVOKE_OFFSET as i64)
+                    .or_default()
+                    .push(dispatch);
+                retained = retained.saturating_add(1);
+            }
+        }
+        for dispatches in self.block_offsets.values_mut() {
+            dispatches.sort();
+            dispatches.dedup();
+        }
+        self.receipts.push(receipt(
+            IndirectCallEvidenceSource::BlockClosure,
+            if attempted == 0 {
+                IndirectCollectorStatus::Absent
+            } else if unresolved != 0 {
+                IndirectCollectorStatus::Failed
+            } else {
+                IndirectCollectorStatus::Complete
+            },
+            attempted,
+            retained,
+            (unresolved != 0).then_some("block_invoke_unresolved"),
+        ));
+        self.failed |= unresolved != 0;
+    }
+
     fn collect(macho: &MachoFile<'_>, limits: IndirectCallRecoveryLimits) -> Self {
         let mut catalog = Self::default();
         catalog.collect_indirect_symbols(macho, limits.max_indirect_bindings);
         catalog.collect_chained(macho, limits.max_chained_fixups);
         catalog.collect_legacy(macho, limits.max_legacy_binds);
         catalog.collect_relocations(macho, limits.max_relocations);
-        catalog.collect_cpp(macho, limits.max_cpp_vtables);
+        catalog.collect_blocks(macho);
+        match RttiIndex::recover(macho, crate::analysis::rtti::RttiRecoveryLimits::default()) {
+            Ok(rtti) => catalog.collect_rtti_index(&rtti, limits.max_cpp_vtables),
+            Err(_) => catalog.collect_cpp(macho, limits.max_cpp_vtables),
+        }
         catalog.collect_objc(macho, limits.max_objc_methods);
         catalog.collect_swift(macho, limits.max_swift_dispatch_records);
         for evidence in catalog.slots.values_mut() {
@@ -2360,6 +2763,14 @@ impl Catalog {
             .saturating_add(batch.class_overrides.len())
             .saturating_add(
                 batch
+                    .conformances
+                    .iter()
+                    .filter_map(|record| record.witness_table_pattern.as_ref())
+                    .map(|pattern| pattern.entries.len())
+                    .sum::<usize>(),
+            )
+            .saturating_add(
+                batch
                     .protocol_requirements
                     .iter()
                     .filter(|record| record.default_implementation_va.is_some())
@@ -2378,6 +2789,103 @@ impl Catalog {
                     detail: "swift_class_vtable".into(),
                 });
             retained += 1;
+        }
+        for conformance in &batch.conformances {
+            let Some(pattern) = &conformance.witness_table_pattern else {
+                continue;
+            };
+            for entry in pattern.entries.iter().take(limit.saturating_sub(retained)) {
+                let authentication = swift_witness_authentication(&entry.provenance);
+                let runtime_instantiated = !conformance.conditional_requirements.is_empty();
+                let confidence = if runtime_instantiated {
+                    FunctionEvidenceConfidence::Candidate
+                } else {
+                    FunctionEvidenceConfidence::Exact
+                };
+                match &entry.target {
+                    crate::metadata::swift::evidence::MachoSwiftWitnessPointerTargetV1::Resolved { va } => {
+                        let witness = SwiftWitnessDispatch {
+                            witness_table: pattern.pattern_va,
+                            requirement: entry.requirement_index,
+                            protocol: conformance.protocol_name.clone(),
+                            conforming_type: conformance.conforming_type_name.clone(),
+                            runtime_instantiated,
+                            implementation: StaticTarget::Internal(*va),
+                            authentication,
+                        };
+                        self.swift_witness_slots
+                            .entry(entry.slot_va)
+                            .or_default()
+                            .push(witness.clone());
+                        let offset = entry.slot_va.saturating_sub(pattern.pattern_va);
+                        self.swift_witness_offsets
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
+                            .or_default()
+                            .push(witness);
+                        self.swift_offsets
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
+                            .or_default()
+                            .push(SwiftDispatch {
+                                slot: Some(entry.requirement_index),
+                                implementation: *va,
+                                authentication,
+                                runtime_instantiated,
+                                detail: format!(
+                                    "swift_witness:{}:{}",
+                                    conformance.conforming_type_name.as_deref().unwrap_or("?"),
+                                    conformance.protocol_name.as_deref().unwrap_or("?")
+                                ),
+                            });
+                        self.slots.entry(entry.slot_va).or_default().push(StaticEvidence {
+                            source: IndirectCallEvidenceSource::Swift,
+                            target: StaticTarget::Internal(*va),
+                            confidence,
+                            authentication,
+                            detail: if runtime_instantiated {
+                                "swift_runtime_instantiated_witness"
+                            } else {
+                                "swift_witness_pattern"
+                            }.into(),
+                        });
+                    }
+                    crate::metadata::swift::evidence::MachoSwiftWitnessPointerTargetV1::External { symbol } => {
+                        let implementation = StaticTarget::Import {
+                            name: symbol.clone(),
+                            ordinal: None,
+                        };
+                        let witness = SwiftWitnessDispatch {
+                            witness_table: pattern.pattern_va,
+                            requirement: entry.requirement_index,
+                            protocol: conformance.protocol_name.clone(),
+                            conforming_type: conformance.conforming_type_name.clone(),
+                            runtime_instantiated,
+                            implementation: implementation.clone(),
+                            authentication,
+                        };
+                        self.swift_witness_slots
+                            .entry(entry.slot_va)
+                            .or_default()
+                            .push(witness.clone());
+                        let offset = entry.slot_va.saturating_sub(pattern.pattern_va);
+                        self.swift_witness_offsets
+                            .entry(i64::try_from(offset).unwrap_or(i64::MAX))
+                            .or_default()
+                            .push(witness);
+                        self.slots.entry(entry.slot_va).or_default().push(StaticEvidence {
+                            source: IndirectCallEvidenceSource::Swift,
+                            target: implementation,
+                            confidence,
+                            authentication,
+                            detail: if runtime_instantiated {
+                                "swift_runtime_instantiated_external_witness"
+                            } else {
+                                "swift_external_witness"
+                            }.into(),
+                        });
+                    }
+                }
+                retained += 1;
+            }
         }
         for record in batch
             .class_overrides
@@ -2427,6 +2935,248 @@ impl Catalog {
             truncated.then_some("swift_dispatch_retention_budget"),
         ));
     }
+}
+
+fn block_storage_kind(name: &str) -> Option<BlockStorageKind> {
+    let name = name.trim_start_matches('_');
+    if !name.starts_with("NSConcrete") || !name.ends_with("Block") {
+        return None;
+    }
+    Some(if name.contains("Global") {
+        BlockStorageKind::Global
+    } else if name.contains("Stack") {
+        BlockStorageKind::Stack
+    } else if name.contains("Malloc") {
+        BlockStorageKind::Malloc
+    } else {
+        BlockStorageKind::Unknown
+    })
+}
+
+fn block_literal_storage_section(macho: &MachoFile<'_>, literal: u64) -> bool {
+    let Some(section) = macho.all_sections().find(|section| {
+        section.addr().0 <= literal
+            && literal
+                .checked_add(32)
+                .is_some_and(|end| end <= section.addr().0.saturating_add(section.size()))
+    }) else {
+        return false;
+    };
+    section.section_name() != "__stubs"
+        && section.section_name() != "__stub_helper"
+        && section.section_name() != "__got"
+        && section.section_name() != "__la_symbol_ptr"
+        && section.section_name() != "__nl_symbol_ptr"
+}
+
+fn agreed_cpp_type_name(
+    rtti: &RttiIndex,
+    address_point: u64,
+    typeinfo: &crate::metadata::cpp::StrictPointerTarget,
+) -> Option<String> {
+    let relation = rtti.vtable_type_relations().iter().find(|relation| {
+        relation.address_point == address_point && &relation.typeinfo == typeinfo
+    })?;
+    let crate::metadata::cpp::StrictPointerTarget::Local { va } = relation.typeinfo else {
+        return None;
+    };
+    if rtti
+        .conflicts()
+        .iter()
+        .any(|conflict| conflict.address == va)
+    {
+        return None;
+    }
+    rtti.recovered_type_info_by_address(va)
+        .map(|record| match record {
+            crate::analysis::rtti::RecoveredTypeInfo::Strict(record) => record.type_name.clone(),
+            crate::analysis::rtti::RecoveredTypeInfo::Structural(record) => {
+                record.type_name.clone()
+            }
+        })
+}
+
+fn static_internal_target(slots: &BTreeMap<u64, Vec<StaticEvidence>>, slot: u64) -> Option<u64> {
+    let targets = slots
+        .get(&slot)?
+        .iter()
+        .filter_map(|record| match record.target {
+            StaticTarget::Internal(address) => Some(address),
+            StaticTarget::Import { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    (targets.len() == 1).then(|| *targets.first().expect("one static target"))
+}
+
+fn dynamic_block_dispatches(
+    macho: &MachoFile<'_>,
+    memory: &MemoryValues,
+    catalog: &Catalog,
+    function: u64,
+    implementation: &StaticTarget,
+    invocation_authentication: Option<PointerAuthentication>,
+    invoke_locations: &BTreeSet<AbstractMemoryLocation>,
+) -> Vec<BlockDispatch> {
+    let mut result = BTreeSet::new();
+    for invoke_location in invoke_locations {
+        let Some(values) = memory.get(invoke_location) else {
+            continue;
+        };
+        let matching = values
+            .iter()
+            .filter(|value| {
+                abstract_value_static_targets(macho, value, catalog).contains(implementation)
+            })
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        let Some(base) = shift_memory_location(*invoke_location, -16) else {
+            continue;
+        };
+        let Some(isa_values) = memory.get(&base) else {
+            continue;
+        };
+        let storage = isa_values
+            .iter()
+            .filter_map(|value| abstract_value_import_name(value, catalog))
+            .filter_map(block_storage_kind)
+            .collect::<BTreeSet<_>>();
+        if storage.is_empty() {
+            continue;
+        }
+        let descriptor = shift_memory_location(base, 24)
+            .and_then(|location| memory.get(&location))
+            .into_iter()
+            .flat_map(|values| values.iter())
+            .filter_map(|value| abstract_value_address(macho, value))
+            .filter(|address| *address != 0)
+            .collect::<BTreeSet<_>>();
+        let descriptor = (descriptor.len() == 1)
+            .then(|| *descriptor.first().expect("one dynamic block descriptor"));
+        let literal = match base {
+            AbstractMemoryLocation::Global(address) => BlockLiteralLocation::Static { address },
+            AbstractMemoryLocation::Stack(offset) => {
+                BlockLiteralLocation::Stack { function, offset }
+            }
+            AbstractMemoryLocation::Heap { allocation, offset } => {
+                BlockLiteralLocation::Heap { allocation, offset }
+            }
+            AbstractMemoryLocation::IndexedAlias { .. } => continue,
+        };
+        for storage in &storage {
+            for value in &matching {
+                result.insert(BlockDispatch {
+                    literal,
+                    descriptor,
+                    storage: *storage,
+                    implementation: implementation.clone(),
+                    authentication: merge_authentication(
+                        value.authentication,
+                        invocation_authentication,
+                    ),
+                });
+            }
+        }
+    }
+    result.into_iter().collect()
+}
+
+fn value_origin_memory_locations(
+    graph: &FunctionControlFlow,
+    state: Option<&RegisterValues>,
+    instruction: u64,
+    architecture: Architecture,
+) -> BTreeSet<AbstractMemoryLocation> {
+    let Some(state) = state else {
+        return BTreeSet::new();
+    };
+    graph
+        .instructions
+        .binary_search_by_key(&instruction, |record| record.address)
+        .ok()
+        .and_then(|index| graph.instructions.get(index))
+        .map(|instruction| memory_locations(state, instruction, architecture))
+        .unwrap_or_default()
+}
+
+fn shift_memory_location(
+    location: AbstractMemoryLocation,
+    delta: i64,
+) -> Option<AbstractMemoryLocation> {
+    match location {
+        AbstractMemoryLocation::Global(address) => address
+            .checked_add_signed(delta)
+            .map(AbstractMemoryLocation::Global),
+        AbstractMemoryLocation::Stack(offset) => {
+            offset.checked_add(delta).map(AbstractMemoryLocation::Stack)
+        }
+        AbstractMemoryLocation::Heap { allocation, offset } => offset
+            .checked_add(delta)
+            .map(|offset| AbstractMemoryLocation::Heap { allocation, offset }),
+        AbstractMemoryLocation::IndexedAlias { .. } => None,
+    }
+}
+
+fn abstract_value_address(macho: &MachoFile<'_>, value: &AbstractValue) -> Option<u64> {
+    match value.kind {
+        AbstractValueKind::Address(address) => Some(address),
+        AbstractValueKind::PointerSlot(slot) => read_pointer(macho, slot),
+        _ => None,
+    }
+}
+
+fn abstract_value_static_targets(
+    macho: &MachoFile<'_>,
+    value: &AbstractValue,
+    catalog: &Catalog,
+) -> BTreeSet<StaticTarget> {
+    let slot = match value.kind {
+        AbstractValueKind::PointerSlot(slot) => Some(slot),
+        AbstractValueKind::Address(address)
+            if catalog.slots.get(&address).is_some_and(|records| {
+                records.iter().any(|record| record.detail == "symbol_stub")
+            }) =>
+        {
+            Some(address)
+        }
+        AbstractValueKind::Address(address) => {
+            return BTreeSet::from([StaticTarget::Internal(address)]);
+        }
+        _ => return BTreeSet::new(),
+    };
+    let slot = slot.expect("pointer-backed abstract value has one slot");
+    let targets = catalog
+        .slots
+        .get(&slot)
+        .into_iter()
+        .flatten()
+        .map(|record| record.target.clone())
+        .collect::<BTreeSet<_>>();
+    if targets.is_empty() {
+        read_pointer(macho, slot)
+            .filter(|address| *address != 0)
+            .map(StaticTarget::Internal)
+            .into_iter()
+            .collect()
+    } else {
+        targets
+    }
+}
+
+fn abstract_value_import_name<'a>(value: &AbstractValue, catalog: &'a Catalog) -> Option<&'a str> {
+    let slot = match value.kind {
+        AbstractValueKind::Address(address) | AbstractValueKind::PointerSlot(address) => address,
+        _ => return None,
+    };
+    catalog
+        .slots
+        .get(&slot)?
+        .iter()
+        .find_map(|record| match &record.target {
+            StaticTarget::Import { name, .. } => Some(name.as_str()),
+            StaticTarget::Internal(_) => None,
+        })
 }
 
 #[derive(Default)]
@@ -4460,7 +5210,12 @@ fn evaluate_written_value(
             if instruction.value_effect == ControlFlowValueEffect::Load {
                 let mut loaded = BTreeSet::new();
                 for location in &locations {
-                    loaded.extend(memory_values_at(memory, *location));
+                    loaded.extend(memory_values_at(memory, *location).into_iter().map(
+                        |mut value| {
+                            value.instruction = instruction.address;
+                            value
+                        },
+                    ));
                 }
                 if !loaded.is_empty() {
                     return Some(loaded);
@@ -5228,6 +5983,17 @@ fn caller_saved(architecture: Architecture, register: ControlFlowRegister) -> bo
     }
 }
 
+struct ValueCandidateContext<'a, 'data> {
+    macho: &'a MachoFile<'data>,
+    functions: &'a FunctionIndex,
+    graph: &'a FunctionControlFlow,
+    state: Option<&'a RegisterValues>,
+    memory: Option<&'a MemoryValues>,
+    architecture: Architecture,
+    catalog: &'a Catalog,
+    instruction_authentication: Option<PointerAuthentication>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn recover_site(
     macho: &MachoFile<'_>,
@@ -5259,6 +6025,17 @@ fn recover_site(
     let mut carriers = Vec::new();
     let mut candidates = Vec::new();
     let mut reasons = BTreeSet::<String>::new();
+    let mut dynamic_dispatch_open = false;
+    let value_candidate_context = ValueCandidateContext {
+        macho,
+        functions,
+        graph,
+        state,
+        memory,
+        architecture,
+        catalog,
+        instruction_authentication,
+    };
 
     if let Some(stub) = direct_stub {
         carriers.push(IndirectTargetCarrier::ImportStub { address: stub });
@@ -5343,11 +6120,8 @@ fn recover_site(
             } else if let Some(values) = state.and_then(|state| state.get(&register)) {
                 for value in values.iter() {
                     add_value_candidates(
-                        macho,
-                        functions,
+                        &value_candidate_context,
                         *value,
-                        catalog,
-                        instruction_authentication,
                         &mut carriers,
                         &mut candidates,
                     );
@@ -5382,7 +6156,55 @@ fn recover_site(
                     base: Some(*base),
                     displacement: *displacement,
                 });
-                add_dynamic_slot_candidates(functions, *displacement, catalog, &mut candidates);
+                let tracked = memory
+                    .map(|memory| {
+                        state
+                            .map(|state| memory_locations(state, instruction, architecture))
+                            .unwrap_or_default()
+                            .into_iter()
+                            .flat_map(|location| memory_values_at(memory, location))
+                            .map(|mut value| {
+                                value.instruction = instruction.address;
+                                value
+                            })
+                            .collect::<BTreeSet<_>>()
+                    })
+                    .unwrap_or_default();
+                if !tracked.is_empty() {
+                    for value in tracked {
+                        add_value_candidates(
+                            &value_candidate_context,
+                            value,
+                            &mut carriers,
+                            &mut candidates,
+                        );
+                    }
+                } else {
+                    let concrete = concrete_base_addresses(macho, state, *base, None)
+                        .into_iter()
+                        .map(|address| address.wrapping_add_signed(*displacement))
+                        .collect::<BTreeSet<_>>();
+                    if concrete.is_empty() {
+                        add_dynamic_slot_candidates(
+                            functions,
+                            *displacement,
+                            catalog,
+                            &mut candidates,
+                        );
+                    } else {
+                        for slot in concrete {
+                            carriers.push(IndirectTargetCarrier::PointerSlot { address: slot });
+                            add_slot_candidates(
+                                macho,
+                                functions,
+                                slot,
+                                catalog,
+                                instruction_authentication,
+                                &mut candidates,
+                            );
+                        }
+                    }
+                }
             }
         }
         if let Some(table) = graph
@@ -5501,14 +6323,20 @@ fn recover_site(
         }
         if selectors.is_empty() {
             reasons.insert("indirect.objc_selector_unresolved".into());
+            dynamic_dispatch_open = true;
         } else if matched == 0 {
             reasons.insert("indirect.objc_selector_without_implementation".into());
+            dynamic_dispatch_open = true;
         }
         if receiver_targets.is_empty() {
             reasons.insert("indirect.objc_receiver_unresolved".into());
+            dynamic_dispatch_open = true;
         }
         if super_dispatch && receiver_targets.is_empty() {
             reasons.insert("indirect.objc_super_runtime_open".into());
+        }
+        if matched > 1 && receiver_targets.is_empty() {
+            reasons.insert("indirect.objc_dispatch_ambiguous".into());
         }
     }
     if candidates
@@ -5516,6 +6344,39 @@ fn recover_site(
         .any(|candidate| candidate.detail.starts_with("swift_runtime_instantiated_"))
     {
         reasons.insert("indirect.swift_runtime_instantiation_open".into());
+    }
+    if candidates.iter().any(|candidate| {
+        matches!(
+            &candidate.target,
+            IndirectCallTarget::CppVirtualMethod { .. }
+                | IndirectCallTarget::CppVirtualMethodImport { .. }
+        )
+    }) {
+        kinds.push(IndirectTransferKind::CppVirtualDispatch);
+    }
+    if candidates.iter().any(|candidate| {
+        matches!(
+            &candidate.target,
+            IndirectCallTarget::SwiftImplementation { .. }
+                | IndirectCallTarget::SwiftProtocolWitness { .. }
+                | IndirectCallTarget::SwiftProtocolWitnessImport { .. }
+        )
+    }) {
+        kinds.push(IndirectTransferKind::SwiftDispatch);
+    }
+    if candidates.iter().any(|candidate| {
+        matches!(
+            &candidate.target,
+            IndirectCallTarget::BlockInvoke { .. } | IndirectCallTarget::BlockInvokeImport { .. }
+        )
+    }) {
+        kinds.push(IndirectTransferKind::BlockInvoke);
+    }
+    if candidates
+        .iter()
+        .any(|candidate| matches!(&candidate.target, IndirectCallTarget::SwiftClosure { .. }))
+    {
+        kinds.push(IndirectTransferKind::SwiftClosureDispatch);
     }
     reconcile_import_aliases(&mut candidates);
     candidates.sort_by(|left, right| {
@@ -5535,10 +6396,17 @@ fn recover_site(
     candidates.dedup();
     let conflicts = indirect_conflicts(&candidates);
     let missing_function_identity = candidates.iter().any(|candidate| match &candidate.target {
-        IndirectCallTarget::Import { .. } => false,
+        IndirectCallTarget::Import { .. }
+        | IndirectCallTarget::CppVirtualMethodImport { .. }
+        | IndirectCallTarget::SwiftProtocolWitnessImport { .. }
+        | IndirectCallTarget::BlockInvokeImport { .. } => false,
         IndirectCallTarget::Internal { functions, .. }
         | IndirectCallTarget::ObjectiveCMethod { functions, .. }
-        | IndirectCallTarget::SwiftImplementation { functions, .. } => functions.is_empty(),
+        | IndirectCallTarget::SwiftImplementation { functions, .. }
+        | IndirectCallTarget::CppVirtualMethod { functions, .. }
+        | IndirectCallTarget::SwiftProtocolWitness { functions, .. }
+        | IndirectCallTarget::SwiftClosure { functions, .. }
+        | IndirectCallTarget::BlockInvoke { functions, .. } => functions.is_empty(),
     });
     let uncertain_function_ownership = candidates
         .iter()
@@ -5589,6 +6457,7 @@ fn recover_site(
         || !conflicts.is_empty()
         || missing_function_identity
         || uncertain_function_ownership
+        || dynamic_dispatch_open
         || site_value_flow_widened
         || reachability == ControlFlowReachability::Unknown
         || graph.completeness.status != FunctionControlFlowStatus::Complete
@@ -5675,10 +6544,17 @@ fn reconcile_import_aliases(candidates: &mut [IndirectCallCandidate]) {
 
 fn target_has_uncertain_function_ownership(target: &IndirectCallTarget) -> bool {
     let functions = match target {
-        IndirectCallTarget::Import { .. } => return false,
+        IndirectCallTarget::Import { .. }
+        | IndirectCallTarget::CppVirtualMethodImport { .. }
+        | IndirectCallTarget::SwiftProtocolWitnessImport { .. }
+        | IndirectCallTarget::BlockInvokeImport { .. } => return false,
         IndirectCallTarget::Internal { functions, .. }
         | IndirectCallTarget::ObjectiveCMethod { functions, .. }
-        | IndirectCallTarget::SwiftImplementation { functions, .. } => functions,
+        | IndirectCallTarget::SwiftImplementation { functions, .. }
+        | IndirectCallTarget::CppVirtualMethod { functions, .. }
+        | IndirectCallTarget::SwiftProtocolWitness { functions, .. }
+        | IndirectCallTarget::SwiftClosure { functions, .. }
+        | IndirectCallTarget::BlockInvoke { functions, .. } => functions,
     };
     !functions.is_empty()
         && (functions.len() != 1
@@ -5705,6 +6581,8 @@ fn indirect_conflicts(candidates: &[IndirectCallCandidate]) -> Vec<IndirectCallC
                 | IndirectCallEvidenceSource::Relocation
                 | IndirectCallEvidenceSource::RawPointer
                 | IndirectCallEvidenceSource::CppVtable
+                | IndirectCallEvidenceSource::Swift
+                | IndirectCallEvidenceSource::BlockClosure
         ) {
             continue;
         }
@@ -5728,15 +6606,51 @@ fn indirect_conflicts(candidates: &[IndirectCallCandidate]) -> Vec<IndirectCallC
 }
 
 fn add_value_candidates(
-    macho: &MachoFile<'_>,
-    functions: &FunctionIndex,
+    context: &ValueCandidateContext<'_, '_>,
     value: AbstractValue,
-    catalog: &Catalog,
-    instruction_authentication: Option<PointerAuthentication>,
     carriers: &mut Vec<IndirectTargetCarrier>,
     candidates: &mut Vec<IndirectCallCandidate>,
 ) {
+    let macho = context.macho;
+    let functions = context.functions;
+    let graph = context.graph;
+    let state = context.state;
+    let memory = context.memory;
+    let architecture = context.architecture;
+    let catalog = context.catalog;
+    let instruction_authentication = context.instruction_authentication;
     let authentication = merge_authentication(value.authentication, instruction_authentication);
+    let origin_locations =
+        value_origin_memory_locations(graph, state, value.instruction, architecture);
+    let dynamic_blocks = memory
+        .into_iter()
+        .flat_map(|memory| {
+            abstract_value_static_targets(macho, &value, catalog)
+                .into_iter()
+                .flat_map(|implementation| {
+                    dynamic_block_dispatches(
+                        macho,
+                        memory,
+                        catalog,
+                        graph.function_entry,
+                        &implementation,
+                        authentication,
+                        &origin_locations,
+                    )
+                })
+        })
+        .collect::<BTreeSet<_>>();
+    if !dynamic_blocks.is_empty() {
+        for record in dynamic_blocks {
+            candidates.push(block_dispatch_candidate(
+                functions,
+                &record,
+                FunctionEvidenceConfidence::Derived,
+                None,
+            ));
+        }
+        return;
+    }
     match value.kind {
         AbstractValueKind::Address(address) => {
             let is_import_stub = catalog.slots.get(&address).is_some_and(|evidence| {
@@ -5780,13 +6694,84 @@ fn add_value_candidates(
                 base: None,
                 displacement,
             });
-            add_dynamic_slot_candidates(functions, displacement, catalog, candidates);
+            let concrete = concrete_dynamic_slots(macho, graph, state, value);
+            if concrete.is_empty() {
+                add_dynamic_slot_candidates(functions, displacement, catalog, candidates);
+            } else {
+                for slot in concrete {
+                    carriers.push(IndirectTargetCarrier::PointerSlot { address: slot });
+                    add_slot_candidates(
+                        macho,
+                        functions,
+                        slot,
+                        catalog,
+                        authentication,
+                        candidates,
+                    );
+                }
+            }
         }
         AbstractValueKind::StackAddress(_)
         | AbstractValueKind::Argument(_)
         | AbstractValueKind::ProtocolArgument { .. }
         | AbstractValueKind::HeapAddress { .. } => {}
     }
+}
+
+fn concrete_dynamic_slots(
+    macho: &MachoFile<'_>,
+    graph: &FunctionControlFlow,
+    state: Option<&RegisterValues>,
+    value: AbstractValue,
+) -> BTreeSet<u64> {
+    let AbstractValueKind::DynamicSlot(displacement) = value.kind else {
+        return BTreeSet::new();
+    };
+    let Some(instruction) = graph
+        .instructions
+        .binary_search_by_key(&value.instruction, |instruction| instruction.address)
+        .ok()
+        .and_then(|index| graph.instructions.get(index))
+    else {
+        return BTreeSet::new();
+    };
+    let Some(base) = instruction
+        .operands
+        .iter()
+        .find_map(|operand| match operand {
+            ControlFlowOperand::Memory { base, .. }
+            | ControlFlowOperand::IndexedMemory { base, .. } => Some(*base),
+            _ => None,
+        })
+    else {
+        return BTreeSet::new();
+    };
+    concrete_base_addresses(macho, state, base, Some(value.instruction))
+        .into_iter()
+        .map(|address| address.wrapping_add_signed(displacement))
+        .collect()
+}
+
+fn concrete_base_addresses(
+    macho: &MachoFile<'_>,
+    state: Option<&RegisterValues>,
+    base: ControlFlowRegister,
+    defined_no_later_than: Option<u64>,
+) -> BTreeSet<u64> {
+    state
+        .and_then(|state| state.get(&base))
+        .into_iter()
+        .flat_map(|values| values.iter())
+        .filter(|value| {
+            defined_no_later_than.is_none_or(|instruction| value.instruction <= instruction)
+        })
+        .filter_map(|value| match value.kind {
+            AbstractValueKind::Address(address) => Some(address),
+            AbstractValueKind::PointerSlot(slot) => read_pointer(macho, slot),
+            _ => None,
+        })
+        .filter(|address| *address != 0)
+        .collect()
 }
 
 fn add_slot_candidates(
@@ -5798,8 +6783,35 @@ fn add_slot_candidates(
     candidates: &mut Vec<IndirectCallCandidate>,
 ) {
     let mut represented_raw_target = false;
+    let specialized_targets = catalog
+        .cpp_slots
+        .get(&slot)
+        .into_iter()
+        .flatten()
+        .map(|record| record.implementation.clone())
+        .chain(
+            catalog
+                .swift_witness_slots
+                .get(&slot)
+                .into_iter()
+                .flatten()
+                .map(|record| record.implementation.clone()),
+        )
+        .chain(
+            catalog
+                .block_invoke_slots
+                .get(&slot)
+                .into_iter()
+                .flatten()
+                .map(|record| record.implementation.clone()),
+        )
+        .collect::<BTreeSet<_>>();
     if let Some(evidence) = catalog.slots.get(&slot) {
         for record in evidence {
+            if specialized_targets.contains(&record.target) {
+                represented_raw_target = true;
+                continue;
+            }
             if matches!(record.target, StaticTarget::Internal(target) if function_candidates(functions, target).is_empty())
             {
                 continue;
@@ -5817,6 +6829,31 @@ fn add_slot_candidates(
                 record,
                 Some(slot),
                 authentication,
+            ));
+        }
+    }
+    if let Some(records) = catalog.cpp_slots.get(&slot) {
+        for record in records {
+            candidates.push(cpp_dispatch_candidate(functions, record, Some(slot)));
+        }
+    }
+    if let Some(records) = catalog.swift_witness_slots.get(&slot) {
+        for record in records {
+            candidates.push(swift_witness_candidate(
+                functions,
+                record,
+                FunctionEvidenceConfidence::Exact,
+                Some(slot),
+            ));
+        }
+    }
+    if let Some(records) = catalog.block_invoke_slots.get(&slot) {
+        for record in records {
+            candidates.push(block_dispatch_candidate(
+                functions,
+                record,
+                FunctionEvidenceConfidence::Exact,
+                Some(slot),
             ));
         }
     }
@@ -5843,13 +6880,26 @@ fn add_dynamic_slot_candidates(
     catalog: &Catalog,
     candidates: &mut Vec<IndirectCallCandidate>,
 ) {
-    if let Some(records) = catalog.cpp_offsets.get(&displacement) {
+    if let Some(records) = catalog.cpp_offsets_agreed.get(&displacement) {
         for record in records {
-            candidates.push(static_candidate(functions, record, None, None));
+            candidates.push(cpp_dispatch_candidate(functions, record, None));
+        }
+    }
+    if let Some(records) = catalog.swift_witness_offsets.get(&displacement) {
+        for record in records {
+            candidates.push(swift_witness_candidate(
+                functions,
+                record,
+                FunctionEvidenceConfidence::Candidate,
+                None,
+            ));
         }
     }
     if let Some(records) = catalog.swift_offsets.get(&displacement) {
         for record in records {
+            if record.detail.starts_with("swift_witness:") {
+                continue;
+            }
             candidates.push(IndirectCallCandidate {
                 target: IndirectCallTarget::SwiftImplementation {
                     slot: record.slot,
@@ -5889,6 +6939,16 @@ fn add_dynamic_slot_candidates(
             }
             .into(),
         });
+    }
+    if let Some(records) = catalog.block_offsets.get(&displacement) {
+        for record in records {
+            candidates.push(block_dispatch_candidate(
+                functions,
+                record,
+                FunctionEvidenceConfidence::Candidate,
+                None,
+            ));
+        }
     }
 }
 
@@ -5962,16 +7022,173 @@ fn internal_candidate(
     authentication: Option<PointerAuthentication>,
     detail: &str,
 ) -> IndirectCallCandidate {
-    IndirectCallCandidate {
-        target: IndirectCallTarget::Internal {
+    let functions_for_target = function_candidates(functions, address);
+    let target = if let Some((role, symbol, display)) = swift_closure_metadata(functions, address) {
+        IndirectCallTarget::SwiftClosure {
+            role,
+            symbol,
+            display,
+            implementation: address,
+            functions: functions_for_target,
+        }
+    } else {
+        IndirectCallTarget::Internal {
             address,
-            functions: function_candidates(functions, address),
-        },
+            functions: functions_for_target,
+        }
+    };
+    IndirectCallCandidate {
+        target,
         source,
         confidence,
         evidence_address,
         authentication,
         detail: detail.into(),
+    }
+}
+
+fn swift_closure_metadata(
+    functions: &FunctionIndex,
+    address: u64,
+) -> Option<(SwiftClosureRole, String, String)> {
+    let function = functions.by_entry(address)?;
+    let FunctionIdentity::Named { primary, aliases } = &function.identity else {
+        return None;
+    };
+    std::iter::once(primary).chain(aliases).find_map(|symbol| {
+        let evidence = classify_swift_closure_symbol(symbol)?;
+        let role = match evidence.kind {
+            SwiftClosureSymbolKind::ClosureEntry => SwiftClosureRole::ClosureEntry,
+            SwiftClosureSymbolKind::ReabstractionThunk => SwiftClosureRole::ReabstractionThunk,
+            SwiftClosureSymbolKind::PartialApplyForwarder => {
+                SwiftClosureRole::PartialApplyForwarder
+            }
+            SwiftClosureSymbolKind::PartialApplyObjcForwarder => {
+                SwiftClosureRole::PartialApplyObjcForwarder
+            }
+        };
+        Some((role, symbol.clone(), evidence.display))
+    })
+}
+
+fn cpp_dispatch_candidate(
+    functions: &FunctionIndex,
+    record: &CppDispatch,
+    evidence_address: Option<u64>,
+) -> IndirectCallCandidate {
+    IndirectCallCandidate {
+        target: match &record.implementation {
+            StaticTarget::Internal(implementation) => IndirectCallTarget::CppVirtualMethod {
+                vtable: record.vtable,
+                address_point: record.address_point,
+                slot: record.slot,
+                type_name: record.type_name.clone(),
+                implementation: *implementation,
+                functions: function_candidates(functions, *implementation),
+            },
+            StaticTarget::Import { name, ordinal } => IndirectCallTarget::CppVirtualMethodImport {
+                vtable: record.vtable,
+                address_point: record.address_point,
+                slot: record.slot,
+                type_name: record.type_name.clone(),
+                symbol: name.clone(),
+                library_ordinal: *ordinal,
+            },
+        },
+        source: IndirectCallEvidenceSource::CppVtable,
+        confidence: if evidence_address.is_some() {
+            record.confidence
+        } else {
+            FunctionEvidenceConfidence::Candidate
+        },
+        evidence_address,
+        authentication: record.authentication,
+        detail: "cpp_rtti_vtable_agreement".into(),
+    }
+}
+
+fn swift_witness_candidate(
+    functions: &FunctionIndex,
+    record: &SwiftWitnessDispatch,
+    confidence: FunctionEvidenceConfidence,
+    evidence_address: Option<u64>,
+) -> IndirectCallCandidate {
+    let confidence = if record.runtime_instantiated {
+        FunctionEvidenceConfidence::Candidate
+    } else {
+        confidence
+    };
+    IndirectCallCandidate {
+        target: match &record.implementation {
+            StaticTarget::Internal(implementation) => IndirectCallTarget::SwiftProtocolWitness {
+                witness_table: record.witness_table,
+                requirement: record.requirement,
+                protocol: record.protocol.clone(),
+                conforming_type: record.conforming_type.clone(),
+                runtime_instantiated: record.runtime_instantiated,
+                implementation: *implementation,
+                functions: function_candidates(functions, *implementation),
+            },
+            StaticTarget::Import { name, ordinal } => {
+                IndirectCallTarget::SwiftProtocolWitnessImport {
+                    witness_table: record.witness_table,
+                    requirement: record.requirement,
+                    protocol: record.protocol.clone(),
+                    conforming_type: record.conforming_type.clone(),
+                    runtime_instantiated: record.runtime_instantiated,
+                    symbol: name.clone(),
+                    library_ordinal: *ordinal,
+                }
+            }
+        },
+        source: IndirectCallEvidenceSource::Swift,
+        confidence,
+        evidence_address,
+        authentication: record.authentication,
+        detail: if record.runtime_instantiated {
+            "swift_runtime_instantiated_witness"
+        } else if evidence_address.is_some() {
+            "swift_witness_table_identity_match"
+        } else {
+            "swift_witness_slot_candidate"
+        }
+        .into(),
+    }
+}
+
+fn block_dispatch_candidate(
+    functions: &FunctionIndex,
+    record: &BlockDispatch,
+    confidence: FunctionEvidenceConfidence,
+    evidence_address: Option<u64>,
+) -> IndirectCallCandidate {
+    IndirectCallCandidate {
+        target: match &record.implementation {
+            StaticTarget::Internal(implementation) => IndirectCallTarget::BlockInvoke {
+                literal: record.literal,
+                descriptor: record.descriptor,
+                storage: record.storage,
+                implementation: *implementation,
+                functions: function_candidates(functions, *implementation),
+            },
+            StaticTarget::Import { name, ordinal } => IndirectCallTarget::BlockInvokeImport {
+                literal: record.literal,
+                descriptor: record.descriptor,
+                storage: record.storage,
+                symbol: name.clone(),
+                library_ordinal: *ordinal,
+            },
+        },
+        source: IndirectCallEvidenceSource::BlockClosure,
+        confidence,
+        evidence_address,
+        authentication: record.authentication,
+        detail: if evidence_address.is_some() {
+            "block_literal_invoke_slot"
+        } else {
+            "block_invoke_offset_candidate"
+        }
+        .into(),
     }
 }
 
@@ -6282,6 +7499,11 @@ fn read_pointer(macho: &MachoFile<'_>, address: u64) -> Option<u64> {
     Some(macho.endian().read_u64(bytes.try_into().ok()?))
 }
 
+fn read_u32(macho: &MachoFile<'_>, address: u64) -> Option<u32> {
+    let bytes = macho.read_bytes_at_va(Va(address), 4).ok()?;
+    Some(macho.endian().read_u32(bytes.try_into().ok()?))
+}
+
 fn read_cstring(macho: &MachoFile<'_>, address: u64) -> Option<String> {
     let available = macho
         .all_sections()
@@ -6428,7 +7650,7 @@ mod tests {
             byte_len: 4,
             kind: ControlFlowInstructionKind::Other,
             target: None,
-            operands: Vec::new(),
+            operands: Vec::new().into_boxed_slice(),
             written_register: None,
             value_effect: ControlFlowValueEffect::None,
             memory_effect: ControlFlowMemoryEffect::None,
@@ -7159,7 +8381,7 @@ mod tests {
             byte_len: 4,
             kind: ControlFlowInstructionKind::Other,
             target: None,
-            operands: Vec::new(),
+            operands: Vec::new().into_boxed_slice(),
             written_register: None,
             value_effect: ControlFlowValueEffect::None,
             memory_effect: ControlFlowMemoryEffect::None,
@@ -7174,7 +8396,8 @@ mod tests {
                 displacement: 8,
             },
             ControlFlowOperand::Register { register: rax },
-        ];
+        ]
+        .into_boxed_slice();
         store.memory_effect = ControlFlowMemoryEffect::Store;
         apply_instruction(
             &mut state,
@@ -7193,7 +8416,8 @@ mod tests {
                 base: rsp,
                 displacement: 8,
             },
-        ];
+        ]
+        .into_boxed_slice();
         load.written_register = Some(rcx);
         load.value_effect = ControlFlowValueEffect::Load;
         apply_instruction(
@@ -7244,7 +8468,8 @@ mod tests {
             operands: vec![
                 ControlFlowOperand::Register { register: reg(0) },
                 ControlFlowOperand::Register { register: reg(1) },
-            ],
+            ]
+            .into_boxed_slice(),
             written_register: Some(reg(0)),
             value_effect: ControlFlowValueEffect::AddRegister,
             memory_effect: ControlFlowMemoryEffect::None,
@@ -7271,7 +8496,8 @@ mod tests {
             index: reg(1),
             scale: 8,
             displacement: 4,
-        }];
+        }]
+        .into_boxed_slice();
         assert_eq!(
             memory_locations(&state, &add, Architecture::X86_64),
             BTreeSet::from([AbstractMemoryLocation::Global(0x101f)])
@@ -7280,7 +8506,7 @@ mod tests {
         add.kind = ControlFlowInstructionKind::Call;
         add.written_register = None;
         add.value_effect = ControlFlowValueEffect::None;
-        add.operands.clear();
+        add.operands = Vec::new().into_boxed_slice();
         apply_instruction(
             &mut state,
             &mut memory,
@@ -7367,7 +8593,8 @@ mod tests {
         add_immediate.operands = vec![
             ControlFlowOperand::Register { register: adjusted },
             ControlFlowOperand::Immediate { value: 16 },
-        ];
+        ]
+        .into_boxed_slice();
         add_immediate.written_register = Some(adjusted);
         add_immediate.value_effect = ControlFlowValueEffect::AddImmediate;
         apply_instruction(
@@ -7403,7 +8630,8 @@ mod tests {
                 register: register_addend,
             },
             ControlFlowOperand::Register { register: index },
-        ];
+        ]
+        .into_boxed_slice();
         add_register.written_register = Some(register_addend);
         add_register.value_effect = ControlFlowValueEffect::AddRegister;
         apply_instruction(
@@ -7445,7 +8673,8 @@ mod tests {
                 displacement: 16,
             },
             ControlFlowOperand::Register { register: source },
-        ];
+        ]
+        .into_boxed_slice();
         store.memory_effect = ControlFlowMemoryEffect::Store;
         apply_memory_effect(
             &state,
@@ -7482,7 +8711,8 @@ mod tests {
                 scale: 8,
                 displacement: 16,
             },
-        ];
+        ]
+        .into_boxed_slice();
         load.written_register = Some(loaded);
         load.value_effect = ControlFlowValueEffect::Load;
         apply_instruction(
@@ -7570,7 +8800,8 @@ mod tests {
                 ControlFlowOperand::Register { register: reg(0) },
                 ControlFlowOperand::Register { register: reg(0) },
                 ControlFlowOperand::Register { register: reg(1) },
-            ],
+            ]
+            .into_boxed_slice(),
             written_register: Some(reg(0)),
             value_effect: ControlFlowValueEffect::SignPointerIa,
             memory_effect: ControlFlowMemoryEffect::None,
@@ -7618,7 +8849,7 @@ mod tests {
         );
 
         instruction.address += 4;
-        instruction.operands.truncate(2);
+        instruction.operands = instruction.operands[..2].to_vec().into_boxed_slice();
         instruction.value_effect = ControlFlowValueEffect::StripPointerAuthentication;
         apply_instruction(
             &mut state,
@@ -7643,7 +8874,8 @@ mod tests {
         instruction.operands = vec![
             ControlFlowOperand::Register { register: reg(3) },
             ControlFlowOperand::Register { register: reg(2) },
-        ];
+        ]
+        .into_boxed_slice();
         instruction.written_register = Some(reg(3));
         instruction.value_effect = ControlFlowValueEffect::SignExtend8;
         apply_instruction(
@@ -8059,5 +9291,329 @@ mod tests {
         assert_eq!(authentication.address_diversity, Some(true));
         assert!(!authentication.authenticated_instruction);
         assert!(swift_witness_authentication(&Direct).is_none());
+    }
+
+    #[test]
+    fn block_literal_metadata_closes_invoke_to_function_identity() {
+        let mut bytes = x86_pointer_fixture();
+        bytes[0x108..0x10c].copy_from_slice(&(1_u32 << 28).to_le_bytes());
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let literal = MAIN;
+        let invoke_slot = literal + 16;
+        let mut catalog = Catalog::default();
+        catalog.slots.insert(
+            literal,
+            vec![StaticEvidence {
+                source: IndirectCallEvidenceSource::ChainedFixup,
+                target: StaticTarget::Import {
+                    name: "_NSConcreteGlobalBlock".into(),
+                    ordinal: Some(1),
+                },
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+                detail: "test_block_isa".into(),
+            }],
+        );
+        catalog.slots.insert(
+            invoke_slot,
+            vec![StaticEvidence {
+                source: IndirectCallEvidenceSource::Relocation,
+                target: StaticTarget::Internal(HELPER),
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+                detail: "test_block_invoke".into(),
+            }],
+        );
+        catalog.collect_blocks(&macho);
+
+        let mut candidates = Vec::new();
+        add_slot_candidates(
+            &macho,
+            &functions,
+            invoke_slot,
+            &catalog,
+            None,
+            &mut candidates,
+        );
+        assert!(candidates.iter().any(|candidate| matches!(
+            &candidate.target,
+            IndirectCallTarget::BlockInvoke {
+                literal: BlockLiteralLocation::Static { address },
+                storage: BlockStorageKind::Global,
+                implementation,
+                functions,
+                ..
+            } if *address == MAIN && *implementation == HELPER && functions.len() == 1
+        )));
+    }
+
+    #[test]
+    fn stack_block_construction_closes_invoke_to_function_identity() {
+        let bytes = x86_pointer_fixture();
+        let macho = image(&bytes);
+        let mut catalog = Catalog::default();
+        let imported_invoke_slot = SLOT + 8;
+        catalog.slots.insert(
+            SLOT,
+            vec![StaticEvidence {
+                source: IndirectCallEvidenceSource::ChainedFixup,
+                target: StaticTarget::Import {
+                    name: "_NSConcreteStackBlock".into(),
+                    ordinal: Some(1),
+                },
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+                detail: "test_stack_block_isa".into(),
+            }],
+        );
+        catalog.slots.insert(
+            imported_invoke_slot,
+            vec![StaticEvidence {
+                source: IndirectCallEvidenceSource::ChainedFixup,
+                target: StaticTarget::Import {
+                    name: "_external_block_invoke".into(),
+                    ordinal: Some(3),
+                },
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+                detail: "test_imported_block_invoke".into(),
+            }],
+        );
+        let memory = BTreeMap::from([
+            (
+                AbstractMemoryLocation::Stack(-48),
+                Arc::new(BTreeSet::from([AbstractValue {
+                    kind: AbstractValueKind::PointerSlot(SLOT),
+                    authentication: None,
+                    instruction: MAIN,
+                }])),
+            ),
+            (
+                AbstractMemoryLocation::Stack(-32),
+                Arc::new(BTreeSet::from([
+                    AbstractValue {
+                        kind: AbstractValueKind::Address(HELPER),
+                        authentication: None,
+                        instruction: MAIN,
+                    },
+                    AbstractValue {
+                        kind: AbstractValueKind::PointerSlot(imported_invoke_slot),
+                        authentication: None,
+                        instruction: MAIN,
+                    },
+                ])),
+            ),
+            (
+                AbstractMemoryLocation::Stack(-24),
+                Arc::new(BTreeSet::from([AbstractValue {
+                    kind: AbstractValueKind::Address(MAIN),
+                    authentication: None,
+                    instruction: MAIN,
+                }])),
+            ),
+        ]);
+        let records = dynamic_block_dispatches(
+            &macho,
+            &memory,
+            &catalog,
+            MAIN,
+            &StaticTarget::Internal(HELPER),
+            None,
+            &BTreeSet::from([AbstractMemoryLocation::Stack(-32)]),
+        );
+        assert!(matches!(
+            records.as_slice(),
+            [BlockDispatch {
+                literal: BlockLiteralLocation::Stack {
+                    function: MAIN,
+                    offset: -48,
+                },
+                descriptor: Some(MAIN),
+                storage: BlockStorageKind::Stack,
+                implementation: StaticTarget::Internal(HELPER),
+                ..
+            }]
+        ));
+
+        let imported_target = StaticTarget::Import {
+            name: "_external_block_invoke".into(),
+            ordinal: Some(3),
+        };
+        let imported_records = dynamic_block_dispatches(
+            &macho,
+            &memory,
+            &catalog,
+            MAIN,
+            &imported_target,
+            None,
+            &BTreeSet::from([AbstractMemoryLocation::Stack(-32)]),
+        );
+        assert!(matches!(
+            imported_records.as_slice(),
+            [BlockDispatch {
+                literal: BlockLiteralLocation::Stack {
+                    function: MAIN,
+                    offset: -48,
+                },
+                implementation: StaticTarget::Import { name, ordinal: Some(3) },
+                ..
+            }] if name == "_external_block_invoke"
+        ));
+    }
+
+    #[test]
+    fn qualified_cpp_and_swift_targets_retain_dispatch_identity() {
+        let bytes = x86_pointer_fixture();
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let cpp = cpp_dispatch_candidate(
+            &functions,
+            &CppDispatch {
+                vtable: SLOT - 16,
+                address_point: SLOT,
+                slot: 0,
+                type_name: "7Fixture".into(),
+                implementation: StaticTarget::Internal(HELPER),
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+            },
+            Some(SLOT),
+        );
+        assert!(matches!(
+            cpp.target,
+            IndirectCallTarget::CppVirtualMethod {
+                vtable,
+                implementation: HELPER,
+                ref functions,
+                ..
+            } if vtable == SLOT - 16 && functions.len() == 1
+        ));
+
+        let swift = swift_witness_candidate(
+            &functions,
+            &SwiftWitnessDispatch {
+                witness_table: SLOT - 8,
+                requirement: 3,
+                protocol: Some("FixtureProtocol".into()),
+                conforming_type: Some("FixtureType".into()),
+                runtime_instantiated: false,
+                implementation: StaticTarget::Internal(HELPER),
+                authentication: None,
+            },
+            FunctionEvidenceConfidence::Exact,
+            Some(SLOT),
+        );
+        assert!(matches!(
+            swift.target,
+            IndirectCallTarget::SwiftProtocolWitness {
+                witness_table,
+                requirement: 3,
+                implementation: HELPER,
+                ref functions,
+                ..
+            } if witness_table == SLOT - 8 && functions.len() == 1
+        ));
+
+        let cpp_import = cpp_dispatch_candidate(
+            &functions,
+            &CppDispatch {
+                vtable: SLOT - 16,
+                address_point: SLOT,
+                slot: 1,
+                type_name: "7Fixture".into(),
+                implementation: StaticTarget::Import {
+                    name: "__ZN7Fixture7virtualEv".into(),
+                    ordinal: Some(2),
+                },
+                confidence: FunctionEvidenceConfidence::Exact,
+                authentication: None,
+            },
+            Some(SLOT),
+        );
+        assert!(matches!(
+            cpp_import.target,
+            IndirectCallTarget::CppVirtualMethodImport {
+                slot: 1,
+                ref symbol,
+                library_ordinal: Some(2),
+                ..
+            } if symbol == "__ZN7Fixture7virtualEv"
+        ));
+
+        let swift_import = swift_witness_candidate(
+            &functions,
+            &SwiftWitnessDispatch {
+                witness_table: SLOT - 8,
+                requirement: 4,
+                protocol: Some("FixtureProtocol".into()),
+                conforming_type: Some("FixtureType".into()),
+                runtime_instantiated: false,
+                implementation: StaticTarget::Import {
+                    name: "$s7Fixture7witnessyyF".into(),
+                    ordinal: None,
+                },
+                authentication: None,
+            },
+            FunctionEvidenceConfidence::Exact,
+            Some(SLOT),
+        );
+        assert!(matches!(
+            swift_import.target,
+            IndirectCallTarget::SwiftProtocolWitnessImport {
+                requirement: 4,
+                ref symbol,
+                library_ordinal: None,
+                ..
+            } if symbol == "$s7Fixture7witnessyyF"
+        ));
+
+        let block_import = block_dispatch_candidate(
+            &functions,
+            &BlockDispatch {
+                literal: BlockLiteralLocation::Static { address: MAIN },
+                descriptor: Some(SLOT),
+                storage: BlockStorageKind::Global,
+                implementation: StaticTarget::Import {
+                    name: "_external_block_invoke".into(),
+                    ordinal: Some(3),
+                },
+                authentication: None,
+            },
+            FunctionEvidenceConfidence::Exact,
+            Some(SLOT),
+        );
+        assert!(matches!(
+            block_import.target,
+            IndirectCallTarget::BlockInvokeImport {
+                literal: BlockLiteralLocation::Static { address: MAIN },
+                ref symbol,
+                library_ordinal: Some(3),
+                ..
+            } if symbol == "_external_block_invoke"
+        ));
+    }
+
+    #[test]
+    fn contradictory_swift_witnesses_keep_the_site_incomplete() {
+        let candidate = |implementation| IndirectCallCandidate {
+            target: IndirectCallTarget::SwiftProtocolWitness {
+                witness_table: SLOT,
+                requirement: 0,
+                protocol: Some("FixtureProtocol".into()),
+                conforming_type: Some("FixtureType".into()),
+                runtime_instantiated: false,
+                implementation,
+                functions: Vec::new(),
+            },
+            source: IndirectCallEvidenceSource::Swift,
+            confidence: FunctionEvidenceConfidence::Exact,
+            evidence_address: Some(SLOT),
+            authentication: None,
+            detail: "test_witness_conflict".into(),
+        };
+        let conflicts = indirect_conflicts(&[candidate(MAIN), candidate(HELPER)]);
+        assert_eq!(conflicts.len(), 1);
+        assert_eq!(conflicts[0].targets.len(), 2);
     }
 }

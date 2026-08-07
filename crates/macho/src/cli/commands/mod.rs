@@ -41,6 +41,7 @@ Language:
 
 Analysis:
   program        Selective whole-program recovery with typed evidence
+  pac            Pointer-authentication inventory and detour evidence
   disassemble    Decode selected executable instructions
   diff           Compare two binaries semantically
   audit          Security and configuration audit
@@ -161,6 +162,9 @@ enum Commands {
     /// Selective whole-program recovery with typed evidence
     #[command(hide = true)]
     Program(Box<subcommands::program::ProgramArgs>),
+    /// Pointer-authentication inventory and authenticated control-flow sites
+    #[command(hide = true)]
+    Pac(subcommands::pac::PacArgs),
     /// Decode selected executable instructions
     #[command(hide = true)]
     Disassemble(subcommands::disassemble::DisassembleArgs),
@@ -215,6 +219,7 @@ impl Commands {
             Self::Cpp(_) => "cpp",
             Self::C(_) => "c",
             Self::Program(_) => "program",
+            Self::Pac(_) => "pac",
             Self::Disassemble(_) => "disassemble",
             Self::Diff(_) => "diff",
             Self::Audit(_) => "audit",
@@ -349,11 +354,8 @@ impl CliError {
             || source
                 .downcast_ref::<crate::analysis::disassembly::DisassemblyError>()
                 .is_some_and(|error| {
-                    !matches!(
-                        error.code(),
-                        "insn.decode.invalid"
-                            | "analysis.disassembly.selection.partial_instruction"
-                    )
+                    !error.code().starts_with("insn.decode.")
+                        && error.code() != "analysis.disassembly.selection.partial_instruction"
                 })
             || source
                 .downcast_ref::<crate::analysis::AnalysisError>()
@@ -722,6 +724,7 @@ fn dispatch(
         Commands::C(args) => subcommands::c::run(args, output, out),
         // Analysis
         Commands::Program(args) => subcommands::program::run(*args, format, out),
+        Commands::Pac(args) => subcommands::pac::run(args, format, out),
         Commands::Disassemble(_) => {
             unreachable!("disassemble streams to stdout before dispatch")
         }

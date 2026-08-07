@@ -10,6 +10,7 @@ mod decode;
 mod model;
 
 pub use decode::{
-    decode_swift_dynamic_replacement, decode_swift_mangling, decode_swift_objc_callable,
+    classify_swift_closure_symbol, decode_swift_dynamic_replacement, decode_swift_mangling,
+    decode_swift_objc_callable,
 };
 pub use model::*;

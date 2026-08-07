@@ -5,7 +5,18 @@ x86_64 and ARM64/ARM64e.
 
 The `insn` feature has two layers: mkasm-generated, allocation-free tables for
 encoding identity, physical encoding, and display, plus locally lowered ARM64
-semantics and iced-x86-backed x86 semantics, effects, and relocation.
+semantics and mkasm-backed x86 semantics, effects, and relocation.
+
+Decode failures retain a typed `DecodeErrorKind`: invalid encoding, unknown
+primary-table encoding, truncated input, or an instruction exceeding the x86
+length limit. Recovering disassembly keeps strict decode fail-closed. A complete
+AArch64 word whose formatter has no match is retained with an exact boundary;
+it is opaque (`InsnKind::Other`) and carries no operand, control-flow, or
+relocation authority. An x86 table miss remains a recovery gap until the local
+codec is extended; no secondary production decoder promotes it to an
+instruction. The vendored x86 codec regression suite encodes and decodes every
+supported 64-bit catalog form and includes explicit coverage for 3DNow trailing
+selectors and Knights Corner VEX map-zero branches.
 
 ```rust
 let ret = [0xc0, 0x03, 0x5f, 0xd6]; // ARM64 `ret`

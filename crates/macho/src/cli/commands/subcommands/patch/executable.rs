@@ -1,4 +1,7 @@
 use super::spec::{OperationDetail, encode_hex};
+use crate::analysis::pac::{
+    PacDetourAssessment, PacDetourEncoding, PacDetourMechanism, PacPatchLimits, assess_detour,
+};
 use crate::cli::model::macho_file::MachoFile;
 use crate::format::constants::{CPU_TYPE_ARM64, CPU_TYPE_X86, CPU_TYPE_X86_64, VmProtection};
 use crate::patch::{
@@ -12,7 +15,9 @@ pub(super) fn plan_detour(
     entry_va: u64,
     destination_va: u64,
     overwrite_len: usize,
-) -> Result<(FunctionEntryPatchPlan, usize)> {
+    assess_pac: bool,
+    pac_max_pointers: u64,
+) -> Result<(FunctionEntryPatchPlan, usize, Option<PacDetourAssessment>)> {
     let arch = patch_arch(macho)?;
     if !executable_file_range(macho, entry_va, overwrite_len) {
         anyhow::bail!(
@@ -57,7 +62,28 @@ pub(super) fn plan_detour(
     let plan = patcher
         .plan_function_entry_patch(arch, entry_va, destination_va, overwrite_len)
         .map_err(anyhow::Error::from)?;
-    Ok((plan, instruction_count))
+    let pac = (assess_pac && arch == PatchArch::Arm64e).then(|| {
+        let encoding = match plan.jump.encoding {
+            HookJumpEncoding::Arm64BranchImmediate => PacDetourEncoding::DirectBranch,
+            HookJumpEncoding::Arm64AbsoluteLiteral => PacDetourEncoding::PlainIndirectLiteral,
+            HookJumpEncoding::Arm64eMaterializedAddress => PacDetourEncoding::MaterializedAddress,
+            _ => unreachable!("arm64e planner selected a non-arm64 encoding"),
+        };
+        assess_detour(
+            macho,
+            entry_va,
+            destination_va,
+            overwrite_len,
+            PacDetourMechanism {
+                encoding,
+                preserves_entry_bti: plan.jump.source_va != plan.entry_va,
+            },
+            PacPatchLimits {
+                max_pointers: pac_max_pointers,
+            },
+        )
+    });
+    Ok((plan, instruction_count, pac))
 }
 
 fn validate_instruction_window(
@@ -136,6 +162,7 @@ fn patch_arch(macho: &MachoFile<'_>) -> Result<PatchArch> {
 pub(super) fn detour_detail(
     plan: &FunctionEntryPatchPlan,
     instruction_count: usize,
+    pac: Option<PacDetourAssessment>,
 ) -> OperationDetail {
     OperationDetail::Detour {
         arch: plan.arch.to_string(),
@@ -149,9 +176,11 @@ pub(super) fn detour_detail(
             HookJumpEncoding::X86_64Absolute => "x86_64_absolute",
             HookJumpEncoding::Arm64BranchImmediate => "arm64_branch_immediate",
             HookJumpEncoding::Arm64AbsoluteLiteral => "arm64_absolute_literal",
+            HookJumpEncoding::Arm64eMaterializedAddress => "arm64e_materialized_address",
             _ => "unknown",
         },
         original_bytes: encode_hex(&plan.original_bytes),
         replacement_bytes: encode_hex(&plan.patch_bytes),
+        pac,
     }
 }

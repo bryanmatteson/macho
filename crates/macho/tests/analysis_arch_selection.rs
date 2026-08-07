@@ -207,18 +207,14 @@ fn analysis_domain_commands_preserve_family_siblings_without_json_key_collision(
         "disassemble --arch arm64 failed: {}",
         String::from_utf8_lossy(&disassembly.stderr)
     );
-    let disassembly_slices = disassembly
+    let mut disassembly_slices = disassembly
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("valid NDJSON line"))
-        .filter(|line| line["event"] == "slice")
-        .map(|line| {
-            line["identity"]["image"]["architecture"]["cpu_subtype"]
-                .as_i64()
-                .expect("disassembly subtype")
-        })
+        .map(|line| line["architecture"]["cpu_subtype"].as_i64().unwrap())
         .collect::<Vec<_>>();
+    disassembly_slices.dedup();
     assert_eq!(
         disassembly_slices,
         [0, i64::from(macho_test_support::CPU_SUBTYPE_ARM64E)]
@@ -321,15 +317,31 @@ fn family_subset_provenance_lists_only_the_resolved_exact_architectures() {
         "family disassembly failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let header = output
+    let mut architectures = output
         .stdout
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
         .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("valid NDJSON line"))
-        .find(|line| line["event"] == "header")
-        .expect("disassembly header event");
-    assert_eq!(header["schema_version"], 2);
-    assert_eq!(header["request"]["architectures"], expected);
+        .map(|line| {
+            assert_eq!(line["schema_version"], 1);
+            assert!(line.get("event").is_none());
+            (
+                line["architecture"]["cpu_type"].as_i64().unwrap(),
+                line["architecture"]["cpu_subtype"].as_i64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    architectures.dedup();
+    assert_eq!(
+        architectures,
+        [
+            (i64::from(macho_test_support::CPU_TYPE_ARM64), 0),
+            (
+                i64::from(macho_test_support::CPU_TYPE_ARM64),
+                i64::from(macho_test_support::CPU_SUBTYPE_ARM64E),
+            ),
+        ]
+    );
 
     std::fs::remove_file(path).expect("remove three-architecture fixture");
 }

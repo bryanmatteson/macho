@@ -3,7 +3,7 @@
 //! Architecture-aware instruction decoding, encoding, and relocation.
 //!
 //! Uses mkasm-generated tables for encoding identity, physical encoding, and
-//! formatting, while [`iced_x86`] continues to provide x86 semantic lowering
+//! formatting and x86 semantic lowering
 //! for the instruction-level operations that Mach-O patching, xref analysis,
 //! and binary diffing need:
 //!
@@ -13,6 +13,7 @@
 //! - **Disassemble**: instruction-to-text for display
 
 mod arm64;
+mod codecs;
 mod encode;
 mod x86_64;
 
@@ -320,6 +321,25 @@ pub struct DisassembledInsn {
     pub instruction: Insn,
     /// Human-readable assembly text.
     pub text: String,
+    /// Recovery provenance when architecture rules establish an instruction
+    /// boundary but the formatter cannot provide semantics.
+    pub recovery: Option<InstructionRecovery>,
+}
+
+/// Provenance for an instruction retained without primary-decoder semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstructionRecovery {
+    /// How the instruction boundary was established.
+    pub boundary_confidence: BoundaryConfidence,
+    /// Architecture-owned source of the otherwise opaque boundary.
+    pub source: &'static str,
+}
+
+/// Confidence in the retained boundary of an opaque instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryConfidence {
+    /// Fixed-width architecture rules establish the boundary exactly.
+    Exact,
 }
 
 /// Stateful single-instruction decoder and formatter.
@@ -349,11 +369,15 @@ impl Disassembler {
     /// Decode and format the instruction at the start of `bytes` in one
     /// coordinated backend operation.
     pub fn decode_one(&mut self, bytes: &[u8], va: u64) -> Result<DisassembledInsn, DecodeError> {
-        let (instruction, text) = match &mut self.backend {
+        let (instruction, text, recovery) = match &mut self.backend {
             DisassemblerBackend::X86_64 => x86_64::decode_and_disassemble_one(bytes, va)?,
             DisassemblerBackend::Arm64 => arm64::decode_and_disassemble_one(bytes, va)?,
         };
-        Ok(DisassembledInsn { instruction, text })
+        Ok(DisassembledInsn {
+            instruction,
+            text,
+            recovery,
+        })
     }
 }
 
@@ -428,16 +452,49 @@ pub enum PcRelKind {
     Memory,
 }
 
+/// Machine-readable category for a decode failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DecodeErrorKind {
+    /// The bytes are not a valid instruction for the selected architecture.
+    InvalidEncoding,
+    /// The primary decoder has no matching encoding.
+    UnknownEncoding,
+    /// More bytes are required to decide or complete the instruction.
+    Truncated,
+    /// Prefixes or instruction fields exceed the architectural length limit.
+    TooLong,
+}
+
+impl DecodeErrorKind {
+    /// Stable diagnostic code for this category.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::InvalidEncoding => "insn.decode.invalid_encoding",
+            Self::UnknownEncoding => "insn.decode.unknown_encoding",
+            Self::Truncated => "insn.decode.truncated",
+            Self::TooLong => "insn.decode.too_long",
+        }
+    }
+}
+
 /// Errors from decode operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeError {
+    /// Machine-readable failure category.
+    pub kind: DecodeErrorKind,
     /// The message field.
     pub message: String,
 }
 
 impl DecodeError {
-    /// The CODE constant.
+    /// Legacy aggregate code retained for callers that group all failures.
     pub const CODE: &'static str = "insn.decode.invalid";
+
+    /// Stable code for this specific failure category.
+    pub const fn code(&self) -> &'static str {
+        self.kind.code()
+    }
 }
 
 impl fmt::Display for DecodeError {
@@ -530,6 +587,13 @@ pub fn decode_one(bytes: &[u8], va: u64, arch: Arch) -> Result<Insn, DecodeError
     }
 }
 
+pub(crate) fn could_start_direct_call(bytes: &[u8], arch: Arch) -> bool {
+    match arch {
+        Arch::X86_64 => x86_64::could_start_direct_call(bytes),
+        Arch::Arm64 | Arch::Arm64e => true,
+    }
+}
+
 /// Iterate over all instructions in `bytes`, starting at `base_va`.
 pub fn decode_iter(bytes: &[u8], base_va: u64, arch: Arch) -> InsnIter<'_> {
     InsnIter {
@@ -568,6 +632,7 @@ impl<'a> DecodeCursor<'a> {
             .base_va
             .checked_add(offset as u64)
             .ok_or_else(|| DecodeError {
+                kind: DecodeErrorKind::InvalidEncoding,
                 message: "instruction virtual address overflows".into(),
             })?;
         match self.arch {
@@ -577,6 +642,34 @@ impl<'a> DecodeCursor<'a> {
                 .expect("x86 cursor exists")
                 .decode_at(offset),
             Arch::Arm64 | Arch::Arm64e => arm64::decode_one(&self.bytes[offset..], va),
+        }
+    }
+
+    /// Decode only instruction length and a direct-call target, if present.
+    pub(crate) fn probe_direct_call_at(
+        &mut self,
+        offset: usize,
+    ) -> Result<(usize, Option<u64>), DecodeError> {
+        let va = self
+            .base_va
+            .checked_add(offset as u64)
+            .ok_or_else(|| DecodeError {
+                kind: DecodeErrorKind::InvalidEncoding,
+                message: "instruction virtual address overflows".into(),
+            })?;
+        match self.arch {
+            Arch::X86_64 => self
+                .x86
+                .as_mut()
+                .expect("x86 cursor exists")
+                .probe_direct_call_at(offset),
+            Arch::Arm64 | Arch::Arm64e => {
+                let instruction = arm64::decode_one(&self.bytes[offset..], va)?;
+                let target = matches!(instruction.kind, InsnKind::Call(_))
+                    .then(|| resolve_branch_target(&instruction, va))
+                    .flatten();
+                Ok((instruction.len, target))
+            }
         }
     }
 }

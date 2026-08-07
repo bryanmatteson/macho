@@ -19,11 +19,15 @@ trap 'rm -rf -- "$generated"' EXIT HUP INT TERM
     go run ./cmd/mkasm --codegen rust --output "$generated/aarch64" "$arm_corpus"
     xz -dc "$x86_corpus" |
         go run ./cmd/mkasm --arch x86_64 --codegen rust --output "$generated/x86_64" -
+    cargo fmt --manifest-path "$generated/aarch64/Cargo.toml"
+    cargo fmt --manifest-path "$generated/x86_64/Cargo.toml"
 )
 
-cp "$generated/aarch64/src/decoders.rs" "$repository/crates/mkasm-aarch64/src/decoders.rs"
-cp "$generated/aarch64/src/encoders.rs" "$repository/crates/mkasm-aarch64/src/encoders.rs"
-cp "$generated/aarch64/src/formatters.rs" "$repository/crates/mkasm-aarch64/src/formatters.rs"
-cp "$generated/aarch64/LICENSE" "$repository/crates/mkasm-aarch64/LICENSE"
-cp "$generated/x86_64/LICENSE" "$repository/crates/mkasm-x86-64/LICENSE"
-cp "$generated/x86_64/src/lib.rs" "$repository/crates/mkasm-x86-64/src/generated.rs"
+cp "$generated/aarch64/src/decoders.rs" "$repository/crates/macho/src/insn/codecs/aarch64/decoders.rs"
+cp "$generated/aarch64/src/encoders.rs" "$repository/crates/macho/src/insn/codecs/aarch64/encoders.rs"
+cp "$generated/aarch64/src/formatters.rs" "$repository/crates/macho/src/insn/codecs/aarch64/formatters.rs"
+cp "$generated/aarch64/LICENSE" "$repository/crates/macho/src/insn/codecs/aarch64/LICENSE"
+perl -0pi -e 's/use crate::decoders::/use super::decoders::/' \
+    "$repository/crates/macho/src/insn/codecs/aarch64/formatters.rs"
+cp "$generated/x86_64/LICENSE" "$repository/crates/macho/src/insn/codecs/x86_64/LICENSE"
+cp "$generated/x86_64/src/lib.rs" "$repository/crates/macho/src/insn/codecs/x86_64/generated.rs"

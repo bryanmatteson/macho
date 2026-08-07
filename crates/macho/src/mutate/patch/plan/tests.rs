@@ -267,9 +267,9 @@ mod tests {
     }
 
     #[test]
-    fn encode_hook_jump_arm64e_absolute_literal() {
+    fn encode_hook_jump_arm64_absolute_literal() {
         let jump =
-            MachoPatcher::encode_hook_jump(PatchArch::Arm64e, 0x1000, 0x9000_0000_0000).unwrap();
+            MachoPatcher::encode_hook_jump(PatchArch::Arm64, 0x1000, 0x9000_0000_0000).unwrap();
         assert_eq!(jump.encoding, HookJumpEncoding::Arm64AbsoluteLiteral);
         assert_eq!(
             jump.bytes,
@@ -277,6 +277,30 @@ mod tests {
                 0x50, 0x00, 0x00, 0x58, 0x00, 0x02, 0x1F, 0xD6, 0x00, 0x00, 0x00, 0x00, 0x00, 0x90,
                 0x00, 0x00,
             ]
+        );
+    }
+
+    #[test]
+    fn encode_hook_jump_arm64e_materializes_far_address_without_pointer_literal() {
+        let jump = MachoPatcher::encode_hook_jump(PatchArch::Arm64e, 0x1000, 0x1234_5678_9abc_def0)
+            .unwrap();
+        assert_eq!(jump.encoding, HookJumpEncoding::Arm64eMaterializedAddress);
+        assert_eq!(jump.bytes.len(), 20);
+        assert_eq!(
+            jump.bytes,
+            vec![
+                0x10, 0xde, 0x9b, 0xd2, // movz x16, #0xdef0
+                0x90, 0x57, 0xb3, 0xf2, // movk x16, #0x9abc, lsl #16
+                0x10, 0xcf, 0xca, 0xf2, // movk x16, #0x5678, lsl #32
+                0x90, 0x46, 0xe2, 0xf2, // movk x16, #0x1234, lsl #48
+                0x00, 0x02, 0x1f, 0xd6, // br x16
+            ]
+        );
+        assert!(
+            !jump
+                .bytes
+                .windows(8)
+                .any(|bytes| { bytes == 0x1234_5678_9abc_def0_u64.to_le_bytes().as_slice() })
         );
     }
 
@@ -350,7 +374,10 @@ mod tests {
     fn instruction_failures_retain_typed_sources_and_location() {
         let decode = MachoPatcher::validate_trampoline_instructions(PatchArch::X86_64, &[0x0f])
             .expect_err("truncated instruction must fail");
-        assert_eq!(decode.kind, crate::mutate::patch::PatchErrorKind::Instruction);
+        assert_eq!(
+            decode.kind,
+            crate::mutate::patch::PatchErrorKind::Instruction
+        );
         assert_eq!(decode.code(), "patch.instruction.failed");
         assert_eq!(decode.location.expect("decode span").offset, 0);
         assert!(matches!(
@@ -360,7 +387,10 @@ mod tests {
 
         let encode = nop_bytes_for_arch(PatchArch::Arm64, 2)
             .expect_err("arm64 NOP size must be instruction-aligned");
-        assert_eq!(encode.kind, crate::mutate::patch::PatchErrorKind::Instruction);
+        assert_eq!(
+            encode.kind,
+            crate::mutate::patch::PatchErrorKind::Instruction
+        );
         assert!(matches!(
             encode.source,
             Some(crate::mutate::patch::PatchErrorSource::Encode(_))
@@ -452,6 +482,26 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, crate::mutate::patch::PatchErrorKind::InvalidInput);
         assert!(err.message().contains("divisible by 4"));
+    }
+
+    #[test]
+    fn plan_function_entry_patch_arm64e_preserves_bti_landing_pad() {
+        let mut p = make_test_patcher();
+        p.data[0x100..0x108].copy_from_slice(&[
+            0x5f, 0x24, 0x03, 0xd5, // bti c
+            0x1f, 0x20, 0x03, 0xd5, // nop
+        ]);
+        let plan = p
+            .plan_function_entry_patch(PatchArch::Arm64e, 0x100100, 0x100200, 8)
+            .unwrap();
+        assert_eq!(&plan.patch_bytes[..4], &[0x5f, 0x24, 0x03, 0xd5]);
+        assert_eq!(plan.jump.source_va, 0x100104);
+        assert_eq!(&plan.patch_bytes[4..], plan.jump.bytes);
+
+        let error = p
+            .plan_function_entry_patch(PatchArch::Arm64e, 0x100100, 0x100200, 4)
+            .unwrap_err();
+        assert!(error.message().contains("preserving BTI"));
     }
 
     #[test]

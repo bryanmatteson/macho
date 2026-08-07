@@ -1,237 +1,138 @@
-//! x86_64 semantic decoding via `iced-x86` and Intel formatting via mkasm.
+//! x86_64 semantic decoding, formatting, encoding, and relocation via mkasm.
 
-use std::cell::RefCell;
-
-use iced_x86::{
-    Code, Decoder, DecoderOptions, Encoder, FlowControl, Instruction, InstructionInfoFactory,
-    InstructionInfoOptions, Mnemonic, OpAccess, OpKind, Register,
+use super::codecs::x86_64::{
+    self as mkasm_x86_64, Decoded, DecodedOperand, FlowControl, OperandKind, RegisterClass,
+    RelativeBranchKind,
 };
-
-thread_local! {
-    static INFO_FACTORY_POOL: RefCell<Option<InstructionInfoFactory>> = const { RefCell::new(None) };
-}
 
 use crate::insn::{
-    BranchInfo, BranchTarget, DecodeError, Insn, InsnKind, MAX_OPERANDS, MemoryEffect, Operand,
-    PcRelInfo, PcRelKind, Reg, ValueEffect,
+    BranchInfo, BranchTarget, DecodeError, DecodeErrorKind, Insn, InsnKind, InstructionRecovery,
+    MAX_OPERANDS, MemoryEffect, Operand, PcRelInfo, PcRelKind, Reg, ValueEffect,
 };
 
+pub(crate) fn could_start_direct_call(bytes: &[u8]) -> bool {
+    for (index, byte) in bytes.iter().copied().take(15).enumerate() {
+        if byte == 0xe8 {
+            return index <= 10;
+        }
+        if !matches!(
+            byte,
+            0x26 | 0x2e | 0x36 | 0x3e | 0x64 | 0x65 | 0x66 | 0x67 | 0xf0 | 0xf2 | 0xf3 | 0x40
+                ..=0x4f
+        ) {
+            return false;
+        }
+    }
+    false
+}
+
 pub(crate) fn decode_one(bytes: &[u8], va: u64) -> Result<Insn, DecodeError> {
-    let insn = decode_iced(bytes, va)?;
-    Ok(lower(&insn))
+    let decoded = decode_mkasm(bytes)?;
+    Ok(lower(&decoded, va))
 }
 
 pub(crate) struct DecodeCursor<'a> {
-    decoder: Decoder<'a>,
+    bytes: &'a [u8],
     base_va: u64,
-    info_factory: Option<InstructionInfoFactory>,
 }
 
 impl<'a> DecodeCursor<'a> {
     pub(crate) fn new(bytes: &'a [u8], base_va: u64) -> Self {
-        Self {
-            decoder: Decoder::with_ip(64, bytes, base_va, DecoderOptions::NONE),
-            base_va,
-            info_factory: Some(
-                INFO_FACTORY_POOL
-                    .with(|pool| pool.borrow_mut().take())
-                    .unwrap_or_else(InstructionInfoFactory::new),
-            ),
-        }
+        Self { bytes, base_va }
     }
 
     pub(crate) fn decode_at(&mut self, offset: usize) -> Result<Insn, DecodeError> {
-        if self.decoder.position() != offset {
-            self.decoder.set_position(offset).map_err(|_| DecodeError {
-                message: "empty input".into(),
-            })?;
-            self.decoder
-                .set_ip(self.base_va.saturating_add(offset as u64));
-        }
-        if !self.decoder.can_decode() {
-            return Err(DecodeError {
-                message: "empty input".into(),
-            });
-        }
-        let insn = self.decoder.decode();
-        if insn.is_invalid() {
-            return Err(DecodeError {
-                message: "invalid instruction".into(),
-            });
-        }
-        Ok(lower_with_factory(
-            &insn,
-            self.info_factory.as_mut().expect("info factory exists"),
-        ))
+        let bytes = self.bytes.get(offset..).ok_or_else(empty_input)?;
+        let decoded = decode_mkasm(bytes)?;
+        Ok(lower(&decoded, self.base_va.saturating_add(offset as u64)))
     }
-}
 
-impl Drop for DecodeCursor<'_> {
-    fn drop(&mut self) {
-        let Some(factory) = self.info_factory.take() else {
-            return;
-        };
-        INFO_FACTORY_POOL.with(|pool| {
-            let mut pool = pool.borrow_mut();
-            if pool.is_none() {
-                *pool = Some(factory);
-            }
-        });
+    pub(crate) fn probe_direct_call_at(
+        &mut self,
+        offset: usize,
+    ) -> Result<(usize, Option<u64>), DecodeError> {
+        let bytes = self.bytes.get(offset..).ok_or_else(empty_input)?;
+        let decoded = decode_mkasm(bytes)?;
+        let va = self.base_va.saturating_add(offset as u64);
+        let target = (decoded.flow_control() == FlowControl::Call)
+            .then(|| direct_target(&decoded, va))
+            .flatten();
+        Ok((decoded.length as usize, target))
     }
 }
 
 pub(crate) fn decode_and_disassemble_one(
     bytes: &[u8],
     va: u64,
-) -> Result<(Insn, String), DecodeError> {
-    let insn = decode_iced(bytes, va)?;
-    let semantic = lower(&insn);
-    let text = format_mkasm(&bytes[..insn.len()], va)?;
-    Ok((semantic, text))
+) -> Result<(Insn, String, Option<InstructionRecovery>), DecodeError> {
+    let decoded = decode_mkasm(bytes)?;
+    Ok((lower(&decoded, va), decoded.format_intel(va), None))
 }
 
-fn format_mkasm(bytes: &[u8], va: u64) -> Result<String, DecodeError> {
-    let decoded =
-        mkasm_x86_64::decode(bytes, mkasm_x86_64::Mode::Mode64).map_err(|error| DecodeError {
-            message: format!("mkasm formatter decode failed: {error:?}"),
-        })?;
-    if decoded.length as usize != bytes.len() {
-        return Err(DecodeError {
-            message: "mkasm formatter decoded a different instruction length".into(),
-        });
-    }
-    Ok(decoded.format_intel(va))
-}
-
-fn decode_iced(bytes: &[u8], va: u64) -> Result<Instruction, DecodeError> {
+fn decode_mkasm(bytes: &[u8]) -> Result<Decoded, DecodeError> {
     if bytes.is_empty() {
-        return Err(DecodeError {
-            message: "empty input".into(),
-        });
+        return Err(empty_input());
     }
-
-    let mut decoder = Decoder::with_ip(64, bytes, va, DecoderOptions::NONE);
-    let insn = decoder.decode();
-
-    if insn.is_invalid() {
-        return Err(DecodeError {
-            message: "invalid instruction".into(),
-        });
-    }
-
-    Ok(insn)
-}
-
-fn lower(insn: &Instruction) -> Insn {
-    let mut factory = InstructionInfoFactory::new();
-    lower_with_factory(insn, &mut factory)
-}
-
-fn lower_with_factory(insn: &Instruction, factory: &mut InstructionInfoFactory) -> Insn {
-    let kind = classify(insn);
-    let (mut ops, op_count) = extract_operands(insn);
-    let op0_access =
-        if insn.op_count() >= 1 && matches!(insn.op0_kind(), OpKind::Register | OpKind::Memory) {
-            Some(
-                factory
-                    .info_options(
-                        insn,
-                        InstructionInfoOptions::NO_MEMORY_USAGE
-                            | InstructionInfoOptions::NO_REGISTER_USAGE,
-                    )
-                    .op_access(0),
-            )
-        } else {
-            None
-        };
-
-    // Flag instructions that write rax as an implicit side effect (not
-    // reflected in the operand list). Consumers use this to avoid treating
-    // DIV/MUL results as intentional return values.
-    let writes_implicit_gpr0 = match insn.mnemonic() {
-        Mnemonic::Div | Mnemonic::Idiv | Mnemonic::Mul => true,
-        Mnemonic::Imul => insn.op_count() == 1, // single-operand form only
-        Mnemonic::Cwd
-        | Mnemonic::Cdq
-        | Mnemonic::Cqo
-        | Mnemonic::Cdqe
-        | Mnemonic::Cbw
-        | Mnemonic::Cwde => true,
-        _ => false,
-    };
-
-    // writes_op0_reg: true iff op0 is a register and iced reports its
-    // access as Write or ReadWrite. iced's InstructionInfoFactory walks
-    // the operand-info tables that back the decoder, so this is the ground
-    // truth for whether an instruction like `ADD rdi, rax` actually
-    // modifies `rdi` rather than just reading both operands.
-    let writes_op0_reg = if insn.op0_kind() == OpKind::Register {
-        matches!(
-            op0_access,
-            Some(OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite)
-        )
-    } else {
-        false
-    };
-    let value_effect = if !writes_op0_reg {
-        ValueEffect::None
-    } else {
-        match insn.mnemonic() {
-            Mnemonic::Mov => {
-                if insn.op_count() > 1 && insn.op1_kind() == OpKind::Memory {
-                    ValueEffect::Load
-                } else {
-                    ValueEffect::Set
-                }
-            }
-            Mnemonic::Movzx => zero_extension_effect(insn).unwrap_or(ValueEffect::UnknownWrite),
-            Mnemonic::Movsx | Mnemonic::Movsxd => {
-                sign_extension_effect(insn).unwrap_or(ValueEffect::UnknownWrite)
-            }
-            Mnemonic::Lea => ValueEffect::Address,
-            Mnemonic::Add if insn.op_count() > 1 && insn.op1_kind() == OpKind::Register => {
-                ValueEffect::AddRegister
-            }
-            Mnemonic::Sub if insn.op_count() > 1 && insn.op1_kind() == OpKind::Register => {
-                ValueEffect::SubtractRegister
-            }
-            Mnemonic::Add | Mnemonic::Sub => ValueEffect::AddImmediate,
-            Mnemonic::And if insn.op_count() > 1 && is_immediate(insn.op1_kind()) => {
-                ValueEffect::BitwiseAndImmediate
-            }
-            Mnemonic::Shl | Mnemonic::Sal | Mnemonic::Shr | Mnemonic::Sar
-                if insn.op_count() > 1 && is_immediate(insn.op1_kind()) =>
-            {
-                ValueEffect::ShiftImmediate
-            }
-            Mnemonic::Cmova
-            | Mnemonic::Cmovae
-            | Mnemonic::Cmovb
-            | Mnemonic::Cmovbe
-            | Mnemonic::Cmove
-            | Mnemonic::Cmovg
-            | Mnemonic::Cmovge
-            | Mnemonic::Cmovl
-            | Mnemonic::Cmovle
-            | Mnemonic::Cmovne
-            | Mnemonic::Cmovno
-            | Mnemonic::Cmovnp
-            | Mnemonic::Cmovns
-            | Mnemonic::Cmovo
-            | Mnemonic::Cmovp
-            | Mnemonic::Cmovs => ValueEffect::ConditionalSelect,
-            _ => ValueEffect::UnknownWrite,
+    mkasm_x86_64::decode(bytes, mkasm_x86_64::Mode::Mode64).map_err(|error| DecodeError {
+        kind: match error {
+            mkasm_x86_64::DecodeError::Truncated => DecodeErrorKind::Truncated,
+            mkasm_x86_64::DecodeError::TooLong => DecodeErrorKind::TooLong,
+            mkasm_x86_64::DecodeError::Unknown => DecodeErrorKind::UnknownEncoding,
+        },
+        message: match error {
+            mkasm_x86_64::DecodeError::Truncated => "truncated instruction",
+            mkasm_x86_64::DecodeError::TooLong => "instruction exceeds 15 bytes",
+            mkasm_x86_64::DecodeError::Unknown => "unknown instruction encoding",
         }
-    };
+        .into(),
+    })
+}
+
+fn empty_input() -> DecodeError {
+    DecodeError {
+        kind: DecodeErrorKind::Truncated,
+        message: "empty input".into(),
+    }
+}
+
+fn explicit_operands(decoded: &Decoded) -> impl Iterator<Item = &DecodedOperand> {
+    decoded
+        .operands()
+        .iter()
+        .filter(|operand| !operand.implicit)
+}
+
+fn lower(decoded: &Decoded, va: u64) -> Insn {
+    let explicit: Vec<_> = explicit_operands(decoded).collect();
+    let kind = classify(decoded, va);
+    let (mut ops, op_count) = extract_operands(decoded, va);
+    let mnemonic = decoded.encoding().mnemonic;
+    let op0 = explicit.first().copied();
+    let writes_op0_reg = op0.is_some_and(|operand| {
+        operand.kind == OperandKind::Register
+            && (operand.access.write || operand.access.conditional_write)
+    });
+    let writes_implicit_gpr0 = matches!(
+        mnemonic,
+        "DIV" | "IDIV" | "MUL" | "IMUL" | "CWD" | "CDQ" | "CQO" | "CDQE" | "CBW" | "CWDE"
+    ) && decoded.operands().iter().any(|operand| {
+        operand.implicit
+            && (operand.access.write || operand.access.conditional_write)
+            && operand.register.is_some_and(|register| {
+                register.class == RegisterClass::Gpr && matches!(register.number, 0 | 2)
+            })
+    });
+
+    let value_effect = value_effect(mnemonic, &explicit, writes_op0_reg);
     if value_effect == ValueEffect::ShiftImmediate
         && let (Some(Operand::Reg(destination)), Some(Operand::Imm(amount))) =
             (ops.first().copied(), ops.get(1).copied())
     {
-        let shift = match insn.mnemonic() {
-            Mnemonic::Shl | Mnemonic::Sal => crate::insn::RegisterShift::LogicalLeft,
-            Mnemonic::Shr => crate::insn::RegisterShift::LogicalRight,
-            Mnemonic::Sar => crate::insn::RegisterShift::ArithmeticRight,
-            _ => crate::insn::RegisterShift::LogicalLeft,
+        let shift = match mnemonic {
+            "SHL" | "SAL" => crate::insn::RegisterShift::LogicalLeft,
+            "SHR" => crate::insn::RegisterShift::LogicalRight,
+            "SAR" => crate::insn::RegisterShift::ArithmeticRight,
+            _ => unreachable!(),
         };
         ops[1] = Operand::ShiftedReg {
             register: destination,
@@ -239,24 +140,27 @@ fn lower_with_factory(insn: &Instruction, factory: &mut InstructionInfoFactory) 
             amount: amount as u8,
         };
     }
-    let memory_effect = if insn.op0_kind() == OpKind::Memory {
-        match op0_access {
-            Some(OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite)
-                if insn.op_count() > 1 && insn.op1_kind() == OpKind::Register =>
+
+    let memory_effect = if op0.is_some_and(|operand| operand.kind == OperandKind::Memory) {
+        let access = op0.expect("memory operand exists").access;
+        if access.write || access.conditional_write {
+            if explicit
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Register)
             {
                 MemoryEffect::Store
-            }
-            Some(OpAccess::Write | OpAccess::ReadWrite | OpAccess::CondWrite) => {
+            } else {
                 MemoryEffect::UnknownWrite
             }
-            _ => MemoryEffect::None,
+        } else {
+            MemoryEffect::None
         }
     } else {
         MemoryEffect::None
     };
 
     Insn::with_ops(
-        insn.len(),
+        decoded.length as usize,
         kind,
         ops,
         op_count,
@@ -267,80 +171,100 @@ fn lower_with_factory(insn: &Instruction, factory: &mut InstructionInfoFactory) 
     )
 }
 
-fn source_width(insn: &Instruction) -> usize {
-    if insn.op_count() < 2 {
-        return 0;
+fn value_effect(mnemonic: &str, operands: &[&DecodedOperand], writes_op0_reg: bool) -> ValueEffect {
+    if !writes_op0_reg {
+        return ValueEffect::None;
     }
-    match insn.op1_kind() {
-        OpKind::Register => insn.op1_register().size(),
-        OpKind::Memory => insn.memory_size().size(),
-        _ => 0,
+    match mnemonic {
+        "MOV" => {
+            if operands
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Memory)
+            {
+                ValueEffect::Load
+            } else {
+                ValueEffect::Set
+            }
+        }
+        "MOVZX" => extension_effect(operands, false).unwrap_or(ValueEffect::UnknownWrite),
+        "MOVSX" | "MOVSXD" => extension_effect(operands, true).unwrap_or(ValueEffect::UnknownWrite),
+        "LEA" => ValueEffect::Address,
+        "ADD"
+            if operands
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Register) =>
+        {
+            ValueEffect::AddRegister
+        }
+        "SUB"
+            if operands
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Register) =>
+        {
+            ValueEffect::SubtractRegister
+        }
+        "ADD" | "SUB" => ValueEffect::AddImmediate,
+        "AND"
+            if operands
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Immediate) =>
+        {
+            ValueEffect::BitwiseAndImmediate
+        }
+        "SHL" | "SAL" | "SHR" | "SAR"
+            if operands
+                .get(1)
+                .is_some_and(|operand| operand.kind == OperandKind::Immediate) =>
+        {
+            ValueEffect::ShiftImmediate
+        }
+        mnemonic if mnemonic.starts_with("CMOV") => ValueEffect::ConditionalSelect,
+        _ => ValueEffect::UnknownWrite,
     }
 }
 
-fn zero_extension_effect(insn: &Instruction) -> Option<ValueEffect> {
-    match source_width(insn) {
-        1 => Some(ValueEffect::ZeroExtend8),
-        2 => Some(ValueEffect::ZeroExtend16),
-        4 => Some(ValueEffect::ZeroExtend32),
+fn extension_effect(operands: &[&DecodedOperand], signed: bool) -> Option<ValueEffect> {
+    let width = match operands.get(1)?.kind {
+        OperandKind::Register => operands[1].register?.width,
+        OperandKind::Memory => operands[1].memory.size,
+        _ => return None,
+    };
+    match (signed, width) {
+        (false, 8) => Some(ValueEffect::ZeroExtend8),
+        (false, 16) => Some(ValueEffect::ZeroExtend16),
+        (false, 32) => Some(ValueEffect::ZeroExtend32),
+        (true, 8) => Some(ValueEffect::SignExtend8),
+        (true, 16) => Some(ValueEffect::SignExtend16),
+        (true, 32) => Some(ValueEffect::SignExtend32),
         _ => None,
     }
 }
 
-fn sign_extension_effect(insn: &Instruction) -> Option<ValueEffect> {
-    match source_width(insn) {
-        1 => Some(ValueEffect::SignExtend8),
-        2 => Some(ValueEffect::SignExtend16),
-        4 => Some(ValueEffect::SignExtend32),
-        _ => None,
-    }
-}
-
-fn is_immediate(kind: OpKind) -> bool {
-    matches!(
-        kind,
-        OpKind::Immediate8
-            | OpKind::Immediate8_2nd
-            | OpKind::Immediate16
-            | OpKind::Immediate32
-            | OpKind::Immediate64
-            | OpKind::Immediate8to16
-            | OpKind::Immediate8to32
-            | OpKind::Immediate8to64
-            | OpKind::Immediate32to64
-    )
-}
-
-fn classify(insn: &Instruction) -> InsnKind {
-    // NOP detection (single-byte 0x90 and multi-byte 0F 1F family).
-    if insn.mnemonic() == Mnemonic::Nop || insn.code() == Code::Nopd {
+fn classify(decoded: &Decoded, va: u64) -> InsnKind {
+    if decoded.encoding().mnemonic == "NOP" {
         return InsnKind::Nop;
     }
-
-    match insn.flow_control() {
-        FlowControl::UnconditionalBranch => InsnKind::Branch(BranchInfo {
-            target: extract_branch_target(insn),
-        }),
-        FlowControl::Call => InsnKind::Call(BranchInfo {
-            target: extract_branch_target(insn),
-        }),
-        FlowControl::ConditionalBranch | FlowControl::XbeginXabortXend => {
-            InsnKind::CondBranch(BranchInfo {
-                target: extract_branch_target(insn),
-            })
+    let branch = || BranchInfo {
+        target: extract_branch_target(decoded, va),
+    };
+    match decoded.flow_control() {
+        FlowControl::UnconditionalBranch | FlowControl::IndirectBranch => {
+            InsnKind::Branch(branch())
+        }
+        FlowControl::Call | FlowControl::IndirectCall => InsnKind::Call(branch()),
+        FlowControl::ConditionalBranch | FlowControl::Transactional => {
+            InsnKind::CondBranch(branch())
         }
         FlowControl::Return => InsnKind::Return,
-        FlowControl::IndirectBranch => InsnKind::Branch(BranchInfo {
-            target: extract_branch_target(insn),
-        }),
-        FlowControl::IndirectCall => InsnKind::Call(BranchInfo {
-            target: extract_branch_target(insn),
-        }),
         FlowControl::Next | FlowControl::Interrupt | FlowControl::Exception => {
-            if let Some(disp) = rip_relative_displacement(insn) {
+            if let Some(memory) = decoded
+                .operands()
+                .iter()
+                .find(|operand| operand.kind == OperandKind::Memory && operand.memory.rip_relative)
+            {
                 return InsnKind::PcRelative(PcRelInfo {
-                    displacement: disp,
-                    kind: if insn.mnemonic() == Mnemonic::Lea {
+                    displacement: (decoded.length as i64).wrapping_add(memory.memory.displacement),
+                    kind: if decoded.encoding().mnemonic == "LEA" {
                         PcRelKind::Address
                     } else {
                         PcRelKind::Memory
@@ -352,257 +276,173 @@ fn classify(insn: &Instruction) -> InsnKind {
     }
 }
 
-fn extract_branch_target(insn: &Instruction) -> BranchTarget {
-    if insn.op0_kind() == OpKind::NearBranch16
-        || insn.op0_kind() == OpKind::NearBranch32
-        || insn.op0_kind() == OpKind::NearBranch64
-    {
-        let target_va = insn.near_branch_target();
-        let insn_va = insn.ip();
-        // Wrapping two's-complement displacement: a plain `as i64 - as i64`
-        // overflows when target and instruction straddle the i64 sign boundary.
-        let offset = target_va.wrapping_sub(insn_va) as i64;
-        return BranchTarget::Direct(offset);
-    }
-
-    if insn.op0_kind() == OpKind::FarBranch16 || insn.op0_kind() == OpKind::FarBranch32 {
-        let target_va = insn.far_branch32() as u64;
-        let insn_va = insn.ip();
-        let offset = target_va.wrapping_sub(insn_va) as i64;
-        return BranchTarget::Direct(offset);
-    }
-
-    if insn.op0_kind() == OpKind::Register {
-        return BranchTarget::Register;
-    }
-
-    if insn.op0_kind() == OpKind::Memory
-        && let Some(index) = map_register(insn.memory_index())
-    {
-        let base = map_register(insn.memory_base());
-        let displacement = if base.is_none() {
-            insn.memory_displacement64() as i64
-        } else {
-            insn.memory_displacement32() as i32 as i64
-        };
-        return BranchTarget::IndexedMemory {
-            base,
-            index,
-            scale: insn.memory_index_scale() as u8,
-            displacement,
-        };
-    }
-
-    BranchTarget::Indirect
+fn direct_target(decoded: &Decoded, va: u64) -> Option<u64> {
+    let relative =
+        explicit_operands(decoded).find(|operand| operand.kind == OperandKind::Relative)?;
+    Some(
+        va.wrapping_add(decoded.length as u64)
+            .wrapping_add_signed(relative.immediate.signed),
+    )
 }
 
-fn rip_relative_displacement(insn: &Instruction) -> Option<i64> {
-    if insn.is_ip_rel_memory_operand() {
-        let target = insn.ip_rel_memory_address();
-        let disp = target.wrapping_sub(insn.ip()) as i64;
-        return Some(disp);
+fn extract_branch_target(decoded: &Decoded, va: u64) -> BranchTarget {
+    let Some(operand) = explicit_operands(decoded).next() else {
+        return BranchTarget::Indirect;
+    };
+    match operand.kind {
+        OperandKind::Relative => {
+            let target = va
+                .wrapping_add(decoded.length as u64)
+                .wrapping_add_signed(operand.immediate.signed);
+            BranchTarget::Direct(target.wrapping_sub(va) as i64)
+        }
+        OperandKind::Register => BranchTarget::Register,
+        OperandKind::Memory => {
+            if let Some(index) = operand.memory.index.and_then(map_register) {
+                BranchTarget::IndexedMemory {
+                    base: operand.memory.base.and_then(map_register),
+                    index,
+                    scale: operand.memory.scale,
+                    displacement: operand.memory.displacement,
+                }
+            } else {
+                BranchTarget::Indirect
+            }
+        }
+        _ => BranchTarget::Indirect,
     }
-    None
 }
 
-// ───────────────── operand extraction ─────────────────
-
-fn extract_operands(insn: &Instruction) -> ([Operand; MAX_OPERANDS], u8) {
-    let mut ops = [Operand::Imm(0); MAX_OPERANDS];
-    let mut count = 0u8;
-
-    for i in 0..insn.op_count().min(MAX_OPERANDS as u32) {
-        if let Some(op) = map_operand(insn, i) {
-            ops[count as usize] = op;
+fn extract_operands(decoded: &Decoded, va: u64) -> ([Operand; MAX_OPERANDS], u8) {
+    let mut operands = [Operand::Imm(0); MAX_OPERANDS];
+    let mut count = 0usize;
+    for operand in explicit_operands(decoded) {
+        if count == MAX_OPERANDS {
+            break;
+        }
+        if let Some(mapped) = map_operand(operand, decoded.length, va) {
+            operands[count] = mapped;
             count += 1;
         }
     }
-
-    (ops, count)
+    (operands, count as u8)
 }
 
-fn map_operand(insn: &Instruction, idx: u32) -> Option<Operand> {
-    match insn.op_kind(idx) {
-        OpKind::Register => {
-            let reg = insn.op_register(idx);
-            map_register(reg).map(Operand::Reg)
-        }
-        OpKind::Memory => {
-            // Use a sentinel (Gpr(255)) when the base register isn't mappable
-            // (e.g., absolute addresses with Register::None). This preserves
-            // operand positions — consumers checking for specific bases like
-            // Gpr(4)/RSP naturally skip the sentinel.
-            let base = map_register(insn.memory_base()).unwrap_or(Reg::gpr(255));
-            let disp = if insn.is_ip_rel_memory_operand() {
-                insn.ip_rel_memory_address().wrapping_sub(insn.next_ip()) as i64
+fn map_operand(operand: &DecodedOperand, length: u8, va: u64) -> Option<Operand> {
+    match operand.kind {
+        OperandKind::Register => operand.register.and_then(map_register).map(Operand::Reg),
+        OperandKind::Memory => {
+            let base = if operand.memory.rip_relative {
+                Reg::gpr(16)
             } else {
-                // Sign-extend the displacement correctly based on its encoded width.
-                // memory_displacement64() returns the raw value without sign extension,
-                // so [rbp-8] encoded as disp8=0xF8 would yield 248 instead of -8.
-                insn.memory_displacement32() as i32 as i64
+                operand
+                    .memory
+                    .base
+                    .and_then(map_register)
+                    .unwrap_or_else(|| Reg::gpr(255))
             };
-            if let Some(index) = map_register(insn.memory_index()) {
+            if let Some(index) = operand.memory.index.and_then(map_register) {
                 Some(Operand::IndexedMem {
                     base,
                     index,
-                    scale: insn.memory_index_scale() as u8,
-                    disp,
+                    scale: operand.memory.scale,
+                    disp: operand.memory.displacement,
                 })
             } else {
-                Some(Operand::Mem { base, disp })
+                Some(Operand::Mem {
+                    base,
+                    disp: operand.memory.displacement,
+                })
             }
         }
-        OpKind::Immediate8
-        | OpKind::Immediate8_2nd
-        | OpKind::Immediate16
-        | OpKind::Immediate32
-        | OpKind::Immediate64
-        | OpKind::Immediate8to16
-        | OpKind::Immediate8to32
-        | OpKind::Immediate8to64
-        | OpKind::Immediate32to64 => Some(Operand::Imm(insn.immediate(idx) as i64)),
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
-            Some(Operand::Imm(insn.near_branch_target() as i64))
+        OperandKind::Immediate => Some(Operand::Imm(operand.immediate.value as i64)),
+        OperandKind::Relative => Some(Operand::Imm(
+            va.wrapping_add(length as u64)
+                .wrapping_add_signed(operand.immediate.signed) as i64,
+        )),
+        OperandKind::None | OperandKind::FarPointer | OperandKind::Mask | OperandKind::Other => {
+            None
         }
-        OpKind::FarBranch16 | OpKind::FarBranch32 => Some(Operand::Imm(insn.far_branch32() as i64)),
-        _ => None,
     }
 }
 
-/// Map an iced-x86 register to our architecture-neutral Reg.
-///
-/// x86_64 GPR numbering: rax=0, rcx=1, rdx=2, rbx=3, rsp=4, rbp=5, rsi=6, rdi=7, r8-r15=8-15.
-/// All register sizes (AL/AX/EAX/RAX) map to the same GPR number.
-fn map_register(reg: Register) -> Option<Reg> {
-    // 64-bit GPRs
-    let gpr = match reg {
-        Register::RAX | Register::EAX | Register::AX | Register::AL | Register::AH => Some(0),
-        Register::RCX | Register::ECX | Register::CX | Register::CL | Register::CH => Some(1),
-        Register::RDX | Register::EDX | Register::DX | Register::DL | Register::DH => Some(2),
-        Register::RBX | Register::EBX | Register::BX | Register::BL | Register::BH => Some(3),
-        Register::RSP | Register::ESP | Register::SP | Register::SPL => Some(4),
-        Register::RBP | Register::EBP | Register::BP | Register::BPL => Some(5),
-        Register::RSI | Register::ESI | Register::SI | Register::SIL => Some(6),
-        Register::RDI | Register::EDI | Register::DI | Register::DIL => Some(7),
-        Register::R8 | Register::R8D | Register::R8W | Register::R8L => Some(8),
-        Register::R9 | Register::R9D | Register::R9W | Register::R9L => Some(9),
-        Register::R10 | Register::R10D | Register::R10W | Register::R10L => Some(10),
-        Register::R11 | Register::R11D | Register::R11W | Register::R11L => Some(11),
-        Register::R12 | Register::R12D | Register::R12W | Register::R12L => Some(12),
-        Register::R13 | Register::R13D | Register::R13W | Register::R13L => Some(13),
-        Register::R14 | Register::R14D | Register::R14W | Register::R14L => Some(14),
-        Register::R15 | Register::R15D | Register::R15W | Register::R15L => Some(15),
+fn map_register(register: mkasm_x86_64::Register) -> Option<Reg> {
+    match register.class {
+        RegisterClass::Gpr => Some(Reg::gpr(register.number)),
+        RegisterClass::Vector => Some(Reg::fp(register.number)),
         _ => None,
-    };
-    if let Some(num) = gpr {
-        return Some(Reg::gpr(num));
     }
-
-    // XMM/YMM/ZMM → Fp with same number
-    let fp = match reg {
-        Register::XMM0 | Register::YMM0 | Register::ZMM0 => Some(0),
-        Register::XMM1 | Register::YMM1 | Register::ZMM1 => Some(1),
-        Register::XMM2 | Register::YMM2 | Register::ZMM2 => Some(2),
-        Register::XMM3 | Register::YMM3 | Register::ZMM3 => Some(3),
-        Register::XMM4 | Register::YMM4 | Register::ZMM4 => Some(4),
-        Register::XMM5 | Register::YMM5 | Register::ZMM5 => Some(5),
-        Register::XMM6 | Register::YMM6 | Register::ZMM6 => Some(6),
-        Register::XMM7 | Register::YMM7 | Register::ZMM7 => Some(7),
-        Register::XMM8 | Register::YMM8 | Register::ZMM8 => Some(8),
-        Register::XMM9 | Register::YMM9 | Register::ZMM9 => Some(9),
-        Register::XMM10 | Register::YMM10 | Register::ZMM10 => Some(10),
-        Register::XMM11 | Register::YMM11 | Register::ZMM11 => Some(11),
-        Register::XMM12 | Register::YMM12 | Register::ZMM12 => Some(12),
-        Register::XMM13 | Register::YMM13 | Register::ZMM13 => Some(13),
-        Register::XMM14 | Register::YMM14 | Register::ZMM14 => Some(14),
-        Register::XMM15 | Register::YMM15 | Register::ZMM15 => Some(15),
-        _ => None,
-    };
-    if let Some(num) = fp {
-        return Some(Reg::fp(num));
-    }
-
-    // RIP → Gpr(16) as a sentinel, or skip. We use it as a memory base.
-    if reg == Register::RIP || reg == Register::EIP {
-        return Some(Reg::gpr(16));
-    }
-
-    None
 }
-
-// ───────────────── disassembly ─────────────────
 
 pub(crate) fn disassemble_one(bytes: &[u8], va: u64) -> Result<String, DecodeError> {
-    let insn = decode_iced(bytes, va)?;
-    format_mkasm(&bytes[..insn.len()], va)
+    Ok(decode_mkasm(bytes)?.format_intel(va))
 }
 
 pub(crate) fn disassemble(bytes: &[u8], base_va: u64) -> Result<Vec<(u64, String)>, DecodeError> {
     let mut result = Vec::new();
-    let mut decoder = Decoder::with_ip(64, bytes, base_va, DecoderOptions::NONE);
-
-    while decoder.can_decode() {
-        let start = decoder.position();
-        let insn = decoder.decode();
-        if insn.is_invalid() {
-            return Err(DecodeError {
-                message: "invalid instruction".into(),
-            });
-        }
-        let output = format_mkasm(&bytes[start..decoder.position()], insn.ip())?;
-        result.push((insn.ip(), output));
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let decoded = decode_mkasm(&bytes[offset..])?;
+        let va = base_va.saturating_add(offset as u64);
+        result.push((va, decoded.format_intel(va)));
+        offset += decoded.length as usize;
     }
-
     Ok(result)
 }
 
-/// Encode a direct branch or call from `from_va` to `to_va`.
 pub(crate) fn encode_branch_insn(
     from_va: u64,
     to_va: u64,
     link: bool,
 ) -> Result<Vec<u8>, crate::insn::EncodeError> {
-    let code = if link {
-        Code::Call_rel32_64
+    let kind = if link {
+        RelativeBranchKind::Call
     } else {
-        Code::Jmp_rel32_64
+        RelativeBranchKind::Jump
     };
-    let mut insn = Instruction::with_branch(code, to_va).map_err(|e| crate::insn::EncodeError {
-        message: e.to_string(),
-    })?;
-    insn.set_ip(from_va);
-
-    let mut encoder = Encoder::new(64);
-    encoder
-        .encode(&insn, from_va)
-        .map_err(|e| crate::insn::EncodeError {
-            message: e.to_string(),
-        })?;
-
-    Ok(encoder.take_buffer())
+    let mut output = [0u8; 15];
+    let length = mkasm_x86_64::encode_relative_branch(kind, from_va, to_va, &mut output).map_err(
+        |error| crate::insn::EncodeError {
+            message: format!("x86 relative branch encoding failed: {error:?}"),
+        },
+    )?;
+    Ok(output[..length].to_vec())
 }
 
-/// Relocate an x86_64 instruction from `old_va` to `new_va`.
 pub(crate) fn relocate(
     bytes: &[u8],
     old_va: u64,
     new_va: u64,
 ) -> Result<Vec<u8>, crate::insn::EncodeError> {
-    let mut decoder = Decoder::with_ip(64, bytes, old_va, DecoderOptions::NONE);
-    let insn = decoder.decode();
-
-    if insn.is_invalid() {
+    let decoded = decode_mkasm(bytes).map_err(|_| crate::insn::EncodeError {
+        message: "cannot relocate invalid instruction".into(),
+    })?;
+    if decoded.length as usize != bytes.len() {
         return Err(crate::insn::EncodeError {
-            message: "cannot relocate invalid instruction".into(),
+            message: "cannot relocate multiple or mismatched instructions".into(),
         });
     }
-
-    let mut encoder = Encoder::new(64);
-    encoder
-        .encode(&insn, new_va)
-        .map_err(|e| crate::insn::EncodeError {
-            message: format!("relocation failed: {e}"),
+    let mut output = [0u8; 15];
+    let length =
+        mkasm_x86_64::relocate(&decoded, bytes, old_va, new_va, &mut output).map_err(|error| {
+            crate::insn::EncodeError {
+                message: format!("relocation failed: {error:?}"),
+            }
         })?;
+    Ok(output[..length].to_vec())
+}
 
-    Ok(encoder.take_buffer())
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn padlock_reserved_bits_are_not_promoted_to_instructions() {
+        let decoded = decode_mkasm(&[0x0f, 0xa7, 0xc0]).unwrap();
+        assert_eq!(decoded.encoding().mnemonic, "XSTORE");
+        assert_eq!(decoded.length, 3);
+
+        let error = decode_mkasm(&[0x0f, 0xa7, 0xc1]).unwrap_err();
+        assert_eq!(error.kind, DecodeErrorKind::UnknownEncoding);
+    }
 }

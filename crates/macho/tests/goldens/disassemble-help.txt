@@ -79,7 +79,7 @@ Options:
   -h, --help
           Print help (see a summary with '-h')
 
-Output streams one line per record with constant memory: pretty text by default, or one JSON object per line with --format json (newline-delimited JSON, not a single document). SARIF output is supported only by the audit command.
+Output streams with constant memory: pretty text by default, or exactly one self-contained instruction object per line with --format json (NDJSON). JSON instruction metadata includes its section, labels, and resolved direct target when available; headers, trailers, gaps, and issues are never written to stdout. SARIF output is supported only by the audit command.
 
 Examples:
   macho disassemble app

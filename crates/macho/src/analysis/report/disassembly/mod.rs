@@ -208,6 +208,8 @@ pub enum DisassemblyRecord {
         text: String,
         kind: InstructionKind,
         direct_target: Option<DirectTarget>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<InstructionEncoding>,
     },
     Gap {
         va: u64,
@@ -217,6 +219,33 @@ pub enum DisassemblyRecord {
         code: String,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionEncoding {
+    pub status: InstructionEncodingStatus,
+    pub boundary_confidence: InstructionBoundaryConfidence,
+    pub semantics: InstructionSemanticsStatus,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionEncodingStatus {
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionBoundaryConfidence {
+    Exact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionSemanticsStatus {
+    Unavailable,
 }
 
 impl DisassemblyRecord {

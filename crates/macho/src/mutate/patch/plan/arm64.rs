@@ -33,6 +33,28 @@ fn encode_arm64_hook_jump(
         }
     }
 
+    if arch == PatchArch::Arm64e {
+        let mut bytes = Vec::with_capacity(ARM64E_MATERIALIZED_JUMP_LEN);
+        for halfword in 0..4_u32 {
+            let immediate = ((destination_va >> (halfword * 16)) & 0xffff) as u32;
+            let base = if halfword == 0 {
+                0xD280_0000_u32 // MOVZ Xd, #imm16
+            } else {
+                0xF280_0000_u32 // MOVK Xd, #imm16, LSL #shift
+            };
+            let instruction = base | (halfword << 21) | (immediate << 5) | 16;
+            bytes.extend_from_slice(&instruction.to_le_bytes());
+        }
+        bytes.extend_from_slice(&ARM64_BR_X16);
+        return Ok(HookJump {
+            arch,
+            source_va,
+            destination_va,
+            encoding: HookJumpEncoding::Arm64eMaterializedAddress,
+            bytes,
+        });
+    }
+
     let mut bytes = Vec::with_capacity(ARM64_ABSOLUTE_JUMP_LEN);
     bytes.extend_from_slice(&ARM64_LDR_X16_LITERAL_8);
     bytes.extend_from_slice(&ARM64_BR_X16);
@@ -45,4 +67,15 @@ fn encode_arm64_hook_jump(
         encoding: HookJumpEncoding::Arm64AbsoluteLiteral,
         bytes,
     })
+}
+
+fn is_arm64_bti_landing_pad(bytes: &[u8]) -> bool {
+    let Some(word) = bytes
+        .get(..4)
+        .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+        .map(u32::from_le_bytes)
+    else {
+        return false;
+    };
+    matches!(word, 0xD503_241F | 0xD503_245F | 0xD503_249F | 0xD503_24DF)
 }

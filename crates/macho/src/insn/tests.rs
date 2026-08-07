@@ -27,6 +27,40 @@ fn x86_64_call_rel32() {
     assert_eq!(resolve_branch_target(&insn, 0x1000), Some(0x1105));
 }
 
+#[test]
+fn x86_direct_call_prefilter_has_no_false_negatives_for_prefix_families() {
+    let prefixes = [
+        0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0xf0, 0xf2, 0xf3, 0x40, 0x48, 0x4f,
+    ];
+    let mut probes = vec![vec![0xe8, 0, 0, 0, 0]];
+    for prefix in prefixes {
+        for count in 1..=10 {
+            let mut bytes = vec![prefix; count];
+            bytes.extend([0xe8, 0, 0, 0, 0]);
+            probes.push(bytes);
+        }
+        for second in prefixes {
+            probes.push(vec![prefix, second, 0xe8, 0, 0, 0, 0]);
+        }
+    }
+    for leading in 0_u8..=u8::MAX {
+        probes.push(vec![leading, 0xe8, 0, 0, 0, 0]);
+    }
+    for bytes in probes {
+        let Ok(instruction) = decode_one(&bytes, 0x1000, Arch::X86_64) else {
+            continue;
+        };
+        if matches!(instruction.kind, InsnKind::Call(_))
+            && resolve_branch_target(&instruction, 0x1000).is_some()
+        {
+            assert!(
+                could_start_direct_call(&bytes, Arch::X86_64),
+                "missed direct call encoding {bytes:02x?}"
+            );
+        }
+    }
+}
+
 // x86_64: JMP rel32 (E9 xx xx xx xx)
 #[test]
 fn x86_64_jmp_rel32() {
@@ -519,6 +553,7 @@ fn resolve_branch_target_none_for_nop() {
 #[test]
 fn error_display() {
     let de = DecodeError {
+        kind: DecodeErrorKind::InvalidEncoding,
         message: "test".into(),
     };
     assert_eq!(format!("{de}"), "decode: test");
@@ -668,6 +703,18 @@ fn x86_64_mul_sets_implicit_gpr0() {
 fn x86_64_cdq_sets_implicit_gpr0() {
     // CDQ = 99
     let insn = decode_one(&[0x99], 0x1000, Arch::X86_64).unwrap();
+    assert!(insn.writes_implicit_gpr0);
+}
+
+#[test]
+fn x86_64_cqo_sets_implicit_gpr0() {
+    let insn = decode_one(&[0x48, 0x99], 0x1000, Arch::X86_64).unwrap();
+    assert!(insn.writes_implicit_gpr0);
+}
+
+#[test]
+fn x86_64_single_operand_imul_sets_implicit_gpr0() {
+    let insn = decode_one(&[0x48, 0xF7, 0xE9], 0x1000, Arch::X86_64).unwrap();
     assert!(insn.writes_implicit_gpr0);
 }
 
@@ -1001,6 +1048,48 @@ fn arm64_decode_3_bytes_fails() {
 fn x86_64_decode_single_invalid_byte() {
     // 0x06 = PUSH ES, invalid in 64-bit mode
     assert!(decode_one(&[0x06], 0x1000, Arch::X86_64).is_err());
+}
+
+#[test]
+fn decode_errors_preserve_primary_failure_categories() {
+    assert_eq!(
+        decode_one(&[0x0f], 0x1000, Arch::X86_64).unwrap_err().kind,
+        DecodeErrorKind::Truncated
+    );
+    assert_eq!(
+        decode_one(&[0x66; 15], 0x1000, Arch::X86_64)
+            .unwrap_err()
+            .kind,
+        DecodeErrorKind::TooLong
+    );
+    assert_eq!(
+        decode_one(&[0x0f, 0xa7, 0xc1], 0x1000, Arch::X86_64)
+            .unwrap_err()
+            .kind,
+        DecodeErrorKind::UnknownEncoding
+    );
+    assert_eq!(
+        decode_one(&[0; 3], 0x1000, Arch::Arm64).unwrap_err().kind,
+        DecodeErrorKind::Truncated
+    );
+}
+
+#[test]
+fn arm64_unknown_formatter_result_has_exact_boundary_provenance() {
+    let mut disassembler = Disassembler::new(Arch::Arm64);
+    let decoded = disassembler
+        .decode_one(&0x0001_0000u32.to_le_bytes(), 0x1000)
+        .unwrap();
+    assert!(decoded.text.starts_with(".inst"));
+    assert_eq!(decoded.instruction.kind, InsnKind::Other);
+    assert!(decoded.instruction.operands().is_empty());
+    assert_eq!(
+        decoded.recovery,
+        Some(InstructionRecovery {
+            boundary_confidence: BoundaryConfidence::Exact,
+            source: "architecture",
+        })
+    );
 }
 
 #[test]

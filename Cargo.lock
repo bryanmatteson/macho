@@ -3,10 +3,6 @@
 version = 4
 
 [[package]]
-name = "aarch64"
-version = "0.1.0"
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1669,15 +1665,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "iced-x86"
-version = "1.21.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c447cff8c7f384a7d4f741cfcff32f75f3ad02b406432e8d6c878d56b1edf6b"
-dependencies = [
- "lazy_static",
-]
-
-[[package]]
 name = "icu_collections"
 version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1988,7 +1975,6 @@ dependencies = [
 name = "macho"
 version = "1.0.0"
 dependencies = [
- "aarch64",
  "anyhow",
  "apple-codesign",
  "bitflags 2.13.1",
@@ -1997,7 +1983,6 @@ dependencies = [
  "cpp_demangle",
  "criterion",
  "gimli",
- "iced-x86",
  "laidout",
  "macho-test-support",
  "memmap2",
@@ -2017,7 +2002,6 @@ dependencies = [
  "trybuild",
  "trycmd",
  "x509-certificate",
- "x86_64",
  "zerocopy",
  "zeroize",
 ]
@@ -4411,10 +4395,6 @@ dependencies = [
  "thiserror 1.0.69",
  "zeroize",
 ]
-
-[[package]]
-name = "x86_64"
-version = "0.1.0"
 
 [[package]]
 name = "xml-rs"

@@ -269,7 +269,6 @@ struct FactStore {
     values: BTreeMap<AnalysisDomain, Value>,
     issues: BTreeMap<AnalysisDomain, Vec<AnalysisIssue>>,
     functions: Option<crate::analysis::functions::FunctionIndex>,
-    program: Option<crate::analysis::program::RecoveredProgram>,
 }
 
 #[derive(Debug, Default)]
@@ -581,45 +580,6 @@ fn recovered_functions<'facts>(
         .expect("function cache initialized"))
 }
 
-fn recovered_program<'facts>(
-    domain: AnalysisDomain,
-    macho: &MachoFile<'_>,
-    limits: &AnalysisLimits,
-    facts: &'facts mut FactStore,
-) -> Result<&'facts crate::analysis::program::RecoveredProgram> {
-    if facts.program.is_none() {
-        let recovery_limits = program_limits(limits);
-        let functions = recovered_functions(domain, macho, limits, facts)?.clone();
-        facts.program = Some(
-            crate::analysis::program::RecoveredProgram::recover_from_functions(
-                macho,
-                functions,
-                crate::analysis::program::ProgramRecoveryRequest::new(
-                    [crate::analysis::program::ProgramRecoveryStage::Xrefs],
-                    recovery_limits,
-                ),
-            )
-            .map_err(|error| {
-                let kind = match error {
-                    crate::analysis::program::ProgramRecoveryError::ControlFlow(
-                        crate::analysis::control_flow::ControlFlowRecoveryError::UnsupportedArchitecture,
-                    )
-                    | crate::analysis::program::ProgramRecoveryError::IndirectCalls(
-                        crate::analysis::indirect_calls::IndirectCallRecoveryError::UnsupportedArchitecture,
-                    ) => AnalysisErrorKind::UnsupportedCapability,
-                    _ => AnalysisErrorKind::Parse,
-                };
-                AnalysisError::new(
-                    domain,
-                    kind,
-                    format!("recover authoritative program: {error}"),
-                )
-            })?,
-        );
-    }
-    Ok(facts.program.as_ref().expect("program cache initialized"))
-}
-
 fn run_domain(
     domain: AnalysisDomain,
     macho: &MachoFile<'_>,
@@ -752,8 +712,26 @@ fn run_domain(
                     ),
                 ));
             }
-            let program = recovered_program(domain, macho, limits, facts)?;
-            let index = program.xrefs().expect("xref request executes xref stage");
+            let recovery_limits = program_limits(limits);
+            let functions = recovered_functions(domain, macho, limits, facts)?;
+            let pointers = crate::analysis::pointer_index::PointerIndex::recover(
+                macho,
+                recovery_limits.pointers,
+            )
+            .map_err(|error| {
+                AnalysisError::new(
+                    domain,
+                    AnalysisErrorKind::Parse,
+                    format!("recover pointer evidence for xrefs: {error}"),
+                )
+            })?;
+            let index = crate::analysis::xref::XrefIndex::recover_streaming_with_pointers(
+                macho,
+                functions,
+                &pointers,
+                recovery_limits.control_flow,
+                recovery_limits.xrefs,
+            )?;
             for reason in &index.completeness().reasons {
                 issues.push(AnalysisIssue {
                     code: reason.clone(),

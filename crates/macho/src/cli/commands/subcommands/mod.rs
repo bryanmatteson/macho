@@ -38,6 +38,8 @@ pub mod info;
 pub mod inspect;
 /// The objc module.
 pub mod objc;
+/// Pointer-authentication analysis command.
+pub mod pac;
 /// The patch module.
 pub mod patch;
 /// Selective whole-program recovery.
