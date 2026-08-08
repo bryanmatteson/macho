@@ -26,7 +26,7 @@ pub struct HeaderInferArgs {
 
 #[derive(clap::Subcommand)]
 enum HeaderInferAction {
-    /// Export explicit recovery gaps into one bounded offline bundle.
+    /// Export exact recovery or header-projection gaps into one bounded offline bundle.
     Export {
         /// Common JSON envelope produced by `macho c` or `macho cpp`.
         recovery_json: PathBuf,
@@ -34,8 +34,22 @@ enum HeaderInferAction {
         #[arg(long)]
         arch: String,
         /// Explicit gap ID; repeat for each requested gap.
-        #[arg(long, required = true)]
+        #[arg(
+            long,
+            required_unless_present = "all_header_gaps",
+            conflicts_with = "all_header_gaps"
+        )]
         gap: Vec<String>,
+        /// Export every exact blocker from the selected header projection.
+        #[arg(long, conflicts_with = "gap")]
+        all_header_gaps: bool,
+        /// Per-artifact byte bound embedded in the bundle (maximum 2 MiB).
+        #[arg(
+            long,
+            default_value_t = 2_097_152,
+            value_parser = clap::value_parser!(u64).range(1..=2_097_152)
+        )]
+        artifact_byte_limit: u64,
         /// Destination bundle path.
         #[arg(long)]
         output: PathBuf,
@@ -92,19 +106,47 @@ pub fn run(args: HeaderInferArgs, output: OutputOptions, out: &mut dyn Write) ->
             recovery_json,
             arch,
             gap,
+            all_header_gaps,
+            artifact_byte_limit,
             output: destination,
         } => {
             require_artifact_output(output, "export")?;
             let report = read_recovery(&recovery_json)?;
             let architecture = architecture_by_name(&report, &arch)?;
-            let gaps = gap
-                .into_iter()
-                .map(|value| {
-                    RecoveryGapId::new(value)
-                        .map_err(|error| input_message(format!("invalid --gap ID: {error}")))
-                })
-                .collect::<Result<Vec<_>>>()?;
-            let bundle = export_bundle(&report, architecture, &gaps, HypothesisLimits::default())?;
+            let gaps = if all_header_gaps {
+                let slice = report
+                    .slices
+                    .as_slice()
+                    .iter()
+                    .find(|slice| slice.architecture == architecture)
+                    .expect("architecture was resolved from this report");
+                let header = slice.header.as_ref().ok_or_else(|| {
+                    input_message(
+                        "--all-header-gaps requires recovery JSON produced with --headers",
+                    )
+                })?;
+                if header.unresolved.is_empty() {
+                    return Err(input_message(
+                        "the selected header projection has no unresolved blockers",
+                    ));
+                }
+                header.unresolved.iter().map(|gap| gap.id.clone()).collect()
+            } else {
+                gap.into_iter()
+                    .map(|value| {
+                        RecoveryGapId::new(value)
+                            .map_err(|error| input_message(format!("invalid --gap ID: {error}")))
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let limits = HypothesisLimits {
+                max_bundle_bytes: artifact_byte_limit,
+                max_prompt_bytes: artifact_byte_limit,
+                max_response_bytes: artifact_byte_limit,
+                max_rendered_header_bytes: artifact_byte_limit,
+                ..HypothesisLimits::default()
+            };
+            let bundle = export_bundle(&report, architecture, &gaps, limits)?;
             atomic_write(&destination, &bundle.canonical_bytes()?)?;
         }
         HeaderInferAction::Inspect { bundle } => {

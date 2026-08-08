@@ -22,6 +22,7 @@ use crate::analysis::control_flow::{
 use crate::analysis::functions::{
     FunctionEvidenceConfidence, FunctionImageIdentity, FunctionIndex,
 };
+use crate::analysis::image_layout::ImageLayoutIndex;
 
 /// Bounds for one executable-byte classification operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +183,8 @@ pub struct ExecutableByteCompleteness {
 }
 
 /// Image-bound executable-byte classification ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutableByteIndex {
     image: FunctionImageIdentity,
     limits: ExecutableByteLimits,
@@ -347,7 +349,7 @@ impl ExecutableByteIndex {
         } else {
             ExecutableByteIndexStatus::Complete
         };
-        Ok(Self {
+        let index = Self {
             image,
             limits,
             spans,
@@ -361,7 +363,9 @@ impl ExecutableByteIndex {
                 next_unexamined_address,
                 reasons: reasons.into_iter().collect(),
             },
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact selected-image identity.
@@ -383,6 +387,112 @@ impl ExecutableByteIndex {
     pub const fn completeness(&self) -> &ExecutableByteCompleteness {
         &self.completeness
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.spans.len() > self.limits.max_spans
+            || !strictly_sorted(&self.completeness.reasons)
+        {
+            return false;
+        }
+        let mut prior: Option<&ExecutableByteSpan> = None;
+        let mut classified = 0_u64;
+        let mut unresolved = 0_u64;
+        let mut candidate = 0_u64;
+        for span in &self.spans {
+            if span.start >= span.end_exclusive
+                || span.evidence.is_empty()
+                || !strictly_sorted(&span.evidence)
+                || prior.is_some_and(|previous| {
+                    previous.section_ordinal > span.section_ordinal
+                        || (previous.section_ordinal == span.section_ordinal
+                            && (previous.segment != span.segment
+                                || previous.section != span.section
+                                || previous.end_exclusive > span.start))
+                })
+            {
+                return false;
+            }
+            let len = span.end_exclusive - span.start;
+            let Some(next_classified) = classified.checked_add(len) else {
+                return false;
+            };
+            classified = next_classified;
+            if span.kind == ExecutableByteKind::Unresolved {
+                unresolved = unresolved.saturating_add(len);
+            }
+            if span.confidence == FunctionEvidenceConfidence::Candidate {
+                candidate = candidate.saturating_add(len);
+            }
+            prior = Some(span);
+        }
+        let receipt = &self.completeness;
+        let has = |reason: &str| receipt.reasons.iter().any(|item| item == reason);
+        let truncated_reason = receipt.reasons.iter().any(|reason| {
+            matches!(
+                reason.as_str(),
+                "executable_bytes.section_budget"
+                    | "executable_bytes.byte_budget"
+                    | "executable_bytes.span_budget"
+            )
+        });
+        let expected_status = if receipt.next_unexamined_address.is_some() || truncated_reason {
+            ExecutableByteIndexStatus::Truncated
+        } else if unresolved != 0 || candidate != 0 || classified != receipt.observed_bytes {
+            ExecutableByteIndexStatus::Partial
+        } else {
+            ExecutableByteIndexStatus::Complete
+        };
+        classified == receipt.classified_bytes
+            && unresolved == receipt.unresolved_bytes
+            && candidate == receipt.candidate_bytes
+            && classified <= receipt.observed_bytes
+            && classified <= self.limits.max_bytes as u64
+            && self
+                .spans
+                .iter()
+                .map(|span| span.section_ordinal)
+                .collect::<BTreeSet<_>>()
+                .len()
+                <= self.limits.max_sections
+            && receipt.observed_sections
+                >= self
+                    .spans
+                    .iter()
+                    .map(|span| span.section_ordinal)
+                    .collect::<BTreeSet<_>>()
+                    .len() as u64
+            && has("executable_bytes.unresolved") == (unresolved != 0)
+            && has("executable_bytes.candidate_classification") == (candidate != 0)
+            && truncated_reason == receipt.next_unexamined_address.is_some()
+            && receipt.status == expected_status
+    }
+
+    pub(crate) fn layout_invariants_hold(&self, layout: &ImageLayoutIndex) -> bool {
+        self.image == *layout.image()
+            && self.spans.iter().all(|span| {
+                match layout
+                    .sections()
+                    .iter()
+                    .find(|section| section.ordinal == span.section_ordinal)
+                {
+                    Some(section) => {
+                        section.segment == span.segment
+                            && section.name == span.section
+                            && section.address <= span.start
+                            && section
+                                .address
+                                .checked_add(section.size)
+                                .is_some_and(|end| span.end_exclusive <= end)
+                    }
+                    None => !layout.completeness().complete,
+                }
+            })
+    }
+}
+
+fn strictly_sorted<T: Ord>(values: &[T]) -> bool {
+    values.windows(2).all(|pair| pair[0] < pair[1])
 }
 
 fn classify_section(

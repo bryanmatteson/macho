@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::report::{
-    Architecture, ContentHash, EntityId, EvidenceStrength, Fact, FactId, NonEmpty, RecoveredEntity,
-    RecoveryField, RecoveryGap, RecoveryGapId, RecoveryGapReason, RecoveryReport, canonical_json,
-    sha256_hex,
+    Architecture, ContentHash, EntityId, EvidenceId, EvidenceStrength, Fact, FactId, HeaderGap,
+    HeaderIneligibilityReason, NonEmpty, RecoveredEntity, RecoveryField, RecoveryGap,
+    RecoveryGapId, RecoveryGapReason, RecoveryReport, canonical_json, sha256_hex,
 };
 use serde::Serialize;
 
@@ -44,10 +44,40 @@ pub fn export_bundle(
         .find(|slice| slice.architecture == architecture)
         .ok_or_else(|| ArtifactError::Invalid("selected architecture is absent".into()))?;
 
-    let mut gap_index = BTreeMap::<&str, (&RecoveredEntity, &RecoveryGap)>::new();
+    let entity_index = slice
+        .entities
+        .iter()
+        .map(|entity| (entity.id.as_str(), entity))
+        .collect::<BTreeMap<_, _>>();
+    let mut gap_index = BTreeMap::<&str, (&RecoveredEntity, ExportGap<'_>)>::new();
     for entity in &slice.entities {
         for gap in &entity.gaps {
-            if gap_index.insert(gap.id.as_str(), (entity, gap)).is_some() {
+            if gap_index
+                .insert(gap.id.as_str(), (entity, ExportGap::Recovery(gap)))
+                .is_some()
+            {
+                return Err(ArtifactError::Invalid(format!(
+                    "duplicate recovery gap {}",
+                    gap.id
+                )));
+            }
+        }
+    }
+    if let Some(header) = &slice.header {
+        for gap in &header.unresolved {
+            let entity = entity_index
+                .get(gap.entity_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    ArtifactError::Invalid(format!(
+                        "header gap {} references absent entity {}",
+                        gap.id, gap.entity_id
+                    ))
+                })?;
+            if gap_index
+                .insert(gap.id.as_str(), (entity, ExportGap::Header(gap)))
+                .is_some()
+            {
                 return Err(ArtifactError::Invalid(format!(
                     "duplicate recovery gap {}",
                     gap.id
@@ -63,16 +93,16 @@ pub fn export_bundle(
         selected.push((entity, gap));
     }
 
-    let mut grouped = BTreeMap::<EntityId, Vec<&RecoveryGap>>::new();
+    let mut grouped = BTreeMap::<EntityId, Vec<ExportGap<'_>>>::new();
     for (entity, gap) in &selected {
-        grouped.entry(entity.id.clone()).or_default().push(gap);
+        grouped.entry(entity.id.clone()).or_default().push(*gap);
     }
     let mut targets = Vec::new();
     for (entity_id, mut gaps) in grouped {
-        gaps.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
+        gaps.sort_by(|left, right| left.id().as_str().cmp(right.id().as_str()));
         let mut common = allowed_operations(gaps[0]);
         for gap in &gaps[1..] {
-            let allowed = allowed_operations(gap);
+            let allowed = allowed_operations(*gap);
             common.retain(|operation| allowed.contains(operation));
         }
         if common.is_empty() {
@@ -80,12 +110,18 @@ pub fn export_bundle(
                 "selected gaps for entity {entity_id} do not share a safe operation; export a smaller explicit gap set"
             )));
         }
+        let projection_template = gaps
+            .iter()
+            .filter_map(|gap| gap.declaration_template())
+            .next()
+            .cloned();
         targets.push(HypothesisTarget {
             entity_id,
-            gap_ids: NonEmpty::new(gaps.iter().map(|gap| gap.id.clone()).collect())
+            gap_ids: NonEmpty::new(gaps.iter().map(|gap| gap.id().clone()).collect())
                 .expect("selected gap group is non-empty"),
             allowed_operations: NonEmpty::new(common)
                 .expect("checked common operation set is non-empty"),
+            projection_template,
         });
     }
 
@@ -103,7 +139,7 @@ pub fn export_bundle(
         collect_entity_facts(entity, &mut facts, &mut pinned, &mut referenced_evidence)?;
     }
     for (_, gap) in &selected {
-        referenced_evidence.extend(gap.evidence_ids.iter().map(ToString::to_string));
+        referenced_evidence.extend(gap.evidence_ids().iter().map(ToString::to_string));
     }
 
     let mut evidence = Vec::new();
@@ -156,18 +192,56 @@ pub fn export_bundle(
     )
 }
 
-fn allowed_operations(gap: &RecoveryGap) -> Vec<HypothesisOperationKind> {
-    match &gap.reason {
-        RecoveryGapReason::Conflicted { .. } => vec![HypothesisOperationKind::ChooseCandidate],
-        RecoveryGapReason::Unavailable { .. } => match gap.field {
-            RecoveryField::DisplayName => {
-                vec![HypothesisOperationKind::ProposeCanonicalName]
+#[derive(Clone, Copy)]
+enum ExportGap<'a> {
+    Recovery(&'a RecoveryGap),
+    Header(&'a HeaderGap),
+}
+
+impl<'a> ExportGap<'a> {
+    const fn id(self) -> &'a RecoveryGapId {
+        match self {
+            Self::Recovery(gap) => &gap.id,
+            Self::Header(gap) => &gap.id,
+        }
+    }
+
+    const fn evidence_ids(self) -> &'a [EvidenceId] {
+        match self {
+            Self::Recovery(gap) => gap.evidence_ids.as_slice(),
+            Self::Header(_) => &[],
+        }
+    }
+
+    const fn declaration_template(self) -> Option<&'a crate::analysis::report::HeaderDecl> {
+        match self {
+            Self::Recovery(_) => None,
+            Self::Header(gap) => gap.declaration_template.as_ref(),
+        }
+    }
+}
+
+fn allowed_operations(gap: ExportGap<'_>) -> Vec<HypothesisOperationKind> {
+    match gap {
+        ExportGap::Recovery(gap) => match &gap.reason {
+            RecoveryGapReason::Conflicted { .. } => {
+                vec![HypothesisOperationKind::ChooseCandidate]
             }
-            RecoveryField::Owner => vec![HypothesisOperationKind::ProposeGrouping],
-            _ => vec![HypothesisOperationKind::ProposeDeclarationFragment],
+            RecoveryGapReason::Unavailable { .. } => match gap.field {
+                RecoveryField::DisplayName => {
+                    vec![HypothesisOperationKind::ProposeCanonicalName]
+                }
+                RecoveryField::Owner => {
+                    vec![HypothesisOperationKind::ProposeDeclarationFragment]
+                }
+                _ => vec![HypothesisOperationKind::ProposeDeclarationFragment],
+            },
+            RecoveryGapReason::HeaderIneligible { .. } => {
+                vec![HypothesisOperationKind::ProposeDeclarationFragment]
+            }
         },
-        RecoveryGapReason::HeaderIneligible { reason } => match reason {
-            crate::analysis::report::HeaderIneligibilityReason::UnprovenOwner => {
+        ExportGap::Header(gap) => match gap.reason {
+            HeaderIneligibilityReason::UnprovenOwner if gap.declaration_template.is_some() => {
                 vec![HypothesisOperationKind::ProposeGrouping]
             }
             _ => vec![HypothesisOperationKind::ProposeDeclarationFragment],

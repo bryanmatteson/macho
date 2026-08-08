@@ -454,6 +454,20 @@ pub enum ObjectiveCForwardKind {
 /// A top-level typed declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Decl {
+    /// An access section within a C++ record. This node is invalid at top level.
+    AccessSection {
+        /// Access applied to the contained declarations.
+        access: Access,
+        /// Declarations in this access section.
+        declarations: Vec<Decl>,
+    },
+    /// C++ namespace containing declarations.
+    Namespace {
+        /// Qualified namespace path relative to the enclosing namespace.
+        path: IdentifierPath,
+        /// Declarations owned by the namespace.
+        declarations: Vec<Decl>,
+    },
     /// Function declaration.
     Function {
         /// Name.
@@ -563,7 +577,9 @@ impl Decl {
             Self::Record { path, .. } | Self::Forward { path, .. } | Self::Alias { path, .. } => {
                 Some(path.last())
             }
-            Self::ObjectiveCForward { .. } => None,
+            Self::AccessSection { .. }
+            | Self::Namespace { .. }
+            | Self::ObjectiveCForward { .. } => None,
         }
     }
 }

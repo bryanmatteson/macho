@@ -454,6 +454,11 @@ pub enum PcRelKind {
 
 /// Machine-readable category for a decode failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 #[non_exhaustive]
 pub enum DecodeErrorKind {
     /// The bytes are not a valid instruction for the selected architecture.
@@ -480,6 +485,11 @@ impl DecodeErrorKind {
 
 /// Errors from decode operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DecodeError {
     /// Machine-readable failure category.
     pub kind: DecodeErrorKind,
@@ -557,6 +567,11 @@ impl<'a> Iterator for InsnIter<'a> {
 
 /// One explicit region skipped by lossy instruction decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DecodeGap {
     /// The offset field.
     pub offset: usize,

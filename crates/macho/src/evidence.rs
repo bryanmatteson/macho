@@ -42,6 +42,22 @@ impl<'image, 'data> SelectedImageEvidence<'image, 'data> {
         self.pointers.inventory(limit)
     }
 
+    /// Enumerate legacy-bound pointer fields without charging pure rebases to the limit.
+    pub fn legacy_bindings(
+        &self,
+        limit: u64,
+    ) -> crate::metadata::dyld::Result<crate::metadata::dyld::resolve::PointerInventory> {
+        self.pointers.legacy_bind_inventory(limit)
+    }
+
+    /// Enumerate legacy-rebased pointer fields without charging binds to the limit.
+    pub fn legacy_rebases(
+        &self,
+        limit: u64,
+    ) -> crate::metadata::dyld::Result<crate::metadata::dyld::resolve::PointerInventory> {
+        self.pointers.legacy_rebase_inventory(limit)
+    }
+
     /// Look up an exact name in the authoritative chained-import table.
     pub fn chained_import(
         &self,
@@ -56,6 +72,14 @@ impl<'image, 'data> SelectedImageEvidence<'image, 'data> {
         limit: u64,
     ) -> crate::metadata::dyld::Result<crate::metadata::dyld::FunctionStartsOutcome> {
         crate::metadata::dyld::decode_function_starts(self.image, limit)
+    }
+
+    /// Decode bounded indirect-symbol bindings for stubs and pointer slots.
+    pub fn indirect_bindings(
+        &self,
+        limit: u64,
+    ) -> crate::metadata::symbols::Result<crate::metadata::symbols::IndirectBindingsOutcome> {
+        crate::metadata::symbols::decode_indirect_bindings(self.image, limit)
     }
 
     /// Decode the strict Objective-C evidence batch.

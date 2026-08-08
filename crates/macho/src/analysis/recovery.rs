@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::analysis::control_flow::ControlFlowIndex;
+use crate::analysis::control_flow::{ControlFlowEdgeKind, ControlFlowIndex};
 use crate::analysis::executable_bytes::{
     ExecutableByteEvidence, ExecutableByteIndex, ExecutableByteKind,
 };
@@ -19,9 +19,10 @@ use crate::analysis::functions::{
 use crate::analysis::functions::{
     FunctionEvidenceConfidence, FunctionImageIdentity, FunctionIndex,
 };
+use crate::analysis::xref::{Xref, XrefIndex, XrefKind, XrefTarget};
 
 /// Current major version of the steerable-recovery wire contract.
-pub const RECOVERY_CONTRACT_MAJOR: u16 = 2;
+pub const RECOVERY_CONTRACT_MAJOR: u16 = 1;
 /// Current minor version of the steerable-recovery wire contract.
 pub const RECOVERY_CONTRACT_MINOR: u16 = 0;
 
@@ -45,6 +46,44 @@ pub enum RecoveryReferenceTargetKey {
         /// recovered display name.
         name: String,
     },
+}
+
+/// Stable kind identity for one cross-reference subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecoveryReferenceKind {
+    /// Indirect-symbol stub or pointer-slot reference.
+    Stub,
+    /// Dyld chained import binding.
+    ChainedBind,
+    /// Dyld chained in-image rebase.
+    ChainedRebase,
+    /// Legacy dyld in-image rebase opcode.
+    LegacyRebase,
+    /// Legacy dyld binding opcode.
+    LegacyBind,
+    /// Mach-O relocation record.
+    Relocation,
+    /// Decoded direct branch or call target.
+    DirectBranch,
+    /// Decoded non-control-flow address use.
+    Data,
+}
+
+impl From<XrefKind> for RecoveryReferenceKind {
+    fn from(kind: XrefKind) -> Self {
+        match kind {
+            XrefKind::Stub => Self::Stub,
+            XrefKind::ChainedBind => Self::ChainedBind,
+            XrefKind::ChainedRebase => Self::ChainedRebase,
+            XrefKind::LegacyRebase => Self::LegacyRebase,
+            XrefKind::LegacyBind => Self::LegacyBind,
+            XrefKind::Relocation => Self::Relocation,
+            XrefKind::DirectBranch => Self::DirectBranch,
+            XrefKind::Data => Self::Data,
+        }
+    }
 }
 
 /// Version of serialized recovery questions, guides, and derivations.
@@ -159,6 +198,8 @@ pub enum ProgramSubjectKey {
         source: u64,
         /// Destination coordinate.
         target: u64,
+        /// Exact edge semantics. Endpoints alone are not a unique edge key.
+        edge_kind: ControlFlowEdgeKind,
     },
     /// One aggregated direct-call relationship.
     DirectCall {
@@ -166,6 +207,15 @@ pub enum ProgramSubjectKey {
         caller: u64,
         /// Callee function entry.
         callee: u64,
+    },
+    /// One exact decoded direct-call observation.
+    DirectCallsite {
+        /// Caller function entry.
+        caller: u64,
+        /// Exact call instruction address.
+        instruction_address: u64,
+        /// Exact decoded direct target, whether or not it is a function entry.
+        target_address: u64,
     },
     /// One direct inter-procedural transfer observation.
     DirectTransfer {
@@ -199,7 +249,22 @@ pub enum ProgramSubjectKey {
         /// Internal address or imported binding identity.
         target: RecoveryReferenceTargetKey,
         /// Stable xref-kind code.
-        reference_kind: String,
+        reference_kind: RecoveryReferenceKind,
+    },
+    /// One caller-guided owner selected for an exact cross-reference use.
+    ///
+    /// This is an ownership relation for the reference source, not exclusive
+    /// ownership of its target. Several functions can therefore retain
+    /// independent references to the same string or data object.
+    ReferenceOwnership {
+        /// Reference source coordinate.
+        source: u64,
+        /// Internal address or imported binding identity.
+        target: RecoveryReferenceTargetKey,
+        /// Stable xref-kind code.
+        reference_kind: RecoveryReferenceKind,
+        /// Selected owning function entry.
+        function_entry: u64,
     },
     /// One conserved executable-byte span.
     ExecutableByteRange {
@@ -267,6 +332,10 @@ pub enum RecoveryQuestionKind {
     ByteRole,
     /// Whether a candidate CFG edge is feasible.
     ControlFlowEdge,
+    /// Whether one exact decoded direct-call observation is valid.
+    DirectCall,
+    /// Which recovered function owns one exact cross-reference use.
+    ReferenceOwnership,
     /// Whether a call returns normally.
     NonReturningCall,
     /// Which indirect targets are feasible.
@@ -318,6 +387,15 @@ pub enum RecoveryChoice {
         /// Selected structural relationship.
         relationship: FunctionRelationshipChoice,
     },
+    /// Suppress one exact intra-procedural CFG edge in the guided fact view.
+    SuppressControlFlowEdge,
+    /// Suppress one exact decoded direct-call observation in the guided fact view.
+    SuppressDirectCall,
+    /// Select one already-recovered source-range owner for an exact reference.
+    ReferenceOwner {
+        /// Selected recovered function entry.
+        function_entry: u64,
+    },
     /// Reject a candidate interpretation.
     Reject,
 }
@@ -351,6 +429,32 @@ pub enum RecoverySignalKind {
     JumpTable,
     /// A recovered inline literal.
     InlineLiteral,
+}
+
+/// One durable caller-guided ownership relation for an exact reference use.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuidedReferenceOwnership {
+    /// Reference source coordinate.
+    pub source: u64,
+    /// Internal address or imported binding identity.
+    pub target: RecoveryReferenceTargetKey,
+    /// Stable xref-kind code.
+    pub reference_kind: RecoveryReferenceKind,
+    /// Selected owning function entry.
+    pub function_entry: u64,
+}
+
+impl GuidedReferenceOwnership {
+    /// Stable Fact IR subject for this guided relation.
+    pub fn subject(&self) -> ProgramSubjectKey {
+        ProgramSubjectKey::ReferenceOwnership {
+            source: self.source,
+            target: self.target.clone(),
+            reference_kind: self.reference_kind,
+            function_entry: self.function_entry,
+        }
+    }
 }
 
 /// Exact image-bound identity of one recovery signal.
@@ -593,6 +697,81 @@ impl RecoveryGuideBuilder {
             RecoveryQuestionKind::ByteRole,
         );
         Ok(self.authored(point, RecoveryChoice::ByteRole { role }))
+    }
+
+    /// Suppress one exact edge without suppressing other edge kinds that share
+    /// the same source and destination blocks.
+    pub fn suppress_control_flow_edge(
+        self,
+        function_entry: u64,
+        source: u64,
+        target: u64,
+        edge_kind: ControlFlowEdgeKind,
+    ) -> Self {
+        let point = self.point(
+            ProgramSubjectKey::ControlFlowEdge {
+                function_entry,
+                source,
+                target,
+                edge_kind,
+            },
+            RecoveryQuestionKind::ControlFlowEdge,
+        );
+        self.authored(point, RecoveryChoice::SuppressControlFlowEdge)
+    }
+
+    /// Suppress one exact direct callsite. Aggregated caller/callee edges are
+    /// intentionally not accepted as editable subjects.
+    pub fn suppress_direct_call(
+        self,
+        caller: u64,
+        instruction_address: u64,
+        target_address: u64,
+    ) -> Self {
+        let point = self.point(
+            ProgramSubjectKey::DirectCallsite {
+                caller,
+                instruction_address,
+                target_address,
+            },
+            RecoveryQuestionKind::DirectCall,
+        );
+        self.authored(point, RecoveryChoice::SuppressDirectCall)
+    }
+
+    /// Select one recovered source-range owner for an exact reference use.
+    ///
+    /// Validation rejects missing references and functions that do not already
+    /// own the reference source.
+    pub fn assign_reference_owner(
+        self,
+        source: u64,
+        target: RecoveryReferenceTargetKey,
+        reference_kind: RecoveryReferenceKind,
+        function_entry: u64,
+    ) -> Self {
+        let point = self.point(
+            ProgramSubjectKey::CrossReference {
+                source,
+                target,
+                reference_kind,
+            },
+            RecoveryQuestionKind::ReferenceOwnership,
+        );
+        self.authored(point, RecoveryChoice::ReferenceOwner { function_entry })
+    }
+
+    /// Select a source owner directly from one retained leaf xref.
+    pub fn assign_xref_owner(self, reference: &Xref, function_entry: u64) -> Self {
+        let ProgramSubjectKey::CrossReference {
+            source,
+            target,
+            reference_kind,
+        } = cross_reference_subject(reference)
+        else {
+            unreachable!()
+        };
+        self.assign_reference_owner(source, target, reference_kind, function_entry)
     }
 
     /// Answer one currently emitted question while binding replay to its
@@ -1052,12 +1231,43 @@ fn authored_choice_matches_point(decision: &RecoveryDecision) -> bool {
             RecoveryQuestionKind::ByteRole,
             ProgramSubjectKey::ExecutableByteRange { .. },
             RecoveryChoice::ByteRole { .. }
+        ) | (
+            RecoveryQuestionKind::ControlFlowEdge,
+            ProgramSubjectKey::ControlFlowEdge { .. },
+            RecoveryChoice::SuppressControlFlowEdge
+        ) | (
+            RecoveryQuestionKind::DirectCall,
+            ProgramSubjectKey::DirectCallsite { .. },
+            RecoveryChoice::SuppressDirectCall
+        ) | (
+            RecoveryQuestionKind::ReferenceOwnership,
+            ProgramSubjectKey::CrossReference { .. },
+            RecoveryChoice::ReferenceOwner { .. }
         )
     )
 }
 
 /// Build the currently supported recovery-question catalog.
 pub(crate) fn build_recovery_questions(
+    image: &ProgramImageIdentity,
+    functions: Option<&FunctionIndex>,
+    control_flow: Option<&ControlFlowIndex>,
+    executable_bytes: Option<&ExecutableByteIndex>,
+    xrefs: Option<&XrefIndex>,
+    guided_reference_ownerships: &[GuidedReferenceOwnership],
+) -> Vec<RecoveryQuestion> {
+    let mut questions =
+        build_core_recovery_questions(image, functions, control_flow, executable_bytes);
+    questions.extend(build_reference_ownership_questions(
+        image,
+        functions,
+        xrefs,
+        guided_reference_ownerships,
+    ));
+    questions
+}
+
+fn build_core_recovery_questions(
     image: &ProgramImageIdentity,
     functions: Option<&FunctionIndex>,
     control_flow: Option<&ControlFlowIndex>,
@@ -1448,6 +1658,98 @@ pub(crate) fn build_recovery_questions(
         });
     }
     questions
+}
+
+fn build_reference_ownership_questions(
+    image: &ProgramImageIdentity,
+    functions: Option<&FunctionIndex>,
+    xrefs: Option<&XrefIndex>,
+    guided_reference_ownerships: &[GuidedReferenceOwnership],
+) -> Vec<RecoveryQuestion> {
+    let (Some(functions), Some(xrefs)) = (functions, xrefs) else {
+        return Vec::new();
+    };
+    let guided_subjects = guided_reference_ownerships
+        .iter()
+        .map(|ownership| ProgramSubjectKey::CrossReference {
+            source: ownership.source,
+            target: ownership.target.clone(),
+            reference_kind: ownership.reference_kind,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut emitted = std::collections::BTreeSet::new();
+    let mut questions = Vec::new();
+    for reference in xrefs.all_refs() {
+        let subject = cross_reference_subject(reference);
+        if guided_subjects.contains(&subject) || !emitted.insert(subject.clone()) {
+            continue;
+        }
+        let owners = functions.owners(reference.source.0).collect::<Vec<_>>();
+        if owners.len() < 2 {
+            continue;
+        }
+        let choices = owners
+            .iter()
+            .map(|owner| RecoveryChoice::ReferenceOwner {
+                function_entry: owner.function.entry,
+            })
+            .chain(std::iter::once(RecoveryChoice::KeepUnresolved))
+            .collect::<Vec<_>>();
+        let signals = owners
+            .iter()
+            .map(|owner| RecoverySignal {
+                key: RecoverySignalKey {
+                    image: image.clone(),
+                    kind: RecoverySignalKind::RangeOwnership,
+                    subject: ProgramSubjectKey::Function {
+                        entry: owner.function.entry,
+                    },
+                    evidence_source: None,
+                    source_address: Some(reference.source.0),
+                },
+                confidence: match owner.confidence {
+                    FunctionOwnershipConfidence::Exact => FunctionEvidenceConfidence::Exact,
+                    FunctionOwnershipConfidence::Derived => FunctionEvidenceConfidence::Derived,
+                    FunctionOwnershipConfidence::Candidate => FunctionEvidenceConfidence::Candidate,
+                },
+                supports: vec![RecoveryChoice::ReferenceOwner {
+                    function_entry: owner.function.entry,
+                }],
+            })
+            .collect();
+        questions.push(RecoveryQuestion {
+            key: RecoveryPointKey {
+                image: image.clone(),
+                subject: subject.clone(),
+                kind: RecoveryQuestionKind::ReferenceOwnership,
+            },
+            subject,
+            kind: RecoveryQuestionKind::ReferenceOwnership,
+            choices,
+            signals,
+            estimated_effect: RecoveryEffectEstimate {
+                affected_layers: vec![RecoveryLayer::References],
+            },
+        });
+    }
+    questions
+}
+
+/// Stable program subject for one retained leaf xref.
+pub(crate) fn cross_reference_subject(reference: &Xref) -> ProgramSubjectKey {
+    let target = match &reference.target {
+        XrefTarget::Internal { va } => RecoveryReferenceTargetKey::Internal { address: va.0 },
+        XrefTarget::Import { name, ordinal } => RecoveryReferenceTargetKey::Import {
+            ordinal: *ordinal,
+            name: name.clone(),
+        },
+    };
+    let reference_kind = RecoveryReferenceKind::from(reference.kind);
+    ProgramSubjectKey::CrossReference {
+        source: reference.source.0,
+        target,
+        reference_kind,
+    }
 }
 
 #[cfg(test)]

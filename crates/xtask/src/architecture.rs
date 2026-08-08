@@ -148,7 +148,10 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
         .collect::<BTreeMap<&str, BTreeSet<&str>>>();
     let expected = BTreeMap::from([
         ("default", BTreeSet::from(["analysis"])),
-        ("evidence", BTreeSet::from(["cpp", "dyld", "objc", "swift"])),
+        (
+            "evidence",
+            BTreeSet::from(["cpp", "dyld", "objc", "swift", "symbols"]),
+        ),
         (
             "metadata",
             BTreeSet::from(["codesign", "dwarf", "evidence", "symbols"]),
@@ -252,6 +255,9 @@ struct SourceFacts {
     silent_decode_discard: bool,
     image_inspector: bool,
     removed_format_flag: bool,
+    program_leaf_bypass: bool,
+    pointer_index_leaf_bypass: bool,
+    selected_image_evidence_constructors: usize,
 }
 
 impl<'ast> Visit<'ast> for SourceFacts {
@@ -271,6 +277,46 @@ impl<'ast> Visit<'ast> for SourceFacts {
             self.system_io_call |= segments.last().is_some_and(|segment| {
                 matches!(segment.ident.to_string().as_str(), "stdout" | "stderr")
             });
+            let names = segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            self.selected_image_evidence_constructors += usize::from(
+                names
+                    .as_slice()
+                    .ends_with(&["SelectedImageEvidence".to_owned(), "new".to_owned()]),
+            );
+            self.program_leaf_bypass |= [
+                ["PointerIndex", "recover"].as_slice(),
+                ["ObjcIndex", "recover"].as_slice(),
+                ["SwiftIndex", "recover"].as_slice(),
+                ["RttiIndex", "recover"].as_slice(),
+                ["FunctionIndex", "recover"].as_slice(),
+            ]
+            .iter()
+            .any(|suffix| {
+                names.len() >= suffix.len()
+                    && names[names.len() - suffix.len()..]
+                        .iter()
+                        .map(String::as_str)
+                        .eq(suffix.iter().copied())
+            }) || names.last().is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "decode_function_starts"
+                        | "decode_indirect_bindings"
+                        | "decode_strict_objc"
+                        | "decode_swift_strict"
+                        | "decode_strict_rtti"
+                        | "decode_strict_vtables"
+                )
+            });
+            self.pointer_index_leaf_bypass |= names
+                .as_slice()
+                .ends_with(&["XrefIndex".to_owned(), "recover_format".to_owned()])
+                || names
+                    .last()
+                    .is_some_and(|name| name == "parse_chained_fixups");
         }
         visit::visit_expr_call(self, expression);
     }
@@ -514,6 +560,23 @@ fn scan_source(crate_name: &str, relative: &Path, source: &str) -> Vec<String> {
     if facts.removed_format_flag {
         violations.push(format!("removed format flag detected: {path}"));
     }
+    if path == "crates/macho/src/analysis/program.rs" {
+        if facts.program_leaf_bypass {
+            violations.push(format!(
+                "program recovery bypasses SelectedImageEvidence: {path}"
+            ));
+        }
+        if facts.selected_image_evidence_constructors != 1 {
+            violations.push(format!(
+                "program recovery must construct exactly one SelectedImageEvidence session: {path}"
+            ));
+        }
+    }
+    if path == "crates/macho/src/analysis/pointer_index.rs" && facts.pointer_index_leaf_bypass {
+        violations.push(format!(
+            "pointer recovery bypasses SelectedImageEvidence: {path}"
+        ));
+    }
     violations
 }
 
@@ -667,6 +730,16 @@ mod tests {
                 "crates/macho/tests/x.rs",
                 "fn fixture() { let arg = \"--json\"; }",
             ),
+            (
+                "macho",
+                "crates/macho/src/analysis/program.rs",
+                "fn fixture(macho: &MachoFile<'_>) { let _ = ObjcIndex::recover(macho, limits); }",
+            ),
+            (
+                "macho",
+                "crates/macho/src/analysis/pointer_index.rs",
+                "fn fixture(macho: &MachoFile<'_>) { let _ = XrefIndex::recover_format(macho, limit); }",
+            ),
         ];
         for (crate_name, path, source) in fixtures {
             assert!(
@@ -683,6 +756,22 @@ mod tests {
                 "macho",
                 Path::new("crates/macho/src/core/model.rs"),
                 "pub fn values() -> &'static [u8] { &[] }"
+            )
+            .is_empty()
+        );
+        assert!(
+            scan_source(
+                "macho",
+                Path::new("crates/macho/src/analysis/program.rs"),
+                "fn recover(macho: &MachoFile<'_>) { let evidence = SelectedImageEvidence::new(macho); let _ = ObjcIndex::recover_with_evidence(&evidence, limits); }"
+            )
+            .is_empty()
+        );
+        assert!(
+            scan_source(
+                "macho",
+                Path::new("crates/macho/src/analysis/pointer_index.rs"),
+                "fn recover(evidence: &SelectedImageEvidence<'_, '_>) { let _ = XrefIndex::recover_format_with_evidence(evidence, limit); }"
             )
             .is_empty()
         );

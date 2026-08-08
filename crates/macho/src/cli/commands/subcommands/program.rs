@@ -7,22 +7,86 @@ use serde::Serialize;
 
 use crate::cli::analysis::dependency_index::StaticProgramUniverse;
 use crate::cli::analysis::program::{
-    ProgramRecoveryLimits, ProgramRecoveryLimitsFile, ProgramRecoveryRequest, ProgramRecoveryStage,
-    RecoveredProgram,
+    ProgramFactDocument, ProgramRecoveryLimits, ProgramRecoveryLimitsFile, ProgramRecoveryRequest,
+    ProgramRecoveryStage, RecoveredProgram,
 };
 use crate::cli::analysis::recovery::{
     ProgramCoverage, ProgramCoverageDimension, ProgramSubjectKey, RecoveryGuide,
     RecoveryGuideValidation, RecoveryQuestion, RecoveryQuestionKind, RecoverySignalKind,
 };
 use crate::cli::commands::OutputFormat;
-use crate::cli::commands::args::{AnalysisLimitArgs, ArchitectureArgs, InputArgs};
+use crate::cli::commands::args::{AnalysisLimitArgs, ArchitectureArgs};
 use crate::cli::commands::subcommands::common::{for_each_selected_mach, read_input};
 
 /// Arguments for selective whole-program recovery.
 #[derive(clap::Args)]
 pub struct ProgramArgs {
-    #[command(flatten)]
-    input: InputArgs,
+    /// Path to the input Mach-O. Omit only when loading a saved Fact IR document.
+    #[arg(
+        value_name = "TARGET",
+        required_unless_present = "load_fact_ir",
+        conflicts_with = "load_fact_ir"
+    )]
+    target: Option<std::path::PathBuf>,
+    /// Validate and inspect a raw Fact IR document without opening a Mach-O.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = [
+            "target",
+            "arch",
+            "limits_file",
+            "stage",
+            "all",
+            "load_dependencies",
+            "dependency_search_path",
+            "dyld_cache",
+            "questions",
+            "coverage",
+            "guide",
+            "validate_guide",
+            "heuristic_strings",
+            "fact_ir_output",
+            "max_strings",
+            "max_xrefs",
+            "max_ranges",
+            "max_vtables",
+            "max_decoded_bytes",
+            "max_issues",
+            "max_indirect_value_flow_work",
+            "max_indirect_value_flow_work_per_function",
+            "max_indirect_values_per_register",
+            "max_indirect_loop_values_per_register",
+            "max_indirect_candidates_per_transfer",
+            "max_cfg_instructions_per_function",
+            "max_cfg_blocks_per_function",
+            "max_cfg_edges_per_function",
+            "max_cfg_gaps_per_function",
+            "max_cfg_jump_tables_per_function",
+            "max_cfg_jump_table_entries",
+            "max_exception_records",
+            "max_exception_section_bytes",
+            "max_exception_lsda_bytes",
+            "max_exception_call_sites",
+            "max_exception_actions",
+            "max_exception_cfi_rows",
+            "max_dependencies",
+            "max_dependency_images",
+            "max_dependency_resolutions",
+            "max_data_objects",
+            "max_function_signatures",
+            "max_stack_frames",
+            "max_local_variables"
+        ]
+    )]
+    load_fact_ir: Option<std::path::PathBuf>,
+    /// Save the selected image as a raw, validated Fact IR JSON document.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["load_fact_ir", "load_dependencies", "validate_guide"]
+    )]
+    fact_ir_output: Option<std::path::PathBuf>,
     #[command(flatten)]
     selection: ArchitectureArgs,
     #[command(flatten)]
@@ -35,7 +99,14 @@ pub struct ProgramArgs {
         long,
         value_enum,
         action = clap::ArgAction::Append,
-        required_unless_present_any = ["all", "questions", "guide", "coverage", "load_dependencies"]
+        required_unless_present_any = [
+            "all",
+            "questions",
+            "guide",
+            "coverage",
+            "load_dependencies",
+            "load_fact_ir"
+        ]
     )]
     stage: Vec<ProgramStageArg>,
     /// Execute every recovery stage.
@@ -228,9 +299,17 @@ struct ProgramUniverseSlice {
 
 /// Recover only the selected stages and render their typed records and receipts.
 pub fn run(args: ProgramArgs, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
-    let bytes = read_input(&args.input.path)?;
-    let container = crate::parse(&bytes)
-        .with_context(|| format!("failed to parse {}", args.input.path.display()))?;
+    if let Some(path) = args.load_fact_ir.as_deref() {
+        return load_fact_ir(path, format, out);
+    }
+
+    let target = args
+        .target
+        .as_deref()
+        .expect("clap requires TARGET unless --load-fact-ir is present");
+    let bytes = read_input(target)?;
+    let container =
+        crate::parse(&bytes).with_context(|| format!("failed to parse {}", target.display()))?;
     let guide = args
         .guide
         .as_ref()
@@ -247,7 +326,7 @@ pub fn run(args: ProgramArgs, format: OutputFormat, out: &mut dyn Write) -> Resu
     {
         ProgramRecoveryStage::all().to_vec()
     } else {
-        args.stage.into_iter().map(Into::into).collect()
+        args.stage.iter().copied().map(Into::into).collect()
     };
     if args.questions && !stages.contains(&ProgramRecoveryStage::ExecutableBytes) {
         stages.push(ProgramRecoveryStage::ExecutableBytes);
@@ -354,7 +433,7 @@ pub fn run(args: ProgramArgs, format: OutputFormat, out: &mut dyn Write) -> Resu
             |image, architecture, _| {
                 let request = ProgramRecoveryRequest::new(stages.iter().copied(), limits);
                 let universe = StaticProgramUniverse::recover_filesystem_with_cache(
-                    &args.input.path,
+                    target,
                     image.header().cpu_type().0,
                     image.header().cpu_subtype().0,
                     request,
@@ -431,6 +510,19 @@ pub fn run(args: ProgramArgs, format: OutputFormat, out: &mut dyn Write) -> Resu
             Ok(())
         },
     )?;
+    if let Some(path) = args.fact_ir_output.as_deref() {
+        if slices.len() != 1 {
+            anyhow::bail!(
+                "--fact-ir-output requires exactly one selected image; use --arch to select one architecture"
+            );
+        }
+        let document = slices[0].program.to_fact_document();
+        let bytes = document
+            .to_json_pretty()
+            .context("validate recovered program Fact IR")?;
+        std::fs::write(path, bytes)
+            .with_context(|| format!("write program Fact IR {}", path.display()))?;
+    }
     if format.is_json() {
         if slices.len() == 1 {
             serde_json::to_writer_pretty(&mut *out, &slices[0])?;
@@ -558,6 +650,71 @@ pub fn run(args: ProgramArgs, format: OutputFormat, out: &mut dyn Write) -> Resu
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn load_fact_ir(path: &std::path::Path, format: OutputFormat, out: &mut dyn Write) -> Result<()> {
+    let bytes = read_input(path)?;
+    let document = ProgramFactDocument::load_json(&bytes)
+        .with_context(|| format!("load program Fact IR {}", path.display()))?;
+    if format.is_json() {
+        serde_json::to_writer_pretty(&mut *out, &document)?;
+        writeln!(out)?;
+        return Ok(());
+    }
+
+    let program = RecoveredProgram::from_document(document)
+        .with_context(|| format!("materialize program Fact IR {}", path.display()))?;
+    writeln!(
+        out,
+        "Program Fact IR v{}: {:?}",
+        crate::cli::analysis::program::PROGRAM_FACT_IR_SCHEMA_VERSION,
+        program.completeness().status
+    )?;
+    writeln!(
+        out,
+        "  Image: cpu={:#x} subtype={:#x} bytes={} sha256={}",
+        program.image().cpu_type,
+        program.image().cpu_subtype,
+        program.image().byte_len,
+        program.image().content_sha256
+    )?;
+    writeln!(out, "  Recovery contract: {:?}", program.recovery_schema())?;
+    writeln!(out, "  Stages:")?;
+    for receipt in &program.completeness().stages {
+        let selected = if receipt.requested {
+            "requested"
+        } else {
+            "dependency"
+        };
+        write!(
+            out,
+            "    {}: {:?} ({selected})",
+            receipt.stage.key(),
+            receipt.status
+        )?;
+        if !receipt.reasons.is_empty() {
+            write!(out, " [{}]", receipt.reasons.join(", "))?;
+        }
+        writeln!(out)?;
+    }
+    writeln!(out, "  Coverage:")?;
+    let coverage = program.coverage();
+    render_coverage(out, "executable bytes", &coverage.executable_bytes)?;
+    render_coverage(out, "functions", &coverage.functions)?;
+    render_coverage(out, "control flow", &coverage.control_flow)?;
+    render_coverage(out, "direct calls", &coverage.direct_calls)?;
+    render_coverage(out, "references", &coverage.references)?;
+    render_coverage(out, "indirect transfers", &coverage.indirect_transfers)?;
+    writeln!(
+        out,
+        "  Guidance: {}",
+        program.guide().map_or("independent", |_| "guided")
+    )?;
+    writeln!(out, "  Recovery questions: {}", program.questions().len())?;
+    for question in program.questions() {
+        render_question(out, question)?;
     }
     Ok(())
 }
@@ -903,6 +1060,133 @@ mod tests {
             .map(ProgramRecoveryStage::from)
             .collect::<Vec<_>>();
         assert_eq!(stages, ProgramRecoveryStage::all());
+    }
+
+    #[test]
+    fn fact_ir_load_is_a_complete_offline_request_and_rejects_recovery_options() {
+        crate::cli::commands::parse_only(["macho", "program", "--load-fact-ir", "facts.json"])
+            .expect("Fact IR load does not require a Mach-O or stage request");
+        assert!(
+            crate::cli::commands::parse_only([
+                "macho",
+                "program",
+                "fixture",
+                "--load-fact-ir",
+                "facts.json",
+            ])
+            .is_err(),
+            "offline load and a live Mach-O must be mutually exclusive"
+        );
+        assert!(
+            crate::cli::commands::parse_only([
+                "macho",
+                "program",
+                "--load-fact-ir",
+                "facts.json",
+                "--coverage",
+            ])
+            .is_err(),
+            "offline load must not silently ignore recovery options"
+        );
+    }
+
+    #[test]
+    fn cli_saves_raw_fact_ir_and_loads_it_without_image_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("fixture");
+        let facts = directory.path().join("facts.json");
+        std::fs::write(&input, macho_test_support::disassembly_x86_64()).unwrap();
+
+        let save = crate::cli::commands::run_captured([
+            std::ffi::OsString::from("program"),
+            input.into_os_string(),
+            std::ffi::OsString::from("--stage"),
+            std::ffi::OsString::from("image-layout"),
+            std::ffi::OsString::from("--fact-ir-output"),
+            facts.clone().into_os_string(),
+        ]);
+        assert_eq!(save.code, 0, "{}", String::from_utf8_lossy(&save.stderr));
+
+        let raw = std::fs::read(&facts).unwrap();
+        let raw_value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(
+            raw_value["schema_version"],
+            crate::cli::analysis::program::PROGRAM_FACT_IR_SCHEMA_VERSION
+        );
+        assert!(raw_value.get("command").is_none());
+        assert!(raw_value.get("data").is_none());
+        let document = ProgramFactDocument::load_json(&raw).unwrap();
+        let loaded = RecoveredProgram::from_document(document).unwrap();
+        assert_eq!(
+            loaded.stage_status(ProgramRecoveryStage::ImageLayout),
+            crate::cli::analysis::program::ProgramStageStatus::Complete
+        );
+
+        let text = crate::cli::commands::run_captured([
+            std::ffi::OsString::from("program"),
+            std::ffi::OsString::from("--load-fact-ir"),
+            facts.clone().into_os_string(),
+        ]);
+        assert_eq!(text.code, 0, "{}", String::from_utf8_lossy(&text.stderr));
+        let text = String::from_utf8(text.stdout).unwrap();
+        assert!(text.contains(&format!(
+            "Program Fact IR v{}",
+            crate::cli::analysis::program::PROGRAM_FACT_IR_SCHEMA_VERSION
+        )));
+        assert!(text.contains("image_layout: Complete (requested)"));
+        assert!(text.contains("Guidance: independent"));
+
+        let json = crate::cli::commands::run_captured([
+            std::ffi::OsString::from("program"),
+            std::ffi::OsString::from("--load-fact-ir"),
+            facts.into_os_string(),
+            std::ffi::OsString::from("--format"),
+            std::ffi::OsString::from("json"),
+        ]);
+        assert_eq!(json.code, 0, "{}", String::from_utf8_lossy(&json.stderr));
+        let envelope: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(envelope["data"], raw_value);
+    }
+
+    #[test]
+    fn fact_ir_save_requires_one_exact_selected_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let input = directory.path().join("fixture");
+        let facts = directory.path().join("facts.json");
+        std::fs::write(&input, macho_test_support::disassembly_fat()).unwrap();
+
+        let ambiguous = crate::cli::commands::run_captured([
+            std::ffi::OsString::from("program"),
+            input.clone().into_os_string(),
+            std::ffi::OsString::from("--stage"),
+            std::ffi::OsString::from("image-layout"),
+            std::ffi::OsString::from("--fact-ir-output"),
+            facts.clone().into_os_string(),
+        ]);
+        assert_ne!(ambiguous.code, 0);
+        assert!(
+            String::from_utf8_lossy(&ambiguous.stderr)
+                .contains("requires exactly one selected image")
+        );
+        assert!(!facts.exists());
+
+        let selected = crate::cli::commands::run_captured([
+            std::ffi::OsString::from("program"),
+            input.into_os_string(),
+            std::ffi::OsString::from("--arch"),
+            std::ffi::OsString::from("x86_64"),
+            std::ffi::OsString::from("--stage"),
+            std::ffi::OsString::from("image-layout"),
+            std::ffi::OsString::from("--fact-ir-output"),
+            facts.clone().into_os_string(),
+        ]);
+        assert_eq!(
+            selected.code,
+            0,
+            "{}",
+            String::from_utf8_lossy(&selected.stderr)
+        );
+        ProgramFactDocument::load_json(&std::fs::read(facts).unwrap()).unwrap();
     }
 
     #[test]

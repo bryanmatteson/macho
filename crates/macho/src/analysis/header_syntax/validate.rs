@@ -158,43 +158,27 @@ pub fn validate(
     }
 
     for (index, declaration) in unit.declarations.iter().enumerate() {
+        if matches!(declaration, Decl::AccessSection { .. }) {
+            diagnostics.push(diagnostic(
+                HeaderValidationCode::SyntaxError,
+                "C++ access section is invalid outside a record".to_owned(),
+                index,
+            ));
+        }
         collect_declared_types(
             declaration,
             &mut declared_tags,
             &mut objc_classes,
             &mut objc_protocols,
         );
-        if let Some(identity) = declaration_identity(unit.language, declaration) {
-            if let Some((previous_index, previous)) = declarations.get(&identity) {
-                match redeclaration(unit.language, previous, declaration) {
-                    Redeclaration::Compatible { replace } => {
-                        diagnostics.push(diagnostic_with_severity(
-                            HeaderValidationCode::DuplicateDeclaration,
-                            Severity::Info,
-                            format!(
-                                "declaration `{identity}` is compatible with index {previous_index}"
-                            ),
-                            index,
-                        ));
-                        if replace {
-                            declarations.insert(identity, (index, declaration));
-                        }
-                    }
-                    Redeclaration::Duplicate => diagnostics.push(diagnostic(
-                        HeaderValidationCode::DuplicateDeclaration,
-                        format!("declaration `{identity}` duplicates index {previous_index}"),
-                        index,
-                    )),
-                    Redeclaration::Conflict => diagnostics.push(diagnostic(
-                        HeaderValidationCode::ConflictingRedeclaration,
-                        format!("declaration `{identity}` conflicts with index {previous_index}"),
-                        index,
-                    )),
-                }
-            } else {
-                declarations.insert(identity, (index, declaration));
-            }
-        }
+        collect_redeclarations(
+            unit.language,
+            declaration,
+            index,
+            "",
+            &mut declarations,
+            &mut diagnostics,
+        );
     }
 
     // Tree-sitter represents Objective-C class pointer spellings such as
@@ -229,6 +213,74 @@ pub fn validate(
         semantic_valid,
         diagnostics,
     })
+}
+
+fn collect_redeclarations<'a>(
+    language: crate::analysis::header_syntax::Language,
+    declaration: &'a Decl,
+    index: usize,
+    scope: &str,
+    declarations: &mut BTreeMap<String, (usize, &'a Decl)>,
+    diagnostics: &mut Vec<HeaderValidationDiagnostic>,
+) {
+    if let Decl::Namespace {
+        path,
+        declarations: nested,
+    } = declaration
+    {
+        let namespace = qualified_in_scope(scope, &path_string(path));
+        for declaration in nested {
+            collect_redeclarations(
+                language,
+                declaration,
+                index,
+                &namespace,
+                declarations,
+                diagnostics,
+            );
+        }
+        return;
+    }
+
+    let Some(identity) = declaration_identity(language, declaration) else {
+        return;
+    };
+    let identity = qualified_in_scope(scope, &identity);
+    if let Some((previous_index, previous)) = declarations.get(&identity) {
+        match redeclaration(language, previous, declaration) {
+            Redeclaration::Compatible { replace } => {
+                diagnostics.push(diagnostic_with_severity(
+                    HeaderValidationCode::DuplicateDeclaration,
+                    Severity::Info,
+                    format!("declaration `{identity}` is compatible with index {previous_index}"),
+                    index,
+                ));
+                if replace {
+                    declarations.insert(identity, (index, declaration));
+                }
+            }
+            Redeclaration::Duplicate => diagnostics.push(diagnostic(
+                HeaderValidationCode::DuplicateDeclaration,
+                format!("declaration `{identity}` duplicates index {previous_index}"),
+                index,
+            )),
+            Redeclaration::Conflict => diagnostics.push(diagnostic(
+                HeaderValidationCode::ConflictingRedeclaration,
+                format!("declaration `{identity}` conflicts with index {previous_index}"),
+                index,
+            )),
+        }
+    } else {
+        declarations.insert(identity, (index, declaration));
+    }
+}
+
+fn qualified_in_scope(scope: &str, name: &str) -> String {
+    if scope.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{scope}::{name}")
+    }
 }
 
 struct Budget {
@@ -269,6 +321,20 @@ impl Budget {
         }
         self.node()?;
         match declaration {
+            Decl::AccessSection { declarations, .. } => {
+                self.items("access-section declarations", declarations.len())?;
+                for declaration in declarations {
+                    self.declaration(declaration, depth + 1)?;
+                }
+                Ok(())
+            }
+            Decl::Namespace { declarations, .. } => {
+                self.items("namespace declarations", declarations.len())?;
+                for declaration in declarations {
+                    self.declaration(declaration, depth + 1)?;
+                }
+                Ok(())
+            }
             Decl::Function { signature, .. } => self.ty(signature, 1),
             Decl::Variable { ty, .. } | Decl::Alias { target: ty, .. } => self.ty(ty, 1),
             Decl::Record {
@@ -405,6 +471,17 @@ fn collect_declared_types(
     protocols: &mut BTreeSet<String>,
 ) {
     match declaration {
+        Decl::AccessSection { declarations, .. } => {
+            for declaration in declarations {
+                collect_declared_types(declaration, tags, classes, protocols);
+            }
+        }
+        Decl::Namespace { path, declarations } => {
+            let prefix = path_string(path);
+            for declaration in declarations {
+                collect_declared_types_in_namespace(declaration, &prefix, tags, classes, protocols);
+            }
+        }
         Decl::Record { path, members, .. } => {
             tags.insert(path_string(path));
             for member in members {
@@ -431,6 +508,54 @@ fn collect_declared_types(
     }
 }
 
+fn collect_declared_types_in_namespace(
+    declaration: &Decl,
+    namespace: &str,
+    tags: &mut BTreeSet<String>,
+    classes: &mut BTreeSet<String>,
+    protocols: &mut BTreeSet<String>,
+) {
+    match declaration {
+        Decl::AccessSection { declarations, .. } => {
+            for declaration in declarations {
+                collect_declared_types_in_namespace(
+                    declaration,
+                    namespace,
+                    tags,
+                    classes,
+                    protocols,
+                );
+            }
+        }
+        Decl::Namespace { path, declarations } => {
+            let namespace = format!("{namespace}::{}", path_string(path));
+            for declaration in declarations {
+                collect_declared_types_in_namespace(
+                    declaration,
+                    &namespace,
+                    tags,
+                    classes,
+                    protocols,
+                );
+            }
+        }
+        Decl::Record { path, members, .. } => {
+            let path = path_string(path);
+            tags.insert(path.clone());
+            tags.insert(format!("{namespace}::{path}"));
+            for member in members {
+                collect_declared_types_in_namespace(member, namespace, tags, classes, protocols);
+            }
+        }
+        Decl::Forward { path, .. } | Decl::Alias { path, .. } => {
+            let path = path_string(path);
+            tags.insert(path.clone());
+            tags.insert(format!("{namespace}::{path}"));
+        }
+        _ => collect_declared_types(declaration, tags, classes, protocols),
+    }
+}
+
 fn validate_decl(
     declaration: &Decl,
     index: usize,
@@ -440,6 +565,16 @@ fn validate_decl(
     diagnostics: &mut Vec<HeaderValidationDiagnostic>,
 ) {
     match declaration {
+        Decl::AccessSection { declarations, .. } => {
+            for declaration in declarations {
+                validate_decl(declaration, index, tags, classes, protocols, diagnostics);
+            }
+        }
+        Decl::Namespace { declarations, .. } => {
+            for declaration in declarations {
+                validate_decl(declaration, index, tags, classes, protocols, diagnostics);
+            }
+        }
         Decl::Function { signature, .. } => {
             validate_type(signature, index, tags, protocols, diagnostics)
         }
@@ -667,27 +802,12 @@ fn validate_type(
 }
 
 fn validate_cycles(declarations: &[Decl], diagnostics: &mut Vec<HeaderValidationDiagnostic>) {
-    let graph = declarations
-        .iter()
-        .filter_map(|declaration| {
-            let Decl::Record { path, bases, .. } = declaration else {
-                return None;
-            };
-            let dependencies = bases
-                .iter()
-                .filter_map(|base| match &base.ty {
-                    Type::Named { path, .. } => Some(path_string(path)),
-                    _ => None,
-                })
-                .collect::<BTreeSet<_>>();
-            Some((path_string(path), dependencies))
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut graph = BTreeMap::new();
+    let mut records = Vec::new();
     for (index, declaration) in declarations.iter().enumerate() {
-        let Decl::Record { path, .. } = declaration else {
-            continue;
-        };
-        let start = path_string(path);
+        collect_record_dependencies(declaration, index, "", &mut graph, &mut records);
+    }
+    for (start, index) in records {
         if reaches(&graph, &start, &start, &mut BTreeSet::new()) {
             diagnostics.push(diagnostic(
                 HeaderValidationCode::DependencyCycle,
@@ -695,6 +815,48 @@ fn validate_cycles(declarations: &[Decl], diagnostics: &mut Vec<HeaderValidation
                 index,
             ));
         }
+    }
+}
+
+fn collect_record_dependencies(
+    declaration: &Decl,
+    index: usize,
+    scope: &str,
+    graph: &mut BTreeMap<String, BTreeSet<String>>,
+    records: &mut Vec<(String, usize)>,
+) {
+    match declaration {
+        Decl::AccessSection { declarations, .. } => {
+            for declaration in declarations {
+                collect_record_dependencies(declaration, index, scope, graph, records);
+            }
+        }
+        Decl::Namespace { path, declarations } => {
+            let namespace = qualified_in_scope(scope, &path_string(path));
+            for declaration in declarations {
+                collect_record_dependencies(declaration, index, &namespace, graph, records);
+            }
+        }
+        Decl::Record { path, bases, .. } => {
+            let start = qualified_in_scope(scope, &path_string(path));
+            let dependencies = bases
+                .iter()
+                .filter_map(|base| match &base.ty {
+                    Type::Named { path, .. } => {
+                        let name = path_string(path);
+                        Some(if name.contains("::") {
+                            name
+                        } else {
+                            qualified_in_scope(scope, &name)
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            graph.insert(start.clone(), dependencies);
+            records.push((start, index));
+        }
+        _ => {}
     }
 }
 
@@ -777,6 +939,22 @@ mod tests {
             report.diagnostics[0].code,
             HeaderValidationCode::DuplicateDeclaration
         );
+    }
+
+    #[test]
+    fn conflicting_redeclarations_across_reopened_namespaces_are_rejected() {
+        let unit = crate::analysis::header_syntax::TreeSitterHeaderParser
+            .parse(
+                Language::Cpp,
+                "namespace sample { int transform(int value); }\n\
+                 namespace sample { long transform(int value); }",
+            )
+            .unwrap();
+        let report = validate(&unit, ValidationLimits::default()).unwrap();
+        assert!(!report.semantic_valid);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == HeaderValidationCode::ConflictingRedeclaration
+        }));
     }
 
     #[test]

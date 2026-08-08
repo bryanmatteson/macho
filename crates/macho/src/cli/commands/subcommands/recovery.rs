@@ -2,7 +2,7 @@
 
 mod header;
 
-use header::project_entity;
+use header::{project_entity, project_entity_with_owner};
 
 use std::collections::BTreeSet;
 use std::io::Write;
@@ -12,10 +12,15 @@ use crate::analysis::report::{
     AnalysisLevel, CollectorCounts, CollectorExecution, CollectorId, CollectorOutcome, EntityKind,
     Fact, HashedHeaderFile, HashedHeaderRoot, HeaderCorrelationInput, HeaderGap,
     HeaderIneligibilityReason, HeaderProjection, HeaderProjectionSpec, HeaderValidationReport,
-    LogicalInputLabel, NonEmpty, ObservationDisposition, Presence, RecoveryGapReason,
-    RecoveryLanguage, RecoveryReport, RecoveryScope, RecoveryView, ValidatedGlob, canonical_json,
+    LogicalInputLabel, NonEmpty, ObservationDisposition, Presence, RecoveryGapId, RecoveryLanguage,
+    RecoveryReport, RecoveryScope, RecoveryView, ValidatedGlob, canonical_json,
     execute_header_correlation, execute_recovery_abi, execute_recovery_sources,
     recover_symbol_container, sha256_hex,
+};
+use crate::analysis::hypothesis::{
+    DecisionAuthority, EvidenceAuthority, HypothesisCandidate, HypothesisConsequence,
+    HypothesisLedger, HypothesisSelectionPolicy, HypothesisSubject, RecoveryHypothesis,
+    SelectionPolicyMode,
 };
 use crate::header_syntax::{
     self as syntax, HeaderParser as _, Language, TreeSitterHeaderParser, ValidationLimits,
@@ -54,6 +59,27 @@ pub enum EvidenceArg {
     Sources,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
+pub enum ProjectionPolicyArg {
+    /// Project independent and explicitly selected facts only.
+    #[default]
+    Strict,
+    /// Retain strict output and emit ranked hypotheses for blockers.
+    Suggest,
+    /// Permit the top-ranked hypothesis to affect projection.
+    BestEffort,
+}
+
+impl From<ProjectionPolicyArg> for SelectionPolicyMode {
+    fn from(value: ProjectionPolicyArg) -> Self {
+        match value {
+            ProjectionPolicyArg::Strict => Self::Strict,
+            ProjectionPolicyArg::Suggest => Self::Suggest,
+            ProjectionPolicyArg::BestEffort => Self::BestEffort,
+        }
+    }
+}
+
 /// Shared plan arguments for C and C++ recovery.
 #[derive(Debug, Clone, Args)]
 pub struct RecoveryArgs {
@@ -81,6 +107,9 @@ pub struct RecoveryArgs {
     /// Add a deterministic external header root as `LABEL=PATH`.
     #[arg(long = "header-root", value_name = "LABEL=PATH")]
     pub header_roots: Vec<String>,
+    /// Control whether ranked recovery hypotheses may affect C++ headers.
+    #[arg(long = "projection-policy", value_enum, default_value = "strict")]
+    pub projection_policy: ProjectionPolicyArg,
 }
 
 pub fn run(
@@ -97,6 +126,13 @@ pub fn run(
         ));
     }
     let view = resolved_view(args.view, args.headers)?;
+    if args.projection_policy != ProjectionPolicyArg::Strict
+        && (language != RecoveryLanguage::Cpp || view != ViewArg::Header)
+    {
+        return Err(usage_message(
+            "--projection-policy suggest|best-effort is currently supported only by C++ header projection",
+        ));
+    }
     if args.evidence.is_some() && (output.format() != OutputFormat::Text || view == ViewArg::Header)
     {
         return Err(usage_message(
@@ -116,7 +152,7 @@ pub fn run(
                 .map_err(|error| usage_message(format!("invalid --name `{value}`: {error}")))
         })
         .collect::<Result<Vec<_>>>()?;
-    apply_selection(&mut report, args.scope, kinds, globs);
+    apply_selection(&mut report, args.scope, kinds, globs, language, view);
     report.request.analysis = match args.analysis {
         AnalysisArg::Sources => AnalysisLevel::Sources,
         AnalysisArg::Abi => AnalysisLevel::Abi,
@@ -135,7 +171,14 @@ pub fn run(
                 "header output requires exactly one selected architecture; use a qualified --arch such as arm64e",
             ));
         }
-        project_headers(&mut report, language)?;
+        project_headers(
+            &mut report,
+            language,
+            HypothesisSelectionPolicy {
+                mode: args.projection_policy.into(),
+                overrides: Vec::new(),
+            },
+        )?;
     }
     report.request.view = match view {
         ViewArg::Surface => RecoveryView::Surface,
@@ -221,6 +264,8 @@ fn apply_selection(
     scope: ScopeArg,
     kinds: Vec<EntityKind>,
     globs: Vec<ValidatedGlob>,
+    language: RecoveryLanguage,
+    view: ViewArg,
 ) {
     report.request.selection.scope = match scope {
         ScopeArg::Defined => RecoveryScope::Defined,
@@ -234,6 +279,11 @@ fn apply_selection(
             .entities
             .iter()
             .filter(|entity| scope_matches(scope, entity_presence(entity)))
+            .filter(|entity| {
+                view != ViewArg::Header
+                    || entity_kind(entity)
+                        .is_some_and(|kind| header_projectable_kind(language, kind))
+            })
             .filter(|entity| {
                 kinds.is_empty() || entity_kind(entity).is_some_and(|kind| kinds.contains(&kind))
             })
@@ -258,7 +308,30 @@ fn apply_selection(
     }
 }
 
-fn project_headers(report: &mut RecoveryReport, language: RecoveryLanguage) -> Result<()> {
+fn header_projectable_kind(language: RecoveryLanguage, kind: EntityKind) -> bool {
+    match language {
+        RecoveryLanguage::CAbi => {
+            matches!(
+                kind,
+                EntityKind::Function | EntityKind::Data | EntityKind::Tls
+            )
+        }
+        RecoveryLanguage::Cpp => matches!(
+            kind,
+            EntityKind::Function
+                | EntityKind::Method
+                | EntityKind::Data
+                | EntityKind::Tls
+                | EntityKind::Type
+        ),
+    }
+}
+
+fn project_headers(
+    report: &mut RecoveryReport,
+    language: RecoveryLanguage,
+    selection_policy: HypothesisSelectionPolicy,
+) -> Result<()> {
     for slice in report.slices.as_mut_slice() {
         let selected = slice.resolved_plan.selected_entity_ids.clone();
         let selected_set = selected
@@ -273,28 +346,32 @@ fn project_headers(report: &mut RecoveryReport, language: RecoveryLanguage) -> R
             .iter()
             .filter(|entity| selected_set.contains(entity.id.as_str()))
         {
-            if let Some((wire, syntax)) = project_entity(entity, language) {
-                declarations.push(wire);
-                syntax_declarations.push(syntax);
-            } else {
-                unresolved.extend(entity.gaps.iter().map(|gap| HeaderGap {
+            match project_entity(entity, language) {
+                Ok((wire, syntax)) => {
+                    declarations.push(wire);
+                    syntax_declarations.push(syntax);
+                }
+                Err(blocker) => unresolved.push(HeaderGap {
+                    id: header_gap_id(&entity.id, blocker.field, blocker.reason),
                     entity_id: entity.id.clone(),
-                    field: gap.field,
-                    reason: header_reason(&gap.reason),
+                    field: blocker.field,
+                    reason: blocker.reason,
+                    declaration_template: header_declaration_template(entity, language, blocker),
                     diagnostic_ids: Vec::new(),
-                }));
+                }),
             }
         }
         let syntax_language = match language {
             RecoveryLanguage::CAbi => Language::C,
             RecoveryLanguage::Cpp => Language::Cpp,
         };
+        let syntax_declarations = merge_cpp_owner_declarations(syntax_declarations);
         let source = if syntax_declarations.is_empty() {
-            format!(
-                "#pragma once\n/* macho {} recovery: 0 declarations emitted; {} unresolved facts across {} selected entities. */\n",
-                language_name(language),
-                unresolved.len(),
-                selected.len()
+            empty_header_source(
+                language,
+                selected.len(),
+                &unresolved,
+                slice.executions.as_slice(),
             )
         } else {
             syntax::render(&syntax::TranslationUnit {
@@ -345,11 +422,273 @@ fn project_headers(report: &mut RecoveryReport, language: RecoveryLanguage) -> R
     Ok(())
 }
 
-fn header_reason(reason: &RecoveryGapReason) -> HeaderIneligibilityReason {
-    match reason {
-        RecoveryGapReason::Unavailable { .. } => HeaderIneligibilityReason::UnavailableRequiredFact,
-        RecoveryGapReason::Conflicted { .. } => HeaderIneligibilityReason::ConflictedRequiredFact,
-        RecoveryGapReason::HeaderIneligible { reason } => *reason,
+fn merge_cpp_owner_declarations(
+    declarations: Vec<crate::header_syntax::Decl>,
+) -> Vec<crate::header_syntax::Decl> {
+    let mut merged = Vec::new();
+    for declaration in declarations {
+        merge_cpp_owner_declaration(&mut merged, declaration);
+    }
+    merged
+}
+
+fn merge_cpp_owner_declaration(
+    declarations: &mut Vec<crate::header_syntax::Decl>,
+    declaration: crate::header_syntax::Decl,
+) {
+    use crate::header_syntax::Decl;
+
+    match declaration {
+        Decl::Namespace {
+            path,
+            declarations: nested,
+        } => {
+            if let Some(Decl::Namespace { declarations, .. }) = declarations
+                .iter_mut()
+                .find(|item| matches!(item, Decl::Namespace { path: candidate, .. } if candidate == &path))
+            {
+                for item in nested {
+                    merge_cpp_owner_declaration(declarations, item);
+                }
+            } else {
+                declarations.push(Decl::Namespace {
+                    path,
+                    declarations: merge_cpp_owner_declarations(nested),
+                });
+            }
+        }
+        Decl::Record {
+            kind,
+            path,
+            bases,
+            fields,
+            members,
+        } => {
+            if let Some(index) = declarations.iter().position(
+                |item| matches!(item, Decl::Forward { kind: candidate_kind, path: candidate_path } if candidate_kind == &kind && candidate_path == &path),
+            ) {
+                declarations.remove(index);
+            }
+            if let Some(Decl::Record {
+                bases: existing_bases,
+                fields: existing_fields,
+                members: existing_members,
+                ..
+            }) = declarations.iter_mut().find(|item| {
+                matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path)
+            }) {
+                if existing_bases.is_empty() {
+                    *existing_bases = bases;
+                }
+                if existing_fields.is_empty() {
+                    *existing_fields = fields;
+                }
+                for member in members {
+                    merge_cpp_owner_declaration(existing_members, member);
+                }
+            } else {
+                declarations.push(Decl::Record {
+                    kind,
+                    path,
+                    bases,
+                    fields,
+                    members: merge_cpp_owner_declarations(members),
+                });
+            }
+        }
+        Decl::AccessSection {
+            access,
+            declarations: nested,
+        } => {
+            if let Some(Decl::AccessSection { declarations, .. }) = declarations
+                .iter_mut()
+                .find(|item| matches!(item, Decl::AccessSection { access: candidate, .. } if candidate == &access))
+            {
+                for item in nested {
+                    merge_cpp_owner_declaration(declarations, item);
+                }
+            } else {
+                declarations.push(Decl::AccessSection {
+                    access,
+                    declarations: merge_cpp_owner_declarations(nested),
+                });
+            }
+        }
+        Decl::Forward { kind, path }
+            if declarations.iter().any(
+                |item| matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path),
+            ) => {}
+        other => declarations.push(other),
+    }
+}
+
+fn header_gap_id(
+    entity_id: &crate::analysis::report::EntityId,
+    field: crate::analysis::report::RecoveryField,
+    reason: HeaderIneligibilityReason,
+) -> RecoveryGapId {
+    RecoveryGapId::new(sha256_hex(
+        format!("header_projection_gap|{entity_id}|{field:?}|{reason:?}").as_bytes(),
+    ))
+    .expect("SHA-256 header projection gap ID")
+}
+
+fn header_declaration_template(
+    entity: &crate::analysis::report::RecoveredEntity,
+    language: RecoveryLanguage,
+    blocker: header::ProjectionBlocker,
+) -> Option<crate::analysis::report::HeaderDecl> {
+    use crate::analysis::report::{HeaderIneligibilityReason, HeaderOwnerKind, HeaderOwnerRef};
+
+    if blocker.reason != HeaderIneligibilityReason::UnprovenOwner {
+        return None;
+    }
+    let mut components = entity_name(entity)
+        .split("::")
+        .map(|component| crate::analysis::report::Identifier::new(component.to_owned()).ok())
+        .collect::<Option<Vec<_>>>()?;
+    components.pop()?;
+    let scope_kinds = vec![HeaderOwnerKind::Namespace; components.len()];
+    let scope_access = vec![None; components.len()];
+    let owner = HeaderOwnerRef {
+        path: NonEmpty::new(components).ok()?,
+        scope_kinds: NonEmpty::new(scope_kinds).ok()?,
+        scope_access: NonEmpty::new(scope_access).ok()?,
+        member_access: None,
+        entity_id: None,
+    };
+    let (mut declaration, _) = project_entity_with_owner(entity, language, Some(&owner)).ok()?;
+    strip_declaration_owner(&mut declaration)?;
+    Some(declaration)
+}
+
+fn strip_declaration_owner(declaration: &mut crate::analysis::report::HeaderDecl) -> Option<()> {
+    use crate::analysis::report::HeaderDecl;
+
+    match declaration {
+        HeaderDecl::Function { owner, .. } | HeaderDecl::Variable { owner, .. } => *owner = None,
+        HeaderDecl::Record { path, .. }
+        | HeaderDecl::Forward { path, .. }
+        | HeaderDecl::Alias { path, .. } => {
+            *path = NonEmpty::new(vec![path.as_slice().last()?.clone()]).ok()?;
+        }
+        HeaderDecl::ObjcInterface { .. }
+        | HeaderDecl::ObjcCategory { .. }
+        | HeaderDecl::ObjcProtocol { .. }
+        | HeaderDecl::ObjcForward { .. } => return None,
+    }
+    Some(())
+}
+
+fn empty_header_source(
+    language: RecoveryLanguage,
+    selected: usize,
+    unresolved: &[HeaderGap],
+    executions: &[CollectorExecution],
+) -> String {
+    let mut blockers = std::collections::BTreeMap::<(&'static str, &'static str), usize>::new();
+    for gap in unresolved {
+        *blockers
+            .entry((
+                recovery_field_name(gap.field),
+                header_reason_name(gap.reason),
+            ))
+            .or_default() += 1;
+    }
+    let mut source = format!(
+        "#pragma once\n/*\n * macho {} recovery: no independently projectable declarations.\n * selected source entities: {selected}; exact projection blockers: {}.\n",
+        language_name(language),
+        unresolved.len()
+    );
+    for execution in executions {
+        if let CollectorOutcome::Unsupported { reason } = execution.outcome {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                source,
+                " * collector {}: unsupported ({}).",
+                collector_name(execution.collector),
+                unsupported_reason_name(reason)
+            );
+        }
+    }
+    if !blockers.is_empty() {
+        source.push_str(" * blockers:\n");
+        for ((field, reason), count) in blockers {
+            use std::fmt::Write as _;
+            let _ = writeln!(source, " *   {field}/{reason}: {count}");
+        }
+        source.push_str(" * exact blocker IDs: JSON slices[].header.unresolved[].id\n");
+        source.push_str(
+            " * next: emit --format json, then use macho header-infer export --all-header-gaps.\n",
+        );
+    }
+    source.push_str(" */\n");
+    source
+}
+
+fn collector_name(value: CollectorId) -> &'static str {
+    match value {
+        CollectorId::SymbolDiscovery => "symbol_discovery",
+        CollectorId::FunctionRanges => "function_ranges",
+        CollectorId::Dwarf => "dwarf",
+        CollectorId::Rtti => "rtti",
+        CollectorId::Vtables => "vtables",
+        CollectorId::HeaderCorrelation => "header_correlation",
+        CollectorId::AbiBody => "abi_body",
+        CollectorId::HeaderProjection => "header_projection",
+    }
+}
+
+fn unsupported_reason_name(value: crate::analysis::report::UnsupportedReasonCode) -> &'static str {
+    use crate::analysis::report::UnsupportedReasonCode;
+    match value {
+        UnsupportedReasonCode::Architecture => "architecture",
+        UnsupportedReasonCode::Format => "format",
+        UnsupportedReasonCode::MissingSection => "missing_section",
+        UnsupportedReasonCode::MissingDebugInfo => "missing_debug_info",
+        UnsupportedReasonCode::MissingRuntimeMetadata => "missing_runtime_metadata",
+        UnsupportedReasonCode::HeaderLanguageSubset => "header_language_subset",
+    }
+}
+
+fn recovery_field_name(value: crate::analysis::report::RecoveryField) -> &'static str {
+    use crate::analysis::report::RecoveryField;
+    match value {
+        RecoveryField::Linkage => "linkage",
+        RecoveryField::DisplayName => "display_name",
+        RecoveryField::Role => "role",
+        RecoveryField::Presence => "presence",
+        RecoveryField::Visibility => "visibility",
+        RecoveryField::Weakness => "weakness",
+        RecoveryField::Location => "location",
+        RecoveryField::Owner => "owner",
+        RecoveryField::ValueType => "value_type",
+        RecoveryField::ReturnType => "return_type",
+        RecoveryField::Parameters => "parameters",
+        RecoveryField::Variadic => "variadic",
+        RecoveryField::CallingConvention => "calling_convention",
+        RecoveryField::Qualifiers => "qualifiers",
+        RecoveryField::LayoutSize => "layout_size",
+        RecoveryField::LayoutAlignment => "layout_alignment",
+        RecoveryField::LayoutFields => "layout_fields",
+        RecoveryField::LayoutCompleteness => "layout_completeness",
+        RecoveryField::Bases => "bases",
+        RecoveryField::VirtualSurface => "virtual_surface",
+    }
+}
+
+fn header_reason_name(value: HeaderIneligibilityReason) -> &'static str {
+    match value {
+        HeaderIneligibilityReason::UnavailableRequiredFact => "unavailable_required_fact",
+        HeaderIneligibilityReason::ConflictedRequiredFact => "conflicted_required_fact",
+        HeaderIneligibilityReason::AbiClassIsNotSourceType => "abi_class_is_not_source_type",
+        HeaderIneligibilityReason::UnsupportedType => "unsupported_type",
+        HeaderIneligibilityReason::UnsupportedCallingConvention => "unsupported_calling_convention",
+        HeaderIneligibilityReason::UnprovenOwner => "unproven_owner",
+        HeaderIneligibilityReason::IncompleteLayout => "incomplete_layout",
+        HeaderIneligibilityReason::IncompleteTemplateContext => "incomplete_template_context",
+        HeaderIneligibilityReason::InvalidLinkage => "invalid_linkage",
+        HeaderIneligibilityReason::SemanticValidationFailed => "semantic_validation_failed",
     }
 }
 

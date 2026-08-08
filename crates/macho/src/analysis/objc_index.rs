@@ -1,9 +1,7 @@
 //! Bounded image-bound Objective-C runtime metadata recovery.
 
 use crate::core::model::macho_file::MachoFile;
-use crate::metadata::objc::strict::{
-    StrictObjCBatch, StrictObjCLimits, StrictObjCOutcome, decode_strict_objc,
-};
+use crate::metadata::objc::strict::{StrictObjCLimits, StrictObjCOutcome, decode_strict_objc};
 use crate::metadata::objc::{ObjCMethodKind, ObjCRecordKind};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -178,7 +176,8 @@ pub struct ObjcIndexCompleteness {
 }
 
 /// Deterministic strict Objective-C inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ObjcIndex {
     image: FunctionImageIdentity,
     limits: ObjcRecoveryLimits,
@@ -187,8 +186,6 @@ pub struct ObjcIndex {
     classes: Vec<RecoveredObjcClass>,
     protocols: Vec<RecoveredObjcProtocol>,
     completeness: ObjcIndexCompleteness,
-    #[serde(skip)]
-    outcome: StrictObjCOutcome,
 }
 
 impl ObjcIndex {
@@ -200,6 +197,26 @@ impl ObjcIndex {
         let limits = limits.validate()?;
         let outcome = decode_strict_objc(macho, limits.strict())
             .map_err(|error| ObjcRecoveryError::Decode(error.to_string()))?;
+        Self::from_outcome(macho, limits, outcome)
+    }
+
+    /// Recover from the selected-image evidence session used by program recovery.
+    pub fn recover_with_evidence(
+        evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+        limits: ObjcRecoveryLimits,
+    ) -> Result<Self, ObjcRecoveryError> {
+        let limits = limits.validate()?;
+        let outcome = evidence
+            .objective_c(limits.strict())
+            .map_err(|error| ObjcRecoveryError::Decode(error.to_string()))?;
+        Self::from_outcome(evidence.image(), limits, outcome)
+    }
+
+    fn from_outcome(
+        macho: &MachoFile<'_>,
+        limits: ObjcRecoveryLimits,
+        outcome: StrictObjCOutcome,
+    ) -> Result<Self, ObjcRecoveryError> {
         let (mut entities, mut methods, mut classes, mut protocols, completeness) =
             project_outcome(macho, &outcome);
         entities.sort_by_key(|entity| (entity.address, entity.kind, entity.name.clone()));
@@ -213,7 +230,7 @@ impl ObjcIndex {
         });
         classes.sort_by(|left, right| left.name.cmp(&right.name));
         protocols.sort_by(|left, right| left.name.cmp(&right.name));
-        Ok(Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits,
             entities,
@@ -221,8 +238,9 @@ impl ObjcIndex {
             classes,
             protocols,
             completeness,
-            outcome,
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact selected-image identity.
@@ -253,19 +271,6 @@ impl ObjcIndex {
     /// Runtime protocols sorted by name.
     pub fn protocols(&self) -> &[RecoveredObjcProtocol] {
         &self.protocols
-    }
-
-    /// Strict leaf outcome, including the complete semantic metadata graph.
-    pub const fn outcome(&self) -> &StrictObjCOutcome {
-        &self.outcome
-    }
-
-    /// Complete strict batch, when every observation was conserved.
-    pub fn complete_batch(&self) -> Option<&StrictObjCBatch> {
-        match &self.outcome {
-            StrictObjCOutcome::Complete(batch) => Some(batch),
-            StrictObjCOutcome::Absent | StrictObjCOutcome::Rejected(_) => None,
-        }
     }
 
     /// Overall completion state.
@@ -308,6 +313,115 @@ impl ObjcIndex {
         self.methods
             .iter()
             .filter(move |method| method.selector == selector)
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.entities.len() > self.limits.max_observations
+            || self.classes.len() > self.limits.max_entities
+            || self.protocols.len() > self.limits.max_entities
+            || self.methods.len() > self.limits.max_methods
+        {
+            return false;
+        }
+
+        let entities_are_canonical = self.entities.windows(2).all(|pair| {
+            (pair[0].address, pair[0].kind, &pair[0].name)
+                <= (pair[1].address, pair[1].kind, &pair[1].name)
+        });
+        let methods_are_canonical = self.methods.windows(2).all(|pair| {
+            (
+                pair[0].implementation,
+                pair[0].record_address,
+                &pair[0].class_name,
+                &pair[0].selector,
+            ) <= (
+                pair[1].implementation,
+                pair[1].record_address,
+                &pair[1].class_name,
+                &pair[1].selector,
+            )
+        });
+        let classes_are_canonical = self
+            .classes
+            .windows(2)
+            .all(|pair| pair[0].name <= pair[1].name);
+        let protocols_are_canonical = self
+            .protocols
+            .windows(2)
+            .all(|pair| pair[0].name <= pair[1].name);
+        let class_protocols_are_canonical = self
+            .classes
+            .iter()
+            .all(|class| class.protocols.windows(2).all(|pair| pair[0] < pair[1]));
+        let reasons_are_canonical = self
+            .completeness
+            .reasons
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+        let conserved = self
+            .completeness
+            .included
+            .checked_add(self.completeness.unknown)
+            .and_then(|count| count.checked_add(self.completeness.excluded));
+        let retained = self
+            .entities
+            .len()
+            .checked_add(self.methods.len())
+            .and_then(|count| u64::try_from(count).ok());
+        let payload_is_empty = self.entities.is_empty()
+            && self.methods.is_empty()
+            && self.classes.is_empty()
+            && self.protocols.is_empty();
+        let receipt_matches_payload = match self.completeness.status {
+            ObjcIndexStatus::Absent => {
+                payload_is_empty
+                    && self.completeness.reasons.is_empty()
+                    && self.completeness.attempted == 0
+                    && self.completeness.included == 0
+                    && self.completeness.unknown == 0
+                    && self.completeness.excluded == 0
+            }
+            ObjcIndexStatus::Complete => {
+                self.completeness.reasons.is_empty()
+                    && self.completeness.unknown == 0
+                    && self.completeness.excluded == 0
+                    && retained == Some(self.completeness.included)
+            }
+            ObjcIndexStatus::Partial | ObjcIndexStatus::Truncated => {
+                let truncated = self.completeness.reasons.iter().any(|reason| {
+                    reason.contains("limit")
+                        || reason.contains("budget")
+                        || reason.contains("overflow")
+                });
+                payload_is_empty
+                    && !self.completeness.reasons.is_empty()
+                    && self.completeness.included == 0
+                    && self.completeness.unknown == self.completeness.attempted
+                    && self.completeness.excluded == 0
+                    && truncated == (self.completeness.status == ObjcIndexStatus::Truncated)
+            }
+        };
+
+        entities_are_canonical
+            && methods_are_canonical
+            && classes_are_canonical
+            && protocols_are_canonical
+            && class_protocols_are_canonical
+            && reasons_are_canonical
+            && conserved == Some(self.completeness.attempted)
+            && receipt_matches_payload
+            && self.entities.iter().all(|entity| !entity.name.is_empty())
+            && self.methods.iter().all(|method| {
+                !method.class_name.is_empty()
+                    && !method.selector.is_empty()
+                    && method.record_file_offset < self.image.byte_len
+            })
+            && self.classes.iter().all(|class| !class.name.is_empty())
+            && self
+                .protocols
+                .iter()
+                .all(|protocol| !protocol.name.is_empty())
     }
 }
 

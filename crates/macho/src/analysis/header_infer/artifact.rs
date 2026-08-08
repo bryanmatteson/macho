@@ -62,10 +62,10 @@ impl Default for HypothesisLimits {
             max_target_entities: 512,
             max_fact_excerpts: 8_192,
             max_evidence_excerpts: 4_096,
-            max_bundle_bytes: 1_048_576,
-            max_prompt_bytes: 1_048_576,
-            max_response_bytes: 1_048_576,
-            max_rendered_header_bytes: 1_048_576,
+            max_bundle_bytes: 2_097_152,
+            max_prompt_bytes: 2_097_152,
+            max_response_bytes: 2_097_152,
+            max_rendered_header_bytes: 2_097_152,
         }
     }
 }
@@ -145,6 +145,8 @@ pub struct HypothesisTarget {
     pub gap_ids: NonEmpty<RecoveryGapId>,
     /// Closed operation set available for these gaps.
     pub allowed_operations: NonEmpty<HypothesisOperationKind>,
+    /// Macho-derived terminal declaration that a grouping operation may qualify.
+    pub projection_template: Option<HeaderDecl>,
 }
 
 /// Source-equal canonical projection of one evidence record.
@@ -339,6 +341,53 @@ impl HypothesisBundle {
                     return Err(ArtifactError::Invalid(format!(
                         "duplicate target gap {gap}"
                     )));
+                }
+            }
+            let allows_grouping = target
+                .allowed_operations
+                .as_slice()
+                .contains(&HypothesisOperationKind::ProposeGrouping);
+            if allows_grouping != target.projection_template.is_some() {
+                return Err(ArtifactError::Invalid(
+                    "grouping target must carry exactly one projection template".into(),
+                ));
+            }
+            if let Some(template) = &target.projection_template {
+                let template_id = match template {
+                    HeaderDecl::Function { id, owner, .. }
+                    | HeaderDecl::Variable { id, owner, .. } => {
+                        if owner.is_some() {
+                            return Err(ArtifactError::Invalid(
+                                "grouping function or variable template already has an owner"
+                                    .into(),
+                            ));
+                        }
+                        id
+                    }
+                    HeaderDecl::Record { id, path, .. }
+                    | HeaderDecl::Forward { id, path, .. }
+                    | HeaderDecl::Alias { id, path, .. } => {
+                        if path.as_slice().len() != 1 {
+                            return Err(ArtifactError::Invalid(
+                                "grouping type template must have one terminal path component"
+                                    .into(),
+                            ));
+                        }
+                        id
+                    }
+                    HeaderDecl::ObjcInterface { .. }
+                    | HeaderDecl::ObjcCategory { .. }
+                    | HeaderDecl::ObjcProtocol { .. }
+                    | HeaderDecl::ObjcForward { .. } => {
+                        return Err(ArtifactError::Invalid(
+                            "C/C++ projection template contains an Objective-C declaration".into(),
+                        ));
+                    }
+                };
+                if template_id != &target.entity_id {
+                    return Err(ArtifactError::Invalid(
+                        "projection template does not match its grouping target".into(),
+                    ));
                 }
             }
         }

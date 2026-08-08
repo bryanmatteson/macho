@@ -11,6 +11,11 @@ mod ranges;
 
 /// Hard limits for one deterministic DWARF traversal.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfTraversalLimits {
     /// Maximum combined uncompressed section bytes.
     pub max_section_bytes: u64,
@@ -41,9 +46,14 @@ impl Default for DwarfTraversalLimits {
 
 /// Exact Mach-O section custody for one loaded DWARF section.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfSectionReceipt {
     /// Canonical DWARF section identity.
-    pub section_id: &'static str,
+    pub section_id: String,
     /// Mach-O segment spelling.
     pub segment_name: String,
     /// Mach-O section spelling.
@@ -56,6 +66,11 @@ pub struct DwarfSectionReceipt {
 
 /// One compilation or type unit header.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfUnitRecord {
     /// Unit ordinal in section order.
     pub ordinal: u64,
@@ -81,6 +96,11 @@ pub struct DwarfUnitRecord {
 
 /// One retained DIE in physical depth-first order.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfEntryRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -102,6 +122,11 @@ pub struct DwarfEntryRecord {
 
 /// One form-bearing DIE attribute.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfAttributeRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -135,6 +160,11 @@ pub struct DwarfAttributeRecord {
 
 /// One physical source file table entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfSourceFileRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -154,6 +184,11 @@ pub struct DwarfSourceFileRecord {
 
 /// One emitted physical line-program row, including terminal rows.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfLineRowRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -187,6 +222,11 @@ pub struct DwarfLineRowRecord {
 
 /// One `DW_AT_ranges` list attached to a physical DIE attribute.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfRangeListRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -210,6 +250,11 @@ pub struct DwarfRangeListRecord {
 
 /// One raw physical range-list entry and its bounded resolution.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfRangeEntryRecord {
     /// Owning unit ordinal.
     pub unit_ordinal: u64,
@@ -239,6 +284,11 @@ pub struct DwarfRangeEntryRecord {
 
 /// Complete bounded traversal receipt for the supported in-image DWARF package.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "analysis",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub struct DwarfTraversal {
     /// Exact section custody sorted by DWARF section identity.
     pub sections: Vec<DwarfSectionReceipt>,
@@ -345,14 +395,14 @@ fn section_receipts(
             .map_err(Error::from)?
             .to_vec();
         receipts.push(DwarfSectionReceipt {
-            section_id: id.name(),
+            section_id: id.name().to_owned(),
             segment_name: section.segment_name().to_string(),
             section_name: section.section_name().to_string(),
             file_offset: section.offset().0,
             bytes,
         });
     }
-    receipts.sort_by_key(|receipt| receipt.section_id);
+    receipts.sort_by(|left, right| left.section_id.cmp(&right.section_id));
     Ok(receipts)
 }
 

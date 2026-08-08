@@ -102,7 +102,8 @@ pub struct ImageLayoutCompleteness {
 }
 
 /// Deterministic address-layout index for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ImageLayoutIndex {
     image: FunctionImageIdentity,
     limits: ImageLayoutLimits,
@@ -245,5 +246,52 @@ impl ImageLayoutIndex {
             let relative = file_offset.checked_sub(segment.file_offset)?;
             (relative < segment.file_size).then(|| segment.address + relative)
         })
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let segments_are_sorted = self
+            .segments
+            .windows(2)
+            .all(|pair| (pair[0].address, pair[0].ordinal) < (pair[1].address, pair[1].ordinal));
+        let sections_are_sorted = self
+            .sections
+            .windows(2)
+            .all(|pair| (pair[0].address, pair[0].ordinal) < (pair[1].address, pair[1].ordinal));
+        let segments_are_well_formed = self.segments.iter().all(|segment| {
+            segment.file_size <= segment.size
+                && segment.address.checked_add(segment.size).is_some()
+                && segment
+                    .file_offset
+                    .checked_add(segment.file_size)
+                    .is_some_and(|end| end <= self.image.byte_len)
+        });
+        let sections_are_well_formed = self.sections.iter().all(|section| {
+            section.address.checked_add(section.size).is_some()
+                && (!section.file_backed
+                    || section
+                        .file_offset
+                        .checked_add(section.size)
+                        .is_some_and(|end| end <= self.image.byte_len))
+        });
+        let observed_segments = self.completeness.observed_segments;
+        let observed_sections = self.completeness.observed_sections;
+        let mut expected_reasons = Vec::new();
+        if observed_segments > self.segments.len() as u64 {
+            expected_reasons.push("layout.segment_budget".to_owned());
+        }
+        if observed_sections > self.sections.len() as u64 {
+            expected_reasons.push("layout.section_budget".to_owned());
+        }
+        self.limits.validate().is_ok()
+            && self.segments.len() <= self.limits.max_segments
+            && self.sections.len() <= self.limits.max_sections
+            && observed_segments >= self.segments.len() as u64
+            && observed_sections >= self.sections.len() as u64
+            && segments_are_sorted
+            && sections_are_sorted
+            && segments_are_well_formed
+            && sections_are_well_formed
+            && self.completeness.complete == expected_reasons.is_empty()
+            && self.completeness.reasons == expected_reasons
     }
 }

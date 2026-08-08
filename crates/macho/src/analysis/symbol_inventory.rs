@@ -208,12 +208,12 @@ pub enum SymbolInventoryStatus {
 }
 
 /// Image-bound symbol inventory with source conservation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SymbolInventory {
     image: FunctionImageIdentity,
     limits: SymbolRecoveryLimits,
     symbols: Vec<RecoveredSymbol>,
-    #[serde(skip)]
     by_address: Vec<usize>,
     receipts: Vec<SymbolCollectorReceipt>,
     status: SymbolInventoryStatus,
@@ -325,6 +325,147 @@ impl SymbolInventory {
         self.by_address[start..end]
             .iter()
             .map(|index| &self.symbols[*index])
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let symbols_are_sorted = self.symbols.windows(2).all(|pair| {
+            (
+                &pair[0].name,
+                pair[0].address,
+                pair[0].source,
+                pair[0].ordinal,
+            ) < (
+                &pair[1].name,
+                pair[1].address,
+                pair[1].source,
+                pair[1].ordinal,
+            )
+        });
+        let mut expected_by_address = self
+            .symbols
+            .iter()
+            .enumerate()
+            .filter_map(|(index, symbol)| symbol.address.map(|_| index))
+            .collect::<Vec<_>>();
+        expected_by_address.sort_by(|left, right| {
+            let left = &self.symbols[*left];
+            let right = &self.symbols[*right];
+            left.address
+                .cmp(&right.address)
+                .then_with(|| left.name.cmp(&right.name))
+                .then_with(|| left.source.cmp(&right.source))
+                .then_with(|| left.ordinal.cmp(&right.ordinal))
+        });
+        let sources_are_canonical = self.receipts.iter().map(|receipt| receipt.source).eq([
+            SymbolEvidenceSource::Nlist,
+            SymbolEvidenceSource::ExportTrie,
+            SymbolEvidenceSource::DyldImport,
+        ]);
+        let receipts_are_valid = self.receipts.iter().all(|receipt| {
+            let actual = self
+                .symbols
+                .iter()
+                .filter(|symbol| symbol.source == receipt.source)
+                .count() as u64;
+            receipt.retained == actual
+                && match receipt.status {
+                    SymbolCollectorStatus::Absent => {
+                        receipt.examined == 0
+                            && receipt.retained == 0
+                            && receipt.omitted == 0
+                            && receipt.diagnostic.is_none()
+                    }
+                    SymbolCollectorStatus::Complete => {
+                        receipt.examined == receipt.retained
+                            && receipt.omitted == 0
+                            && receipt.diagnostic.is_none()
+                    }
+                    SymbolCollectorStatus::Failed => {
+                        let expected = match receipt.source {
+                            SymbolEvidenceSource::Nlist => "symbols.nlist_malformed",
+                            SymbolEvidenceSource::ExportTrie => "symbols.exports_malformed",
+                            SymbolEvidenceSource::DyldImport => "symbols.imports_malformed",
+                        };
+                        receipt.retained == 0 && receipt.diagnostic.as_deref() == Some(expected)
+                    }
+                    SymbolCollectorStatus::Truncated => {
+                        receipt.omitted != 0
+                            && receipt.examined == receipt.retained.saturating_add(receipt.omitted)
+                            && receipt.diagnostic.as_deref() == Some("symbols.retention_budget")
+                    }
+                }
+        });
+        let symbols_are_well_formed = self.symbols.iter().all(|symbol| {
+            let kind_matches_source = matches!(
+                (symbol.source, &symbol.kind),
+                (
+                    SymbolEvidenceSource::Nlist,
+                    RecoveredSymbolKind::Nlist { .. }
+                ) | (
+                    SymbolEvidenceSource::ExportTrie,
+                    RecoveredSymbolKind::ExportRegular
+                        | RecoveredSymbolKind::ExportThreadLocal
+                        | RecoveredSymbolKind::ExportAbsolute
+                        | RecoveredSymbolKind::Reexport { .. }
+                        | RecoveredSymbolKind::StubAndResolver { .. }
+                        | RecoveredSymbolKind::UnknownExport
+                ) | (
+                    SymbolEvidenceSource::DyldImport,
+                    RecoveredSymbolKind::Import { .. }
+                )
+            );
+            let imported_name_is_bounded = match &symbol.kind {
+                RecoveredSymbolKind::Reexport { imported_name, .. } => imported_name
+                    .as_ref()
+                    .is_none_or(|name| name.len() <= self.limits.max_name_bytes),
+                _ => true,
+            };
+            symbol.name.len() <= self.limits.max_name_bytes
+                && kind_matches_source
+                && imported_name_is_bounded
+                && (!matches!(symbol.kind, RecoveredSymbolKind::Import { .. })
+                    || symbol.address.is_none())
+                && (symbol.source == SymbolEvidenceSource::Nlist || !symbol.alternate_entry)
+        });
+        let source_ordinals_are_unique = self
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.source, symbol.ordinal))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == self.symbols.len();
+        let retained_for = |source| {
+            self.symbols
+                .iter()
+                .filter(|symbol| symbol.source == source)
+                .count()
+        };
+        let expected_status = if self
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == SymbolCollectorStatus::Truncated)
+        {
+            SymbolInventoryStatus::Truncated
+        } else if self
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == SymbolCollectorStatus::Failed)
+        {
+            SymbolInventoryStatus::Partial
+        } else {
+            SymbolInventoryStatus::Complete
+        };
+        self.limits.validate().is_ok()
+            && symbols_are_sorted
+            && self.by_address == expected_by_address
+            && sources_are_canonical
+            && receipts_are_valid
+            && symbols_are_well_formed
+            && source_ordinals_are_unique
+            && retained_for(SymbolEvidenceSource::Nlist) <= self.limits.max_nlist_symbols
+            && retained_for(SymbolEvidenceSource::ExportTrie) <= self.limits.max_exports
+            && retained_for(SymbolEvidenceSource::DyldImport) <= self.limits.max_imports
+            && self.status == expected_status
     }
 
     /// Find the recovered function identity associated with one symbol record.
@@ -663,6 +804,7 @@ mod tests {
         let bytes = macho_test_support::disassembly_x86_64();
         let inventory =
             SymbolInventory::recover(&image(&bytes), SymbolRecoveryLimits::default()).unwrap();
+        assert!(inventory.durable_invariants_hold());
         assert_eq!(inventory.receipts().len(), 3);
         assert_eq!(inventory.status(), SymbolInventoryStatus::Complete);
     }
@@ -678,6 +820,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(inventory.durable_invariants_hold());
         assert_eq!(inventory.status(), SymbolInventoryStatus::Truncated);
         let receipt = inventory
             .receipts()

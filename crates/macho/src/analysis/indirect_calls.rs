@@ -150,6 +150,8 @@ pub enum IndirectCallEvidenceSource {
     IndirectSymbols,
     /// Legacy dyld bind opcode.
     LegacyBind,
+    /// Legacy dyld rebase opcode.
+    LegacyRebase,
     /// Chained bind or rebase.
     ChainedFixup,
     /// Mach-O section relocation.
@@ -652,7 +654,8 @@ pub struct FunctionAbiSummary {
 }
 
 /// Deterministic indirect-call and branch inventory tied to one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IndirectCallIndex {
     image: FunctionImageIdentity,
     limits: IndirectCallRecoveryLimits,
@@ -1169,7 +1172,7 @@ impl IndirectCallIndex {
             IndirectCallIndexStatus::Complete
         };
         catalog.receipts.sort_by_key(|receipt| receipt.source);
-        Ok(Self {
+        let index = Self {
             image,
             limits,
             calls,
@@ -1188,7 +1191,35 @@ impl IndirectCallIndex {
                 value_flow_work: value_flow_budget.consumed,
                 value_flow_continuation_function,
             },
-        })
+        };
+        debug_assert!(
+            index.durable_invariants_hold(),
+            "indirect durable invariant failed: completeness={:?}, limits={:?}, calls={}, summaries={}, receipts={:?}, bad_call={:?}, bad_summary={:?}, omitted_sum={}",
+            index.completeness,
+            index.limits,
+            index.calls.len(),
+            index.abi_summaries.len(),
+            index.receipts,
+            index.calls.iter().find(|call| {
+                !indirect_call_durable_invariants_hold(
+                    call,
+                    index.limits.max_candidates_per_transfer,
+                )
+            }),
+            index.abi_summaries.iter().position(|summary| {
+                summary
+                    .return_instructions
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                    || summary.values.windows(2).any(|pair| pair[0] >= pair[1])
+            }),
+            index
+                .calls
+                .iter()
+                .map(|call| call.omitted_candidate_count)
+                .sum::<u64>(),
+        );
+        Ok(index)
     }
 
     /// Exact image identity.
@@ -1232,6 +1263,262 @@ impl IndirectCallIndex {
             .iter()
             .filter(move |call| call.source_function == entry)
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.calls.len() > self.limits.max_transfers
+            || self.calls.windows(2).any(|pair| {
+                (pair[0].source_function, pair[0].instruction_address)
+                    > (pair[1].source_function, pair[1].instruction_address)
+            })
+            || self
+                .abi_summaries
+                .windows(2)
+                .any(|pair| pair[0].function_entry >= pair[1].function_entry)
+            || self
+                .receipts
+                .windows(2)
+                .any(|pair| pair[0].source >= pair[1].source)
+            || self
+                .completeness
+                .reasons
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        if self.calls.iter().any(|call| {
+            !indirect_call_durable_invariants_hold(call, self.limits.max_candidates_per_transfer)
+        }) {
+            return false;
+        }
+        if self.abi_summaries.iter().any(|summary| {
+            summary
+                .return_instructions
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+                || summary.values.windows(2).any(|pair| pair[0] >= pair[1])
+        }) || self
+            .receipts
+            .iter()
+            .any(|receipt| !indirect_collector_receipt_is_valid(receipt))
+        {
+            return false;
+        }
+        let receipt = &self.completeness;
+        let omitted_candidates = self
+            .calls
+            .iter()
+            .map(|call| call.omitted_candidate_count)
+            .sum::<u64>();
+        let truncated = receipt.omitted_function_count != 0
+            || receipt.omitted_transfer_count != 0
+            || receipt.omitted_candidate_count != 0
+            || receipt.value_flow_truncated
+            || self
+                .receipts
+                .iter()
+                .any(|item| item.status == IndirectCollectorStatus::Truncated)
+            || receipt
+                .reasons
+                .iter()
+                .any(|reason| reason == "indirect.control_flow_truncated");
+        let partial = self
+            .calls
+            .iter()
+            .any(|call| call.status != IndirectCallSiteStatus::Complete)
+            || self
+                .receipts
+                .iter()
+                .any(|item| item.status == IndirectCollectorStatus::Failed)
+            || receipt.reasons.iter().any(|reason| {
+                reason == "indirect.control_flow_partial"
+                    || reason == "indirect.function_inventory_incomplete"
+            });
+        let expected_status = if truncated {
+            IndirectCallIndexStatus::Truncated
+        } else if partial {
+            IndirectCallIndexStatus::Partial
+        } else {
+            IndirectCallIndexStatus::Complete
+        };
+        receipt.examined_function_count <= self.limits.max_functions as u64
+            && receipt.observed_transfer_count
+                == self.calls.len() as u64 + receipt.omitted_transfer_count
+            && receipt.omitted_candidate_count == omitted_candidates
+            && (!self.calls.iter().any(|call| call.value_flow_widened)
+                || receipt.value_flow_widened)
+            && receipt.value_flow_work <= self.limits.max_value_flow_work
+            && receipt.value_flow_continuation_function.is_some() == receipt.value_flow_truncated
+            && receipt.status == expected_status
+    }
+
+    pub(crate) fn source_invariants_hold(
+        &self,
+        functions: &FunctionIndex,
+        control_flow: &ControlFlowIndex,
+    ) -> bool {
+        self.image == *functions.image()
+            && self.image == *control_flow.image()
+            && self.calls.iter().all(|call| {
+                control_flow
+                    .by_entry(call.source_function)
+                    .is_some_and(|graph| {
+                        graph.calls.iter().any(|source| {
+                            source.block == call.block
+                                && source.instruction_address == call.instruction_address
+                        }) || graph.exits.iter().any(|source| {
+                            source.block == call.block
+                                && source.instruction_address == Some(call.instruction_address)
+                        })
+                    })
+                    && call
+                        .candidates
+                        .iter()
+                        .all(|candidate| target_functions_match(&candidate.target, functions))
+            })
+            && self
+                .abi_summaries
+                .iter()
+                .all(|summary| functions.by_entry(summary.function_entry).is_some())
+    }
+}
+
+fn indirect_collector_receipt_is_valid(receipt: &IndirectCollectorReceipt) -> bool {
+    (!matches!(receipt.status, IndirectCollectorStatus::Absent)
+        || (receipt.examined == 0 && receipt.retained == 0))
+        && (!matches!(receipt.status, IndirectCollectorStatus::Complete)
+            || receipt.diagnostic.is_none())
+        && (!matches!(
+            receipt.status,
+            IndirectCollectorStatus::Truncated | IndirectCollectorStatus::Failed
+        ) || receipt.diagnostic.is_some())
+}
+
+fn candidate_key(
+    candidate: &IndirectCallCandidate,
+) -> (
+    &IndirectCallTarget,
+    IndirectCallEvidenceSource,
+    Option<u64>,
+    &str,
+) {
+    (
+        &candidate.target,
+        candidate.source,
+        candidate.evidence_address,
+        &candidate.detail,
+    )
+}
+
+fn indirect_call_durable_invariants_hold(
+    call: &RecoveredIndirectCall,
+    maximum_candidates: usize,
+) -> bool {
+    !call.kinds.is_empty()
+        && call
+            .kinds
+            .windows(2)
+            .all(|pair| (pair[0] as u8) < pair[1] as u8)
+        && !call.carriers.is_empty()
+        && call.carriers.windows(2).all(|pair| pair[0] < pair[1])
+        && call.candidates.len() <= maximum_candidates
+        && call
+            .candidates
+            .windows(2)
+            .all(|pair| candidate_key(&pair[0]) <= candidate_key(&pair[1]) && pair[0] != pair[1])
+        && call
+            .conflicts
+            .windows(2)
+            .all(|pair| pair[0].evidence_address < pair[1].evidence_address)
+        && call.conflicts.iter().all(|conflict| {
+            conflict.targets.len() >= 2
+                && conflict.targets.windows(2).all(|pair| pair[0] < pair[1])
+                && conflict.sources.windows(2).all(|pair| pair[0] < pair[1])
+        })
+        && call.reasons.windows(2).all(|pair| pair[0] < pair[1])
+        && indirect_site_status_is_valid(call)
+        && call
+            .candidates
+            .iter()
+            .all(|candidate| target_functions_are_canonical(&candidate.target))
+}
+
+fn target_functions_are_canonical(target: &IndirectCallTarget) -> bool {
+    let functions = match target {
+        IndirectCallTarget::Import { .. }
+        | IndirectCallTarget::CppVirtualMethodImport { .. }
+        | IndirectCallTarget::SwiftProtocolWitnessImport { .. }
+        | IndirectCallTarget::BlockInvokeImport { .. } => return true,
+        IndirectCallTarget::Internal { functions, .. }
+        | IndirectCallTarget::ObjectiveCMethod { functions, .. }
+        | IndirectCallTarget::SwiftImplementation { functions, .. }
+        | IndirectCallTarget::CppVirtualMethod { functions, .. }
+        | IndirectCallTarget::SwiftProtocolWitness { functions, .. }
+        | IndirectCallTarget::SwiftClosure { functions, .. }
+        | IndirectCallTarget::BlockInvoke { functions, .. } => functions,
+    };
+    functions.windows(2).all(|pair| pair[0] < pair[1])
+}
+
+fn target_functions_match(target: &IndirectCallTarget, functions: &FunctionIndex) -> bool {
+    let candidates = match target {
+        IndirectCallTarget::Import { .. }
+        | IndirectCallTarget::CppVirtualMethodImport { .. }
+        | IndirectCallTarget::SwiftProtocolWitnessImport { .. }
+        | IndirectCallTarget::BlockInvokeImport { .. } => return true,
+        IndirectCallTarget::Internal { functions, .. }
+        | IndirectCallTarget::ObjectiveCMethod { functions, .. }
+        | IndirectCallTarget::SwiftImplementation { functions, .. }
+        | IndirectCallTarget::CppVirtualMethod { functions, .. }
+        | IndirectCallTarget::SwiftProtocolWitness { functions, .. }
+        | IndirectCallTarget::SwiftClosure { functions, .. }
+        | IndirectCallTarget::BlockInvoke { functions, .. } => functions,
+    };
+    candidates.iter().all(|candidate| {
+        functions
+            .by_entry(candidate.entry)
+            .is_some_and(|function| function.entry_confidence == candidate.entry_confidence)
+    })
+}
+
+fn indirect_site_status_is_valid(call: &RecoveredIndirectCall) -> bool {
+    let truncated = call.omitted_candidate_count != 0 || call.value_flow_truncated;
+    let partial = call.candidates.is_empty()
+        || !call.conflicts.is_empty()
+        || call.value_flow_widened
+        || call.reachability == ControlFlowReachability::Unknown
+        || call
+            .candidates
+            .iter()
+            .any(|candidate| candidate.confidence == FunctionEvidenceConfidence::Candidate)
+        || call
+            .reasons
+            .iter()
+            .any(|reason| indirect_reason_requires_partial(reason));
+    call.status
+        == if truncated {
+            IndirectCallSiteStatus::Truncated
+        } else if partial {
+            IndirectCallSiteStatus::Partial
+        } else {
+            IndirectCallSiteStatus::Complete
+        }
+}
+
+fn indirect_reason_requires_partial(reason: &str) -> bool {
+    matches!(
+        reason,
+        "indirect.source_control_flow_incomplete"
+            | "indirect.target_without_function_identity"
+            | "indirect.function_ownership_uncertain"
+            | "indirect.objc_runtime_dispatch_open"
+            | "indirect.objc_selector_unresolved"
+            | "indirect.objc_selector_without_implementation"
+            | "indirect.objc_receiver_unresolved"
+            | "indirect.swift_runtime_instantiation_open"
+            | "indirect.objc_dispatch_ambiguous"
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1357,6 +1644,10 @@ impl Catalog {
             (
                 PointerRecordKind::LegacyBind,
                 IndirectCallEvidenceSource::LegacyBind,
+            ),
+            (
+                PointerRecordKind::LegacyRebase,
+                IndirectCallEvidenceSource::LegacyRebase,
             ),
             (
                 PointerRecordKind::Relocation,
@@ -2174,10 +2465,14 @@ impl Catalog {
         let mut retained = 0_u64;
         for binding in bindings {
             let target = match binding.target {
-                IndirectSymbolTarget::Symbol { name, .. } => StaticTarget::Import {
-                    name,
-                    ordinal: None,
-                },
+                IndirectSymbolTarget::Symbol(symbol) if symbol.is_undefined() => {
+                    let ordinal = i32::from(symbol.library_ordinal());
+                    StaticTarget::Import {
+                        name: symbol.name,
+                        ordinal: Some(ordinal),
+                    }
+                }
+                IndirectSymbolTarget::Symbol(symbol) => StaticTarget::Internal(symbol.value),
                 IndirectSymbolTarget::Local
                 | IndirectSymbolTarget::Absolute
                 | IndirectSymbolTarget::LocalAbsolute => continue,
@@ -4730,7 +5025,7 @@ fn public_abi_summaries(
         .iter()
         .filter_map(|(&function_entry, values)| {
             let graph = control_flow.by_entry(function_entry)?;
-            let return_instructions = graph
+            let mut return_instructions = graph
                 .blocks
                 .iter()
                 .filter(|block| block.reachability == ControlFlowReachability::Reachable)
@@ -4741,8 +5036,10 @@ fn public_abi_summaries(
                 })
                 .filter(|instruction| instruction.kind == ControlFlowInstructionKind::Return)
                 .map(|instruction| instruction.address)
-                .collect();
-            let values = values
+                .collect::<Vec<_>>();
+            return_instructions.sort_unstable();
+            return_instructions.dedup();
+            let mut values = values
                 .iter()
                 .filter_map(|value| match value.kind {
                     AbstractValueKind::Argument(ordinal)
@@ -4764,7 +5061,9 @@ fn public_abi_summaries(
                     | AbstractValueKind::StackAddress(_)
                     | AbstractValueKind::HeapAddress { .. } => None,
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            values.sort();
+            values.dedup();
             Some(FunctionAbiSummary {
                 function_entry,
                 return_instructions,
@@ -6577,6 +6876,7 @@ fn indirect_conflicts(candidates: &[IndirectCallCandidate]) -> Vec<IndirectCallC
             candidate.source,
             IndirectCallEvidenceSource::IndirectSymbols
                 | IndirectCallEvidenceSource::LegacyBind
+                | IndirectCallEvidenceSource::LegacyRebase
                 | IndirectCallEvidenceSource::ChainedFixup
                 | IndirectCallEvidenceSource::Relocation
                 | IndirectCallEvidenceSource::RawPointer
@@ -7644,6 +7944,30 @@ mod tests {
     const HELPER: u64 = 0x1_0000_0120;
     const SLOT: u64 = 0x1_0000_0130;
 
+    #[test]
+    fn collector_receipt_allows_one_examined_record_to_retain_multiple_facts() {
+        let receipt = receipt(
+            IndirectCallEvidenceSource::CppVtable,
+            IndirectCollectorStatus::Complete,
+            1,
+            2,
+            None,
+        );
+
+        assert!(indirect_collector_receipt_is_valid(&receipt));
+    }
+
+    #[test]
+    fn unresolved_objc_dispatch_reasons_require_partial_status() {
+        for reason in [
+            "indirect.objc_selector_unresolved",
+            "indirect.objc_selector_without_implementation",
+            "indirect.objc_receiver_unresolved",
+        ] {
+            assert!(indirect_reason_requires_partial(reason), "{reason}");
+        }
+    }
+
     fn flow_instruction(address: u64) -> ControlFlowInstruction {
         ControlFlowInstruction {
             address,
@@ -7685,6 +8009,57 @@ mod tests {
             .and_then(|address| address.checked_add(1))
             .unwrap();
         assert_eq!(read_cstring(&macho, beyond_file), None);
+    }
+
+    #[test]
+    fn indirect_symbol_leaf_preserves_import_and_internal_targets() {
+        use crate::core::model::addr::ThinFileOffset;
+        use crate::core::model::symbol::SymbolType;
+        use crate::metadata::symbols::{
+            IndirectBoundSymbol, IndirectSymbolBinding, IndirectSymbolTarget,
+        };
+
+        let binding = |address, symbol_type, desc, value, name: &str| IndirectSymbolBinding {
+            section_index: 0,
+            segment_name: "__DATA".into(),
+            section_name: "__la_symbol_ptr".into(),
+            kind: IndirectBindingKind::LazyPointer,
+            entry_index: 0,
+            address: Va(address),
+            file_offset: ThinFileOffset(0),
+            size: 8,
+            indirect_table_index: 0,
+            raw_indirect_index: 0,
+            target: IndirectSymbolTarget::Symbol(IndirectBoundSymbol {
+                index: 0,
+                name: name.into(),
+                symbol_type,
+                external: true,
+                private_external: false,
+                section_index: 0,
+                desc,
+                value,
+            }),
+        };
+        let mut catalog = Catalog::default();
+        assert_eq!(
+            catalog.admit_indirect_bindings(vec![
+                binding(SLOT, SymbolType::Undefined, 3 << 8, 0, "_external"),
+                binding(HELPER, SymbolType::Section, 0, MAIN, "_internal"),
+            ]),
+            2
+        );
+        assert!(matches!(
+            catalog.slots[&SLOT][0].target,
+            StaticTarget::Import {
+                ref name,
+                ordinal: Some(3)
+            } if name == "_external"
+        ));
+        assert_eq!(
+            catalog.slots[&HELPER][0].target,
+            StaticTarget::Internal(MAIN)
+        );
     }
 
     fn add_two_function_starts(bytes: &mut Vec<u8>) {

@@ -41,7 +41,7 @@ cpp = ["abi", "demangle", "fixups", "itanium-rtti", "dep:serde", "dep:thiserror"
 symbols = ["demangle"]
 
 # Public product capabilities.
-evidence = ["cpp", "dyld", "objc", "swift"]
+evidence = ["cpp", "dyld", "objc", "swift", "symbols"]
 metadata = ["evidence", "codesign", "dwarf", "symbols"]
 dyld-cache = ["dyld", "dep:serde"]
 analysis = [

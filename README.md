@@ -87,6 +87,13 @@ macho objc <binary> --headers
 macho objc <binary> --kind class --presence defined --selector viewDidLoad
 macho swift <binary> --state metadata-defined --name MyModule
 macho swift <binary> --arch arm64 --name MyModule.Record --exact --headers
+macho c <binary> --headers
+macho cpp <binary> --headers
+
+# Export exact C++ projection blockers into the bounded operator-edit workflow
+macho cpp <binary> --headers --arch x86_64 --format json > cpp-recovery.json
+macho header-infer export cpp-recovery.json --arch x86_64 --all-header-gaps --output header-gaps.json
+macho header-infer inspect header-gaps.json
 
 # Pointer authentication inventory and code-site recovery
 macho pac <binary> --arch arm64e
@@ -129,6 +136,18 @@ macho cache <dyld-cache> --info
 macho cache <dyld-cache> --search libobjc
 macho cache <dyld-cache> --extract /usr/lib/libobjc.A.dylib --output libobjc.A.dylib
 ```
+
+Header-inference bundles keep independent recovery separate from operator-guided
+projection. A `propose_grouping` target carries the exact declaration template
+derived from Mach-O evidence; the response may place that template in an exact
+typed owner path. Each path component names its `namespace`, `record`, or
+`class` kind, and record boundaries include explicit public/protected/private
+access. Correlated source headers use the same representation, so class members
+render inside their owner without guessing ABI-absent scope kinds or access.
+Targets without a safe template require an explicit declaration fragment, and
+unsupported owner shapes remain in the unresolved ledger. Use
+`header-infer validate` before `header-infer apply`; applying writes both the
+projected header and its authority sidecar.
 
 `macho cache` opens the primary cache and every UUID-validated sibling named by
 its subcache table. Extraction selects exactly one image, reconstructs a compact
@@ -302,6 +321,12 @@ println!("RTTI selected: {}", disassembly.rtti.is_some());
 // Streaming disassemblers can query one address without materializing vectors.
 let annotations = program.annotations_at(0x1000_0000);
 for reference in annotations.references() {
+    if let Some(owner) = reference.source_owner() {
+        println!(
+            "reference owner: {:#x} ({:?})",
+            owner.owner.function.entry, owner.authority
+        );
+    }
     if let Some(string) = reference.target_string() {
         println!("string reference: {}", string.value);
     }
@@ -309,7 +334,7 @@ for reference in annotations.references() {
 
 // Guidance is not limited to questions emitted by the base recovery. A caller
 // can author an exact image-bound premise, validate it against the selected
-// Mach-O layout, and preview its complete cold-recovery consequences.
+// Mach-O layout, and preview its complete recovery consequences.
 let function = program
     .functions()
     .and_then(|functions| functions.functions().first())
@@ -341,10 +366,13 @@ stub, literal pool, or an explicitly unresolved span. Proven jump-table bytes
 are removed from the retained instruction stream before the final CFG is built.
 `RecoveryGuide::builder` accepts image-bound function entries, rejections,
 alternate/cold/shared relationships, contiguous or discontiguous function
-ranges, and every executable-byte role without requiring recovery to emit a
-question first. Exact validation rejects stale coordinates, invalid section
-ownership, unsupported alignment, missing range owners, and contradictory
-roles before the immutable base/guided preview is built. Its receipt retains
+ranges, every executable-byte role, exact CFG/call suppressions, and exact
+xref-source owners without requiring recovery to emit a question first. A
+reference-owner decision chooses among recovered source-range owners; it never
+claims exclusive ownership of a shared target string. Exact validation rejects
+stale coordinates, invalid section ownership, unsupported alignment, missing
+range/reference owners, and contradictory roles before the immutable
+base/guided preview is built. Its receipt retains
 caller authority separately from independent evidence and reports causal object
 and multidimensional coverage deltas.
 Closed entry-reachable CFGs can establish derived function extents when every
@@ -432,7 +460,20 @@ File-backed additions extend only the final file-backed segment, and only when i
 
 Injected `SignatureProvider` implementations may declare a known ad-hoc or certificate kind; providers that omit `kind()` are opaque, own their own verification, and never expose credentials. The generic verifier accepts only the ad-hoc and certificate mechanisms it understands. Selective analysis builds an `AnalysisPlan` before execution, and snapshot documents (schema version 3) preserve `not_requested`, `complete`, `unsupported`, and `failed` as distinct states — a gap in the data is never silently rendered as a zero.
 
-External transformation engines see exactly one immutable selected image through `macho::evidence::SelectedImageEvidence` and consume strict, bounded, Macho-owned language evidence — never its report, workflow, mutation, or CLI policy. The Swift ABI parsers and their syntax trees stay private to the owning modules; an external engine owns only its downstream semantic projection.
+External transformation engines use `macho::analysis::program::RecoveredProgram`
+as the full-facts entry and persist `ProgramFactDocument` when they need durable,
+query-only state. `macho::evidence::SelectedImageEvidence` is the narrower leaf
+port for consumers that intentionally do not need a program. Product IR,
+operator edit storage, branches, queries, and mutations remain consumer-owned;
+Macho owns selected-image decoding, recovery questions, guides, completeness,
+and independent-versus-guided provenance. See
+[`crates/macho/docs/program-fact-ir.md`](crates/macho/docs/program-fact-ir.md)
+for the Fact IR contract and
+[`crates/macho/docs/splice-handoff.md`](crates/macho/docs/splice-handoff.md) for
+the Splice integration handoff.
+The CLI writes the raw wire document with
+`macho program TARGET --all --fact-ir-output facts.json` and validates or
+inspects it offline with `macho program --load-fact-ir facts.json`.
 
 ## Architecture
 

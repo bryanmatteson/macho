@@ -381,7 +381,8 @@ pub enum RecoveredVtable<'index> {
 }
 
 /// Symbol-backed and structural RTTI inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RttiIndex {
     image: FunctionImageIdentity,
     limits: RttiRecoveryLimits,
@@ -418,6 +419,42 @@ impl RttiIndex {
         } else {
             (absent_type_info(), absent_vtables())
         };
+        Self::from_named_evidence(macho, limits, has_symtab, type_info, vtables)
+    }
+
+    /// Recover strict C++ leaves through the shared selected-image evidence session.
+    pub fn recover_with_evidence(
+        evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+        limits: RttiRecoveryLimits,
+    ) -> Result<Self, RttiRecoveryError> {
+        let limits = limits.validate()?;
+        let macho = evidence.image();
+        let has_symtab = macho
+            .load_commands()
+            .iter()
+            .any(|command| matches!(command.kind(), LoadCommand::Symtab(_)));
+        let (type_info, vtables) = if has_symtab {
+            (
+                evidence
+                    .cpp_rtti(limits.type_info)
+                    .map_err(|error| RttiRecoveryError::TypeInfo(error.to_string()))?,
+                evidence
+                    .cpp_vtables(limits.vtables)
+                    .map_err(|error| RttiRecoveryError::Vtables(error.to_string()))?,
+            )
+        } else {
+            (absent_type_info(), absent_vtables())
+        };
+        Self::from_named_evidence(macho, limits, has_symtab, type_info, vtables)
+    }
+
+    fn from_named_evidence(
+        macho: &MachoFile<'_>,
+        limits: RttiRecoveryLimits,
+        has_symtab: bool,
+        type_info: StrictRttiBatch,
+        vtables: StrictVtableBatch,
+    ) -> Result<Self, RttiRecoveryError> {
         let mut structural = recover_structural_rtti(macho, limits)?;
         let conflicts = collect_rtti_conflicts(&type_info, &structural.type_info);
         if !conflicts.is_empty() {
@@ -446,6 +483,10 @@ impl RttiIndex {
                     .reasons
                     .push("rtti.symbol_candidates_absent".to_owned());
             }
+            receipt.reasons.sort();
+            receipt.reasons.dedup();
+        }
+        for receipt in &mut receipts {
             receipt.reasons.sort();
             receipt.reasons.dedup();
         }
@@ -480,7 +521,7 @@ impl RttiIndex {
         } else {
             RttiIndexStatus::Complete
         };
-        Ok(Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits,
             type_info,
@@ -493,7 +534,9 @@ impl RttiIndex {
             vtable_type_relations,
             receipts,
             status,
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact selected-image identity.
@@ -652,6 +695,143 @@ impl RttiIndex {
         self.vtable_type_relations.iter().filter(move |relation| {
             relation.typeinfo == StrictPointerTarget::Local { va: typeinfo }
         })
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.type_info.validate(self.limits.type_info).is_err()
+            || self.vtables.validate(self.limits.vtables).is_err()
+            || self.receipts.len() != 5
+            || self.receipts.iter().enumerate().any(|(index, receipt)| {
+                collector_ordinal(receipt.collector) != index
+                    || receipt.reasons.windows(2).any(|pair| pair[0] >= pair[1])
+                    || receipt
+                        .conservation
+                        .included
+                        .checked_add(receipt.conservation.unknown)
+                        .and_then(|value| value.checked_add(receipt.conservation.excluded))
+                        != Some(receipt.conservation.attempted)
+            })
+            || self
+                .structural_type_info
+                .windows(2)
+                .any(|pair| pair[0].address >= pair[1].address)
+            || self.structural_vtables.windows(2).any(|pair| {
+                (pair[0].start, pair[0].address_point) >= (pair[1].start, pair[1].address_point)
+            })
+            || self
+                .structural_vtts
+                .windows(2)
+                .any(|pair| pair[0].start >= pair[1].start)
+            || self.conflicts.windows(2).any(|pair| {
+                (
+                    &pair[0].address,
+                    &pair[0].field,
+                    &pair[0].strict_value,
+                    &pair[0].structural_value,
+                ) >= (
+                    &pair[1].address,
+                    &pair[1].field,
+                    &pair[1].strict_value,
+                    &pair[1].structural_value,
+                )
+            })
+            || self.base_relations.windows(2).any(|pair| {
+                (pair[0].derived_typeinfo, pair[0].ordinal)
+                    >= (pair[1].derived_typeinfo, pair[1].ordinal)
+            })
+            || self.vtable_type_relations.windows(2).any(|pair| {
+                (pair[0].vtable, pair[0].address_point_ordinal)
+                    >= (pair[1].vtable, pair[1].address_point_ordinal)
+            })
+        {
+            return false;
+        }
+        if self.receipts[0].outcome != self.type_info.outcome
+            || self.receipts[0].conservation != self.type_info.conservation
+            || self.receipts[1].outcome != self.vtables.outcome
+            || self.receipts[1].conservation != self.vtables.conservation
+            || self.receipts[2].conservation.included != self.structural_type_info.len() as u64
+            || self.receipts[3].conservation.included != self.structural_vtables.len() as u64
+            || self.receipts[4].conservation.included != self.structural_vtts.len() as u64
+        {
+            return false;
+        }
+        if self.conflicts != collect_rtti_conflicts(&self.type_info, &self.structural_type_info)
+            || self.base_relations != collect_base_relations(&self.type_info)
+            || self.vtable_type_relations != collect_vtable_relations(&self.vtables)
+        {
+            return false;
+        }
+        if self.structural_type_info.iter().any(|record| {
+            record.type_name.is_empty()
+                || record
+                    .bases
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, base)| base.ordinal != ordinal as u64)
+        }) || self.structural_vtables.iter().any(|record| {
+            record.start >= record.address_point
+                || record.address_point > record.end_exclusive
+                || record
+                    .slots
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, slot)| slot.ordinal != ordinal as u64)
+                || record.complete == record.truncation_reason.is_some()
+        }) || self.structural_vtts.iter().any(|record| {
+            record.start >= record.end_exclusive
+                || record.entries.len() < 2
+                || record
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .any(|(ordinal, entry)| entry.ordinal != ordinal as u64)
+        }) {
+            return false;
+        }
+        let expected_status = if self.receipts.iter().any(|receipt| {
+            receipt
+                .reasons
+                .iter()
+                .any(|reason| reason == "rtti.structural_limit")
+        }) {
+            RttiIndexStatus::Truncated
+        } else if !self.conflicts.is_empty()
+            || self.receipts.iter().any(|receipt| {
+                matches!(
+                    receipt.collector,
+                    RttiCollector::StructuralTypeInfo
+                        | RttiCollector::StructuralVtables
+                        | RttiCollector::StructuralVtts
+                ) && receipt.outcome == StrictRttiOutcome::Rejected
+            })
+            || !collector_covered(
+                &self.receipts,
+                RttiCollector::TypeInfo,
+                RttiCollector::StructuralTypeInfo,
+            )
+            || !collector_covered(
+                &self.receipts,
+                RttiCollector::Vtables,
+                RttiCollector::StructuralVtables,
+            )
+        {
+            RttiIndexStatus::Partial
+        } else {
+            RttiIndexStatus::Complete
+        };
+        self.status == expected_status
+    }
+}
+
+const fn collector_ordinal(collector: RttiCollector) -> usize {
+    match collector {
+        RttiCollector::TypeInfo => 0,
+        RttiCollector::Vtables => 1,
+        RttiCollector::StructuralTypeInfo => 2,
+        RttiCollector::StructuralVtables => 3,
+        RttiCollector::StructuralVtts => 4,
     }
 }
 

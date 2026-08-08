@@ -165,14 +165,39 @@ fn lower_children(
                 declaration_spans.push(source_span(child));
             }
             "namespace_definition" => {
-                // Namespace ownership is represented on lowered declaration paths/report
-                // owners, not as a source-text node.  Only the declaration body is a
-                // declaration; the grammar's `namespace_identifier` is metadata.
                 let body = child
                     .child_by_field_name("body")
                     .or_else(|| named_child_of_kind(child, "declaration_list"))
                     .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
-                lower_children(body, source, language, declarations, declaration_spans)?;
+                let name = child.child_by_field_name("name").or_else(|| {
+                    let mut namespace_cursor = child.walk();
+                    child.named_children(&mut namespace_cursor).find(|node| {
+                        matches!(
+                            node.kind(),
+                            "namespace_identifier" | "nested_namespace_specifier"
+                        )
+                    })
+                });
+                let mut nested = Vec::new();
+                let mut nested_spans = Vec::new();
+                lower_children(body, source, language, &mut nested, &mut nested_spans)?;
+                if let Some(name) = name {
+                    let name = name.utf8_text(source.as_bytes()).map_err(|_| {
+                        ParseError::InvalidDeclaration("header is not valid UTF-8".to_owned())
+                    })?;
+                    let path = IdentifierPath::parse(name)
+                        .ok_or_else(|| ParseError::InvalidDeclaration(text.to_owned()))?;
+                    declarations.push(Decl::Namespace {
+                        path,
+                        declarations: nested,
+                    });
+                    declaration_spans.push(source_span(child));
+                } else {
+                    // Anonymous namespaces have no stable source identity. Preserve their
+                    // declarations without inventing an owner.
+                    declarations.extend(nested);
+                    declaration_spans.extend(nested_spans);
+                }
             }
             "linkage_specification" => {
                 // Ignore the grammar's string literal and lower the declaration/body.
@@ -761,7 +786,7 @@ pub(super) fn split_top_level(text: &str, separator: char) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::header_syntax::Type;
+    use crate::analysis::header_syntax::{Access, Type};
 
     #[test]
     fn parses_c_function_and_record() {
@@ -785,6 +810,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unit.declarations.len(), 2);
+    }
+
+    #[test]
+    fn preserves_cpp_namespace_ownership() {
+        let unit = TreeSitterHeaderParser
+            .parse(
+                Language::Cpp,
+                "namespace outer::inner { class Widget; int run(int value); }",
+            )
+            .unwrap();
+        let [Decl::Namespace { path, declarations }] = unit.declarations.as_slice() else {
+            panic!("expected one namespace: {:?}", unit.declarations);
+        };
+        assert_eq!(
+            path.components()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            ["outer", "inner"]
+        );
+        assert!(matches!(
+            declarations.as_slice(),
+            [Decl::Forward { .. }, Decl::Function { .. }]
+        ));
+    }
+
+    #[test]
+    fn preserves_cpp_record_member_access() {
+        let unit = TreeSitterHeaderParser
+            .parse(
+                Language::Cpp,
+                "class Widget { public: int run(int value) const; private: int reset(); };",
+            )
+            .unwrap();
+        let [Decl::Record { members, .. }] = unit.declarations.as_slice() else {
+            panic!("expected one record: {:?}", unit.declarations);
+        };
+        assert!(matches!(
+            members.as_slice(),
+            [
+                Decl::AccessSection {
+                    access: Access::Public,
+                    ..
+                },
+                Decl::AccessSection {
+                    access: Access::Private,
+                    ..
+                }
+            ]
+        ));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::core::model::section::Section;
 use crate::core::model::symbol::SymbolType;
 use crate::insn::{Arch, InsnKind};
 use crate::metadata::dyld::ExportKind;
+use crate::metadata::dyld::FunctionStartsOutcome;
 use gimli::{BaseAddresses, CieOrFde, EhFrame, RunTimeEndian, UnwindSection};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -100,6 +101,8 @@ pub enum FunctionRecoveryError {
 /// Optional predecoded evidence reused by function recovery.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FunctionRecoveryInputs<'index> {
+    /// Bounded `LC_FUNCTION_STARTS` evidence decoded by the selected-image session.
+    pub function_starts: Option<&'index Result<FunctionStartsOutcome, String>>,
     /// Format pointer and import-stub evidence.
     pub pointers: Option<&'index PointerIndex>,
     /// Nlist and export-trie symbol evidence.
@@ -131,6 +134,8 @@ pub struct FunctionRecoveryGuidance {
     pub(crate) ranges: BTreeMap<u64, Vec<(u64, u64)>>,
     /// Executable ranges the caller classifies as non-code.
     pub(crate) suppressed_code_ranges: Vec<(u64, u64)>,
+    /// Exact decoded direct-call observations excluded from function evidence.
+    pub(crate) suppressed_direct_calls: BTreeSet<(u64, u64)>,
 }
 
 impl FunctionRecoveryGuidance {
@@ -142,6 +147,7 @@ impl FunctionRecoveryGuidance {
             relationships: BTreeMap::new(),
             ranges: BTreeMap::new(),
             suppressed_code_ranges: Vec::new(),
+            suppressed_direct_calls: BTreeSet::new(),
         }
     }
 }
@@ -636,7 +642,8 @@ impl<'index> Iterator for FunctionOwners<'index> {
 impl ExactSizeIterator for FunctionOwners<'_> {}
 
 /// Deterministic, bounded function inventory for one thin Mach-O image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FunctionIndex {
     image: FunctionImageIdentity,
     limits: FunctionRecoveryLimits,
@@ -653,7 +660,6 @@ pub struct FunctionIndex {
     receipts: Vec<FunctionCollectorReceipt>,
     inventory_complete: bool,
     truncated_function_count: u64,
-    #[serde(skip)]
     ownership: Vec<OwnershipSpan>,
 }
 
@@ -944,16 +950,19 @@ impl FunctionIndex {
             );
         }
 
-        collect_function_starts(macho, &mut context);
+        match inputs.function_starts {
+            Some(outcome) => collect_function_starts_outcome(outcome, &mut context),
+            None => collect_function_starts(macho, &mut context),
+        }
         match inputs.symbols {
-            Some(index) => collect_symbol_index(index, &mut context),
+            Some(index) => collect_symbol_index(macho, index, &mut context),
             None => {
                 collect_nlist(macho, &mut context);
                 collect_exports(macho, &mut context);
             }
         }
         match inputs.dwarf {
-            Some(index) => collect_dwarf_index(index, &mut context),
+            Some(index) => collect_dwarf_index(macho, index, &mut context),
             None => collect_dwarf(macho, &mut context),
         }
         match inputs.objc {
@@ -1109,6 +1118,64 @@ impl FunctionIndex {
         }
     }
 
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let functions_are_canonical = self
+            .functions
+            .windows(2)
+            .all(|pair| pair[0].entry < pair[1].entry);
+        let candidates_are_sorted = self
+            .entry_candidates
+            .windows(2)
+            .all(|pair| pair[0].address <= pair[1].address);
+        let relationships_are_sorted = self.relationships.windows(2).all(|pair| {
+            (pair[0].address, pair[0].owner_entry) <= (pair[1].address, pair[1].owner_entry)
+        });
+        let shared_ranges_are_sorted = self.shared_ranges.windows(2).all(|pair| {
+            (pair[0].start, pair[0].end_exclusive, &pair[0].owners)
+                <= (pair[1].start, pair[1].end_exclusive, &pair[1].owners)
+        });
+        let import_stubs_are_canonical = self.import_stubs.windows(2).all(|pair| pair[0] < pair[1]);
+        let suppressed_entries_are_sorted = self
+            .suppressed_entries
+            .windows(2)
+            .all(|pair| pair[0].entry <= pair[1].entry);
+        let receipts_are_sorted = self
+            .receipts
+            .windows(2)
+            .all(|pair| pair[0].source < pair[1].source);
+        let functions_are_well_formed = self.functions.iter().all(|function| {
+            function.extent.is_none_or(|extent| {
+                extent.start == function.entry && extent.start < extent.end_exclusive
+            }) && function
+                .caller_guided_ranges
+                .iter()
+                .all(|extent| extent.start < extent.end_exclusive)
+                && function
+                    .evidence
+                    .iter()
+                    .enumerate()
+                    .all(|(ordinal, evidence)| evidence.ordinal == ordinal as u64)
+        });
+        let relationships_are_bound = self.relationships.iter().all(|relationship| {
+            self.functions
+                .binary_search_by_key(&relationship.owner_entry, |function| function.entry)
+                .is_ok()
+        });
+        self.limits.validate().is_ok()
+            && self.functions.len() <= self.limits.max_functions
+            && functions_are_canonical
+            && candidates_are_sorted
+            && relationships_are_sorted
+            && shared_ranges_are_sorted
+            && import_stubs_are_canonical
+            && suppressed_entries_are_sorted
+            && receipts_are_sorted
+            && functions_are_well_formed
+            && relationships_are_bound
+            && self.shared_ranges == independently_shared_ranges(&self.functions)
+            && self.ownership == build_ownership(&self.functions)
+    }
+
     fn owner(&self, index: usize, matched: FunctionEvidenceConfidence) -> FunctionOwner<'_> {
         let function = &self.functions[index];
         let confidence = if function.conflicts.is_empty() {
@@ -1139,7 +1206,8 @@ struct RawEvidence {
     detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct OwnershipSpan {
     start: u64,
     end: u64,
@@ -1281,6 +1349,30 @@ impl CollectionContext {
     }
 
     fn apply_guidance(&mut self, guidance: &FunctionRecoveryGuidance) {
+        if !guidance.suppressed_direct_calls.is_empty() {
+            self.evidence.retain(|evidence| {
+                evidence.source != FunctionEvidenceSource::DirectCall
+                    || !evidence.source_location.is_some_and(|instruction_address| {
+                        guidance
+                            .suppressed_direct_calls
+                            .contains(&(instruction_address, evidence.entry))
+                    })
+            });
+            let retained = self
+                .evidence
+                .iter()
+                .filter(|evidence| evidence.source == FunctionEvidenceSource::DirectCall)
+                .count();
+            self.retained_by_source
+                .insert(FunctionEvidenceSource::DirectCall, retained);
+            if let Some(receipt) = self
+                .receipts
+                .iter_mut()
+                .find(|receipt| receipt.source == FunctionEvidenceSource::DirectCall)
+            {
+                receipt.retained = retained as u64;
+            }
+        }
         for &entry in &guidance.accepted_entries {
             self.admit(RawEvidence {
                 source: FunctionEvidenceSource::CallerDecision,
@@ -2831,6 +2923,7 @@ fn collect_function_starts(macho: &MachoFile<'_>, context: &mut CollectionContex
             status = FunctionCollectorStatus::Truncated;
             break;
         }
+        let encoded_offset = u64::from(data.data_offset).saturating_add(reader.pos() as u64);
         let delta = match reader.read_uleb128() {
             Ok(delta) => delta,
             Err(_) => {
@@ -2854,7 +2947,7 @@ fn collect_function_starts(macho: &MachoFile<'_>, context: &mut CollectionContex
             extent_start: None,
             end_exclusive: None,
             name: None,
-            source_location: None,
+            source_location: Some(encoded_offset),
             detail: "lc_function_starts_delta".into(),
         });
     }
@@ -2863,6 +2956,57 @@ fn collect_function_starts(macho: &MachoFile<'_>, context: &mut CollectionContex
         FunctionCollectorStatus::Failed => Some("function_starts_malformed"),
         _ => None,
     };
+    context.receipt(source, status, examined, "entries", diagnostic);
+}
+
+fn collect_function_starts_outcome(
+    outcome: &Result<FunctionStartsOutcome, String>,
+    context: &mut CollectionContext,
+) {
+    let source = FunctionEvidenceSource::FunctionStarts;
+    let (starts, status, examined, diagnostic) = match outcome {
+        Ok(FunctionStartsOutcome::Absent) => {
+            context.receipt(source, FunctionCollectorStatus::Absent, 0, "entries", None);
+            return;
+        }
+        Ok(FunctionStartsOutcome::Complete(starts)) => (
+            starts.as_slice(),
+            FunctionCollectorStatus::Complete,
+            starts.len() as u64,
+            None,
+        ),
+        Ok(FunctionStartsOutcome::Truncated {
+            starts,
+            continuation,
+        }) => (
+            starts.as_slice(),
+            FunctionCollectorStatus::Truncated,
+            continuation.decoded_count,
+            Some("function_starts_budget"),
+        ),
+        Err(_) => {
+            context.receipt(
+                source,
+                FunctionCollectorStatus::Failed,
+                0,
+                "entries",
+                Some("function_starts_malformed"),
+            );
+            return;
+        }
+    };
+    for start in starts {
+        context.admit(RawEvidence {
+            source,
+            confidence: FunctionEvidenceConfidence::Exact,
+            entry: start.address.0,
+            extent_start: None,
+            end_exclusive: None,
+            name: None,
+            source_location: Some(start.encoded_offset.0),
+            detail: "lc_function_starts_delta".into(),
+        });
+    }
     context.receipt(source, status, examined, "entries", diagnostic);
 }
 
@@ -2880,7 +3024,10 @@ fn collect_nlist(macho: &MachoFile<'_>, context: &mut CollectionContext) {
     let mut limited = false;
     let result = crate::core::format::fold_symbols(macho, (), |_, symbol| {
         examined += 1;
-        if symbol.sym_type != SymbolType::Section || symbol.value == 0 {
+        if symbol.sym_type != SymbolType::Section
+            || (symbol.value == 0
+                && macho.header().file_type() != crate::core::model::header::FileType::Object)
+        {
             return Ok(());
         }
         if context.retained(source) as usize >= context.limits.max_evidence_per_source {
@@ -2970,7 +3117,11 @@ fn collect_exports(macho: &MachoFile<'_>, context: &mut CollectionContext) {
     context.receipt(source, status, examined, "exports", diagnostic);
 }
 
-fn collect_symbol_index(index: &SymbolInventory, context: &mut CollectionContext) {
+fn collect_symbol_index(
+    macho: &MachoFile<'_>,
+    index: &SymbolInventory,
+    context: &mut CollectionContext,
+) {
     for (evidence_source, function_source, unit) in [
         (
             SymbolEvidenceSource::Nlist,
@@ -3007,7 +3158,10 @@ fn collect_symbol_index(index: &SymbolInventory, context: &mut CollectionContext
         {
             let admissible = match &symbol.kind {
                 RecoveredSymbolKind::Nlist { symbol_type, .. } => {
-                    *symbol_type == NlistSymbolKind::Section && symbol.address != Some(0)
+                    *symbol_type == NlistSymbolKind::Section
+                        && (symbol.address != Some(0)
+                            || macho.header().file_type()
+                                == crate::core::model::header::FileType::Object)
                 }
                 RecoveredSymbolKind::ExportRegular | RecoveredSymbolKind::ExportThreadLocal => {
                     symbol.address.is_some()
@@ -3063,6 +3217,16 @@ fn collect_symbol_index(index: &SymbolInventory, context: &mut CollectionContext
 
 fn collect_dwarf(macho: &MachoFile<'_>, context: &mut CollectionContext) {
     let source = FunctionEvidenceSource::Dwarf;
+    if has_unresolved_dwarf_relocations(macho) {
+        context.receipt(
+            source,
+            FunctionCollectorStatus::Partial,
+            0,
+            "dies",
+            Some("dwarf_relocations_unresolved"),
+        );
+        return;
+    }
     let limits = crate::metadata::dwarf::DwarfTraversalLimits {
         max_section_bytes: context.limits.max_dwarf_section_bytes,
         max_units: context.limits.max_dwarf_entries,
@@ -3255,8 +3419,18 @@ fn collect_objc(macho: &MachoFile<'_>, context: &mut CollectionContext) {
     context.receipt(source, status, examined, "methods", diagnostic);
 }
 
-fn collect_dwarf_index(index: &DwarfIndex, context: &mut CollectionContext) {
+fn collect_dwarf_index(macho: &MachoFile<'_>, index: &DwarfIndex, context: &mut CollectionContext) {
     let source = FunctionEvidenceSource::Dwarf;
+    if has_unresolved_dwarf_relocations(macho) {
+        context.receipt(
+            source,
+            FunctionCollectorStatus::Partial,
+            0,
+            "dies",
+            Some("dwarf_relocations_unresolved"),
+        );
+        return;
+    }
     let Some(traversal) = index.traversal() else {
         let (status, diagnostic) = match index.status() {
             DwarfIndexStatus::Absent => (FunctionCollectorStatus::Absent, None),
@@ -3386,6 +3560,17 @@ fn collect_dwarf_index(index: &DwarfIndex, context: &mut CollectionContext) {
             _ => None,
         },
     );
+}
+
+fn has_unresolved_dwarf_relocations(macho: &MachoFile<'_>) -> bool {
+    macho.header().file_type() == crate::core::model::header::FileType::Object
+        && macho.all_sections().any(|section| {
+            section
+                .section_name()
+                .as_str_lossy()
+                .starts_with("__debug_")
+                && section.relocation_count() != 0
+        })
 }
 
 fn collect_objc_index(index: &ObjcIndex, context: &mut CollectionContext) {
@@ -4686,6 +4871,8 @@ mod tests {
             Some(&functions),
             Some(&control_flow),
             Some(&executable),
+            None,
+            &[],
         );
         let question = questions
             .iter()

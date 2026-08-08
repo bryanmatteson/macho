@@ -325,7 +325,8 @@ pub struct ExceptionIndexCompleteness {
 }
 
 /// Deterministic exception/unwind inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExceptionIndex {
     image: FunctionImageIdentity,
     limits: ExceptionRecoveryLimits,
@@ -349,6 +350,7 @@ impl ExceptionIndex {
         collect_linked_unwind(macho, limits, &mut records, &mut receipts);
         let mut cfi_rows = Vec::new();
         collect_eh_frame(macho, limits, &mut records, &mut cfi_rows, &mut receipts);
+        cfi_rows.sort_by_key(|row| (row.function_entry, row.start, row.end_exclusive));
         records.sort_by_key(|record| (record.entry, record.source, record.source_location));
         records.dedup();
         receipts.sort_by_key(|receipt| receipt.source);
@@ -388,7 +390,7 @@ impl ExceptionIndex {
             .collect::<Vec<_>>();
         reasons.sort();
         reasons.dedup();
-        Ok(Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits,
             completeness: ExceptionIndexCompleteness {
@@ -400,7 +402,18 @@ impl ExceptionIndex {
             call_sites,
             cfi_rows,
             receipts,
-        })
+        };
+        debug_assert!(
+            index.durable_invariants_hold(),
+            "exception durable invariant failed: completeness={:?}, limits={:?}, records={}, call_sites={}, cfi_rows={}, receipts={:?}",
+            index.completeness,
+            index.limits,
+            index.records.len(),
+            index.call_sites.len(),
+            index.cfi_rows.len(),
+            index.receipts,
+        );
+        Ok(index)
     }
 
     /// Exact selected-image identity.
@@ -455,7 +468,7 @@ impl ExceptionIndex {
                 record.lsda_address,
             )
         });
-        Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits: ExceptionRecoveryLimits::default(),
             records: Vec::new(),
@@ -475,7 +488,9 @@ impl ExceptionIndex {
                 retained: call_sites.len() as u64,
             },
             call_sites,
-        }
+        };
+        debug_assert!(index.durable_invariants_hold());
+        index
     }
 
     /// Per-source conservation receipts.
@@ -499,6 +514,138 @@ impl ExceptionIndex {
         let end = self.records.partition_point(|record| record.entry <= entry);
         self.records[start..end].iter()
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.records.len() > self.limits.max_records
+            || self.call_sites.len() > self.limits.max_call_sites
+            || self.cfi_rows.len() > self.limits.max_cfi_rows
+            || self
+                .call_sites
+                .iter()
+                .try_fold(0_usize, |count, record| {
+                    count.checked_add(record.actions.len())
+                })
+                .is_none_or(|count| count > self.limits.max_actions)
+        {
+            return false;
+        }
+        let records_are_canonical = self.records.windows(2).all(|pair| {
+            (pair[0].entry, pair[0].source, pair[0].source_location)
+                <= (pair[1].entry, pair[1].source, pair[1].source_location)
+        }) && self
+            .records
+            .iter()
+            .all(|record| record.end_exclusive.is_none_or(|end| record.entry < end));
+        let call_sites_are_canonical = self.call_sites.windows(2).all(|pair| {
+            (
+                pair[0].function_entry,
+                pair[0].start,
+                pair[0].end_exclusive,
+                pair[0].lsda_address,
+            ) <= (
+                pair[1].function_entry,
+                pair[1].start,
+                pair[1].end_exclusive,
+                pair[1].lsda_address,
+            )
+        }) && self.call_sites.iter().all(|record| {
+            record.start < record.end_exclusive
+                && record
+                    .actions
+                    .windows(2)
+                    .all(|pair| pair[0].offset != pair[1].offset)
+        });
+        let cfi_rows_are_canonical = self.cfi_rows.windows(2).all(|pair| {
+            (pair[0].function_entry, pair[0].start, pair[0].end_exclusive)
+                <= (pair[1].function_entry, pair[1].start, pair[1].end_exclusive)
+        }) && self.cfi_rows.iter().all(|row| {
+            row.start < row.end_exclusive
+                && row
+                    .registers
+                    .windows(2)
+                    .all(|pair| pair[0].register < pair[1].register)
+        });
+        let receipts_are_canonical = self
+            .receipts
+            .windows(2)
+            .all(|pair| pair[0].source < pair[1].source)
+            && self.receipts.iter().all(exception_receipt_is_valid);
+        let status = if self
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == ExceptionCollectorStatus::Truncated)
+        {
+            ExceptionIndexStatus::Truncated
+        } else if self
+            .receipts
+            .iter()
+            .any(|receipt| receipt.status == ExceptionCollectorStatus::Partial)
+        {
+            ExceptionIndexStatus::Partial
+        } else if self
+            .receipts
+            .iter()
+            .all(|receipt| receipt.status == ExceptionCollectorStatus::Absent)
+        {
+            ExceptionIndexStatus::Absent
+        } else {
+            ExceptionIndexStatus::Complete
+        };
+        let mut reasons = self
+            .receipts
+            .iter()
+            .flat_map(|receipt| receipt.reasons.iter().cloned())
+            .collect::<Vec<_>>();
+        reasons.sort();
+        reasons.dedup();
+        let retained = self
+            .records
+            .len()
+            .checked_add(self.call_sites.len())
+            .and_then(|count| count.checked_add(self.cfi_rows.len()))
+            .and_then(|count| u64::try_from(count).ok());
+
+        records_are_canonical
+            && call_sites_are_canonical
+            && cfi_rows_are_canonical
+            && receipts_are_canonical
+            && self.completeness.status == status
+            && self.completeness.reasons == reasons
+            && retained == Some(self.completeness.retained)
+    }
+}
+
+fn exception_receipt_is_valid(receipt: &ExceptionCollectorReceipt) -> bool {
+    let reasons_are_canonical = receipt.reasons.windows(2).all(|pair| pair[0] < pair[1]);
+    let allows_retained_fanout = receipt.source == ExceptionRecordSource::LanguageSpecificData;
+    reasons_are_canonical
+        && match receipt.status {
+            ExceptionCollectorStatus::Absent => {
+                receipt.attempted == 0
+                    && receipt.retained == 0
+                    && receipt.unknown == 0
+                    && receipt.excluded == 0
+                    && receipt.reasons.is_empty()
+            }
+            ExceptionCollectorStatus::Complete => {
+                (allows_retained_fanout || receipt.attempted == receipt.retained)
+                    && receipt.unknown == 0
+                    && receipt.excluded == 0
+                    && receipt.reasons.is_empty()
+            }
+            ExceptionCollectorStatus::Partial => {
+                receipt.excluded == 0
+                    && receipt.unknown != 0
+                    && !receipt.reasons.is_empty()
+                    && (allows_retained_fanout || receipt.attempted >= receipt.retained)
+            }
+            ExceptionCollectorStatus::Truncated => {
+                receipt.excluded != 0
+                    && !receipt.reasons.is_empty()
+                    && (allows_retained_fanout || receipt.attempted >= receipt.retained)
+            }
+        }
 }
 
 fn collect_compact_unwind(
@@ -1567,6 +1714,21 @@ mod tests {
             MachoContainer::Thin(macho) => macho,
             MachoContainer::Fat(_) => panic!("fixture must be thin"),
         }
+    }
+
+    #[test]
+    fn lsda_receipt_allows_one_table_to_retain_multiple_call_sites() {
+        let receipt = ExceptionCollectorReceipt {
+            source: ExceptionRecordSource::LanguageSpecificData,
+            status: ExceptionCollectorStatus::Complete,
+            attempted: 1,
+            retained: 2,
+            unknown: 0,
+            excluded: 0,
+            reasons: Vec::new(),
+        };
+
+        assert!(exception_receipt_is_valid(&receipt));
     }
 
     #[test]

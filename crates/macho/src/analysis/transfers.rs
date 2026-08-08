@@ -250,7 +250,8 @@ pub struct TransferIndexCompleteness {
 }
 
 /// Bounded direct-transfer and thunk inventory tied to one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectTransferIndex {
     image: FunctionImageIdentity,
     limits: TransferRecoveryLimits,
@@ -259,7 +260,6 @@ pub struct DirectTransferIndex {
     conflicts: Vec<TransferConflict>,
     completeness: TransferIndexCompleteness,
     unretained_thunk_entries: Vec<u64>,
-    #[serde(skip)]
     function_entries: Vec<u64>,
 }
 
@@ -507,7 +507,7 @@ impl DirectTransferIndex {
             TransferIndexStatus::Complete
         };
 
-        Ok(Self {
+        let index = Self {
             image: functions.image().clone(),
             limits,
             transfers,
@@ -531,7 +531,9 @@ impl DirectTransferIndex {
                 .iter()
                 .map(|function| function.entry)
                 .collect(),
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact image identity shared by the source indexes.
@@ -627,6 +629,199 @@ impl DirectTransferIndex {
         self.transfers
             .iter()
             .filter(move |transfer| transfer.source == source)
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.transfers.len() > self.limits.max_transfers
+            || self.thunks.len() > self.limits.max_thunks
+            || self.conflicts.len() > self.limits.max_conflicts
+            || self.transfers.windows(2).any(|pair| {
+                (
+                    pair[0].source,
+                    pair[0].instruction_address,
+                    pair[0].target_address,
+                ) >= (
+                    pair[1].source,
+                    pair[1].instruction_address,
+                    pair[1].target_address,
+                )
+            })
+            || self
+                .thunks
+                .windows(2)
+                .any(|pair| pair[0].entry >= pair[1].entry)
+            || self
+                .unretained_thunk_entries
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self
+                .function_entries
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+            || self
+                .completeness
+                .reasons
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        let functions = self
+            .function_entries
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let retained_thunks = self
+            .thunks
+            .iter()
+            .map(|thunk| thunk.entry)
+            .collect::<BTreeSet<_>>();
+        if retained_thunks
+            .intersection(&self.unretained_thunk_entries.iter().copied().collect())
+            .next()
+            .is_some()
+        {
+            return false;
+        }
+        for transfer in &self.transfers {
+            if !functions.contains(&transfer.source)
+                || transfer.interpretations.is_empty()
+                || transfer
+                    .interpretations
+                    .windows(2)
+                    .any(|pair| pair[0].kind as u8 >= pair[1].kind as u8)
+                || transfer
+                    .interpretations
+                    .iter()
+                    .any(|item| item.reasons.windows(2).any(|pair| pair[0] >= pair[1]))
+                || transfer.reasons.windows(2).any(|pair| pair[0] >= pair[1])
+                || transfer
+                    .possible_target_functions
+                    .windows(2)
+                    .any(|pair| pair[0].entry >= pair[1].entry)
+                || transfer
+                    .target_function
+                    .is_some_and(|entry| !functions.contains(&entry))
+                || !resolution_shape_is_valid(
+                    transfer.resolution,
+                    transfer.final_target,
+                    &transfer.thunk_chain,
+                )
+            {
+                return false;
+            }
+        }
+        if self.thunks.iter().any(|thunk| {
+            !functions.contains(&thunk.entry)
+                || thunk.instruction_count == 0
+                || thunk.chain.first() != Some(&thunk.entry)
+                || thunk.reasons.windows(2).any(|pair| pair[0] >= pair[1])
+                || thunk
+                    .target_function
+                    .is_some_and(|entry| !functions.contains(&entry))
+                || !resolution_shape_is_valid(thunk.resolution, thunk.final_target, &thunk.chain)
+        }) || self.conflicts.iter().any(|conflict| {
+            conflict.functions.is_empty()
+                || conflict.functions.windows(2).any(|pair| pair[0] >= pair[1])
+                || conflict
+                    .functions
+                    .iter()
+                    .any(|entry| !retained_thunks.contains(entry))
+        }) {
+            return false;
+        }
+        let receipt = &self.completeness;
+        let truncated = receipt.omitted_function_count != 0
+            || receipt.omitted_transfer_count != 0
+            || receipt.omitted_thunk_count != 0
+            || receipt.omitted_conflict_count != 0
+            || self
+                .thunks
+                .iter()
+                .any(|thunk| thunk.resolution == TransferResolutionStatus::DepthLimited)
+            || receipt.reasons.iter().any(|reason| {
+                reason.contains("truncated")
+                    || reason.contains("budget")
+                    || reason == "transfers.thunk_chain_depth"
+            });
+        let partial = self.transfers.iter().any(|transfer| {
+            transfer
+                .interpretations
+                .iter()
+                .any(|item| item.confidence == FunctionEvidenceConfidence::Candidate)
+                || matches!(
+                    transfer.resolution,
+                    TransferResolutionStatus::UnresolvedTarget
+                        | TransferResolutionStatus::Cycle
+                        | TransferResolutionStatus::ThunkInventoryTruncated
+                )
+        }) || receipt
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("partial") || reason.contains("incomplete"));
+        let expected_status = if truncated {
+            TransferIndexStatus::Truncated
+        } else if partial {
+            TransferIndexStatus::Partial
+        } else {
+            TransferIndexStatus::Complete
+        };
+        receipt.examined_function_count <= self.limits.max_functions as u64
+            && receipt.examined_exit_count <= self.limits.max_examined_exits as u64
+            && receipt.observed_transfer_count
+                == self.transfers.len() as u64 + receipt.omitted_transfer_count
+            && receipt.observed_thunk_count
+                == self.thunks.len() as u64 + receipt.omitted_thunk_count
+            && receipt.omitted_thunk_count == self.unretained_thunk_entries.len() as u64
+            && receipt.status == expected_status
+    }
+
+    pub(crate) fn source_invariants_hold(
+        &self,
+        functions: &FunctionIndex,
+        control_flow: &ControlFlowIndex,
+    ) -> bool {
+        self.image == *functions.image()
+            && self.image == *control_flow.image()
+            && self.function_entries
+                == functions
+                    .functions()
+                    .iter()
+                    .map(|function| function.entry)
+                    .collect::<Vec<_>>()
+            && self.transfers.iter().all(|transfer| {
+                control_flow.by_entry(transfer.source).is_some_and(|graph| {
+                    graph.exits.iter().any(|exit| {
+                        exit.block == transfer.block
+                            && exit.instruction_address == Some(transfer.instruction_address)
+                            && exit.target == Some(transfer.target_address)
+                            && exit.kind == ControlFlowExitKind::DirectBranch
+                    })
+                })
+            })
+            && self.thunks.iter().all(|thunk| {
+                functions
+                    .by_entry(thunk.entry)
+                    .is_some_and(|function| function.identity == thunk.identity)
+                    && control_flow.by_entry(thunk.entry).is_some()
+            })
+    }
+}
+
+fn resolution_shape_is_valid(
+    status: TransferResolutionStatus,
+    final_target: Option<u64>,
+    chain: &[u64],
+) -> bool {
+    match status {
+        TransferResolutionStatus::Direct => final_target.is_some(),
+        TransferResolutionStatus::ThroughThunks => final_target.is_some() && !chain.is_empty(),
+        TransferResolutionStatus::ExternalFrontier
+        | TransferResolutionStatus::UnresolvedTarget
+        | TransferResolutionStatus::Cycle
+        | TransferResolutionStatus::DepthLimited
+        | TransferResolutionStatus::ThunkInventoryTruncated => final_target.is_none(),
     }
 }
 

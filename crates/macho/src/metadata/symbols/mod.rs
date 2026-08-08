@@ -10,7 +10,7 @@ pub use error::{Result, SymbolsError, SymbolsErrorKind};
 /// Typed bounded indirect-symbol evidence.
 pub mod indirect;
 pub use indirect::{
-    IndirectBindingContinuation, IndirectBindingKind, IndirectBindingsOutcome,
+    IndirectBindingContinuation, IndirectBindingKind, IndirectBindingsOutcome, IndirectBoundSymbol,
     IndirectSymbolBinding, IndirectSymbolTarget, decode_indirect_bindings,
 };
 

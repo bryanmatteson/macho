@@ -445,6 +445,45 @@ fn regular_and_weak_repetitions_retain_both_stream_facts() {
     assert!(PointerResolver::new(&macho).is_err());
 }
 
+#[cfg(feature = "analysis")]
+#[test]
+fn pointer_index_projects_each_legacy_bind_occurrence_through_evidence() {
+    use macho::analysis::pointer_index::{PointerIndex, PointerRecordKind, PointerRecoveryLimits};
+    use macho::analysis::xref::XrefTarget;
+
+    let regular = [
+        0x11, 0x40, b'_', b's', b'a', b'm', b'e', 0, 0x51, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let weak = [
+        0x10, 0x41, b'_', b's', b'a', b'm', b'e', 0, 0x51, 0x70, 0x80, 0x02, 0x90, 0,
+    ];
+    let bytes = legacy_streams(&regular, &weak, &[]);
+    let macho = macho::core::format::parse_macho_file(&bytes).unwrap();
+    let pointers = PointerIndex::recover(&macho, PointerRecoveryLimits::default()).unwrap();
+    let legacy = pointers
+        .pointers()
+        .iter()
+        .filter(|pointer| pointer.kind == PointerRecordKind::LegacyBind)
+        .collect::<Vec<_>>();
+
+    assert_eq!(legacy.len(), 2);
+    assert!(legacy.iter().all(|pointer| pointer.address == BASE + 0x100));
+    assert_eq!(
+        legacy
+            .iter()
+            .map(|pointer| match &pointer.target {
+                XrefTarget::Import { name, ordinal } if name == "_same" => *ordinal,
+                target => panic!("unexpected legacy-bind target: {target:?}"),
+            })
+            .collect::<Vec<_>>(),
+        [1, 0]
+    );
+
+    let limited = PointerIndex::recover(&macho, PointerRecoveryLimits { max_records: 1 }).unwrap();
+    assert_eq!(limited.pointers().len(), 1);
+    assert!(limited.completeness().truncated);
+}
+
 #[test]
 fn lazy_bind_over_rebase_retains_both_occurrences() {
     use macho::metadata::dyld::resolve::{LegacyBindStream, PointerTarget};
@@ -497,6 +536,99 @@ fn pure_legacy_rebase_is_explicitly_retained() {
         rows[0].target,
         InventoryPointerTarget::Address(Va(BASE + 0x80))
     );
+
+    let PointerInventory::Complete(rebases) = resolver.legacy_rebase_inventory(1).unwrap() else {
+        panic!()
+    };
+    assert_eq!(rebases, rows);
+    assert!(resolver.legacy_rebase_inventory(0).is_err());
+}
+
+#[cfg(feature = "analysis")]
+#[test]
+fn program_fact_ir_round_trip_retains_pure_legacy_rebase() {
+    use macho::analysis::pointer_index::PointerRecordKind;
+    use macho::analysis::xref::{XrefEvidenceSource, XrefIndex, XrefKind, XrefTarget};
+    use macho::analysis::{
+        ProgramFactDocument, ProgramRecoveryLimits, ProgramRecoveryRequest, ProgramRecoveryStage,
+        ProgramStageStatus, RecoveredProgram,
+    };
+
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let mut bytes = legacy_streams_with_rebase(&rebase, &[], &[], &[]);
+    bytes[0x100..0x108].copy_from_slice(&(BASE + 0x80).to_le_bytes());
+    let macho = macho::core::format::parse_macho_file(&bytes).unwrap();
+    let request = ProgramRecoveryRequest::new(
+        [ProgramRecoveryStage::Pointers],
+        ProgramRecoveryLimits::default(),
+    );
+    let recovered = RecoveredProgram::recover(&macho, request).unwrap();
+
+    assert_eq!(
+        recovered.stage_status(ProgramRecoveryStage::Pointers),
+        ProgramStageStatus::Complete
+    );
+    let pointers = recovered.pointers().unwrap();
+    assert!(pointers.pointers().iter().any(|pointer| {
+        pointer.address == BASE + 0x100
+            && pointer.kind == PointerRecordKind::LegacyRebase
+            && pointer.authentication.is_none()
+            && pointer.target
+                == XrefTarget::Internal {
+                    va: Va(BASE + 0x80),
+                }
+    }));
+    let format = XrefIndex::recover_format(&macho, usize::MAX).unwrap();
+    assert!(format.all_refs().iter().any(|reference| {
+        reference.source == Va(BASE + 0x100)
+            && reference.kind == XrefKind::LegacyRebase
+            && reference.target
+                == XrefTarget::Internal {
+                    va: Va(BASE + 0x80),
+                }
+    }));
+    assert!(format.completeness().collectors.iter().any(|collector| {
+        collector.source == XrefEvidenceSource::LegacyRebases && collector.retained == 1
+    }));
+
+    let encoded = recovered.to_fact_document().to_json_pretty().unwrap();
+    let document = ProgramFactDocument::load_json(&encoded).unwrap();
+    let loaded = RecoveredProgram::from_document(document).unwrap();
+    assert_eq!(loaded, recovered);
+    assert_eq!(
+        loaded.pointers().unwrap().pointers()[0].kind,
+        PointerRecordKind::LegacyRebase
+    );
+}
+
+#[test]
+fn legacy_bind_inventory_does_not_charge_pure_rebases_to_its_limit() {
+    let rebase = [0x11, 0x20, 0x80, 0x02, 0x51, 0];
+    let bind = [
+        0x11, 0x40, b'_', b'b', b'o', b'u', b'n', b'd', 0, 0x51, 0x70, 0x88, 0x02, 0x90, 0,
+    ];
+    let mut bytes = legacy_streams_with_rebase(&rebase, &bind, &[], &[]);
+    bytes[0x100..0x108].copy_from_slice(&(BASE + 0x80).to_le_bytes());
+    let macho = macho::core::format::parse_macho_file(&bytes).unwrap();
+    let resolver = PointerResolver::new(&macho).unwrap();
+
+    assert!(matches!(
+        resolver.inventory(1).unwrap(),
+        PointerInventory::Truncated { pointers, available: 2, .. }
+            if pointers[0].encoding == PointerEncoding::LegacyRebase
+    ));
+    let PointerInventory::Complete(bindings) = resolver.legacy_bind_inventory(1).unwrap() else {
+        panic!()
+    };
+    assert_eq!(bindings.len(), 1);
+    assert_eq!(bindings[0].file_offset.0, 0x108);
+    assert_eq!(bindings[0].encoding, PointerEncoding::LegacyBind);
+    assert!(matches!(
+        &bindings[0].target,
+        InventoryPointerTarget::Import { name, library_ordinal: Some(1), .. }
+            if name == "_bound"
+    ));
+    assert!(resolver.legacy_bind_inventory(0).is_err());
 }
 
 #[test]

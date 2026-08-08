@@ -85,6 +85,8 @@ pub enum XrefEvidenceSource {
     Stubs,
     /// Dyld chained fixups.
     ChainedFixups,
+    /// Legacy dyld rebase opcodes.
+    LegacyRebases,
     /// Legacy dyld bind opcodes.
     LegacyBinds,
     /// Mach-O relocation records.
@@ -143,11 +145,8 @@ pub struct XrefIndex {
     image: crate::analysis::functions::FunctionImageIdentity,
     limits: XrefRecoveryLimits,
     refs: Vec<Xref>,
-    #[serde(skip)]
     decode_gaps: Vec<crate::insn::DecodeGap>,
-    #[serde(skip)]
     refs_truncated: bool,
-    #[serde(skip)]
     decoded_bytes_truncated: bool,
     completeness: XrefCompleteness,
 }
@@ -224,7 +223,9 @@ impl InstructionXrefAccumulator {
             });
         }
         for instruction in &graph.instructions {
-            if let Some(InstructionTarget::Direct { address }) = &instruction.target {
+            if let Some(InstructionTarget::Direct { address }) = &instruction.target
+                && !direct_call_target_is_suppressed(graph, instruction, *address)
+            {
                 let _ = push_ref(
                     &mut self.refs,
                     self.instruction_limit,
@@ -327,6 +328,8 @@ pub enum XrefKind {
     ChainedBind,
     /// The ChainedRebase variant.
     ChainedRebase,
+    /// The LegacyRebase variant.
+    LegacyRebase,
     /// The LegacyBind variant.
     LegacyBind,
     /// The Relocation variant.
@@ -441,6 +444,43 @@ impl XrefIndex {
         ))
     }
 
+    /// Recover format references under a selected-image evidence session.
+    pub(crate) fn recover_format_with_evidence(
+        evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+        max_refs: usize,
+    ) -> Result<Self> {
+        if max_refs == 0 {
+            return Err(crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::InvalidInput,
+                "format xref retention limit must be non-zero",
+            ));
+        }
+        let mut refs = Vec::new();
+        let mut refs_truncated = false;
+        let collectors =
+            collect_format_refs_with_evidence(evidence, &mut refs, max_refs, &mut refs_truncated);
+        refs.sort_by_key(|reference| reference.source);
+        Ok(Self::finish(
+            evidence.image(),
+            XrefRecoveryLimits {
+                max_refs,
+                ..XrefRecoveryLimits::default()
+            },
+            XrefBuild {
+                refs,
+                decode_gaps: Vec::new(),
+                refs_truncated,
+                decoded_bytes_truncated: false,
+                decode_budget_truncated: false,
+                source_control_flow_truncated: false,
+                value_flow_truncated: false,
+                partial: false,
+                collectors,
+            },
+        ))
+    }
+
     /// Recover format and instruction references from an authoritative CFG.
     pub fn recover(
         macho: &MachoFile<'_>,
@@ -492,6 +532,7 @@ impl XrefIndex {
             refs_truncated = true;
         }
         let mut collectors = format.completeness.collectors.clone();
+        reconcile_format_collector_retention(&mut collectors, &refs);
         let instruction_limit = limits.max_refs.saturating_sub(refs.len());
 
         // Once authoritative format records consume the complete retention
@@ -654,7 +695,9 @@ impl XrefIndex {
                 refs.truncate(limits.max_refs);
                 truncated = true;
             }
-            (refs, truncated, format.completeness.collectors.clone())
+            let mut collectors = format.completeness.collectors.clone();
+            reconcile_format_collector_retention(&mut collectors, &refs);
+            (refs, truncated, collectors)
         } else {
             let mut refs = Vec::new();
             let mut truncated = false;
@@ -702,7 +745,9 @@ impl XrefIndex {
                 });
             }
             for instruction in &graph.instructions {
-                if let Some(InstructionTarget::Direct { address }) = &instruction.target {
+                if let Some(InstructionTarget::Direct { address }) = &instruction.target
+                    && !direct_call_target_is_suppressed(graph, instruction, *address)
+                {
                     let _ = push_ref(
                         &mut instruction_refs,
                         instruction_limit,
@@ -1044,6 +1089,161 @@ impl XrefIndex {
     pub fn is_empty(&self) -> bool {
         self.refs.is_empty()
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let refs_are_sorted = self
+            .refs
+            .windows(2)
+            .all(|pair| pair[0].source <= pair[1].source);
+        let reasons_are_canonical = self
+            .completeness
+            .reasons
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+        let collectors_are_canonical = self
+            .completeness
+            .collectors
+            .windows(2)
+            .all(|pair| xref_source_rank(pair[0].source) < xref_source_rank(pair[1].source));
+        let collector_receipts_are_valid = self.completeness.collectors.iter().all(|receipt| {
+            let actual = self
+                .refs
+                .iter()
+                .filter(|reference| xref_kind_source(reference.kind) == receipt.source)
+                .count() as u64;
+            let state_is_valid = match receipt.status {
+                XrefCollectorStatus::Absent => {
+                    receipt.retained == 0 && receipt.diagnostic.is_none()
+                }
+                XrefCollectorStatus::Complete => receipt.diagnostic.is_none(),
+                XrefCollectorStatus::Partial => true,
+                XrefCollectorStatus::Failed => {
+                    receipt.retained == 0 && receipt.diagnostic.is_some()
+                }
+                XrefCollectorStatus::Truncated => receipt.diagnostic.is_some(),
+            };
+            receipt.retained == actual
+                && state_is_valid
+                && receipt
+                    .diagnostic
+                    .as_ref()
+                    .is_none_or(|diagnostic| self.completeness.reasons.contains(diagnostic))
+        });
+        let every_ref_has_a_receipt = self.refs.iter().all(|reference| {
+            let source = xref_kind_source(reference.kind);
+            self.completeness
+                .collectors
+                .iter()
+                .any(|receipt| receipt.source == source)
+        });
+        let retained_by_collectors = self
+            .completeness
+            .collectors
+            .iter()
+            .try_fold(0_u64, |total, receipt| total.checked_add(receipt.retained));
+        let retention_reason = self
+            .completeness
+            .reasons
+            .iter()
+            .any(|reason| reason == "xrefs.retention_budget");
+        let decode_reason = self.completeness.reasons.iter().any(|reason| {
+            reason == "xrefs.decode_budget" || reason == "xrefs.source_control_flow_truncated"
+        });
+        let value_flow_truncated = self
+            .completeness
+            .reasons
+            .iter()
+            .any(|reason| reason == "xrefs.value_flow_budget");
+        let partial = self
+            .completeness
+            .reasons
+            .iter()
+            .any(|reason| reason == "xrefs.source_control_flow_partial")
+            || self.completeness.collectors.iter().any(|receipt| {
+                matches!(
+                    receipt.status,
+                    XrefCollectorStatus::Partial | XrefCollectorStatus::Failed
+                )
+            });
+        let expected_status =
+            if self.refs_truncated || self.decoded_bytes_truncated || value_flow_truncated {
+                XrefIndexStatus::Truncated
+            } else if partial {
+                XrefIndexStatus::Partial
+            } else {
+                XrefIndexStatus::Complete
+            };
+        self.limits.validate().is_ok()
+            && self.refs.len() <= self.limits.max_refs
+            && refs_are_sorted
+            && reasons_are_canonical
+            && collectors_are_canonical
+            && collector_receipts_are_valid
+            && every_ref_has_a_receipt
+            && self.completeness.retained_refs == self.refs.len() as u64
+            && self.completeness.decode_gaps == self.decode_gaps.len() as u64
+            && retained_by_collectors == Some(self.refs.len() as u64)
+            && retention_reason == self.refs_truncated
+            && decode_reason == self.decoded_bytes_truncated
+            && self.completeness.status == expected_status
+    }
+}
+
+const fn xref_source_rank(source: XrefEvidenceSource) -> u8 {
+    match source {
+        XrefEvidenceSource::Stubs => 0,
+        XrefEvidenceSource::ChainedFixups => 1,
+        XrefEvidenceSource::LegacyRebases => 2,
+        XrefEvidenceSource::LegacyBinds => 3,
+        XrefEvidenceSource::Relocations => 4,
+        XrefEvidenceSource::Instructions => 5,
+    }
+}
+
+const fn xref_kind_source(kind: XrefKind) -> XrefEvidenceSource {
+    match kind {
+        XrefKind::Stub => XrefEvidenceSource::Stubs,
+        XrefKind::ChainedBind | XrefKind::ChainedRebase => XrefEvidenceSource::ChainedFixups,
+        XrefKind::LegacyRebase => XrefEvidenceSource::LegacyRebases,
+        XrefKind::LegacyBind => XrefEvidenceSource::LegacyBinds,
+        XrefKind::Relocation => XrefEvidenceSource::Relocations,
+        XrefKind::DirectBranch | XrefKind::Data => XrefEvidenceSource::Instructions,
+    }
+}
+
+fn reconcile_format_collector_retention(
+    collectors: &mut [XrefCollectorReceipt],
+    retained_refs: &[Xref],
+) {
+    for receipt in collectors
+        .iter_mut()
+        .filter(|receipt| receipt.source != XrefEvidenceSource::Instructions)
+    {
+        let retained = retained_refs
+            .iter()
+            .filter(|reference| xref_kind_source(reference.kind) == receipt.source)
+            .count() as u64;
+        if retained < receipt.retained {
+            receipt.status = XrefCollectorStatus::Truncated;
+            receipt.diagnostic = Some("xrefs.retention_budget".to_owned());
+        }
+        receipt.retained = retained;
+    }
+}
+
+fn direct_call_target_is_suppressed(
+    graph: &FunctionControlFlow,
+    instruction: &ControlFlowInstruction,
+    target_address: u64,
+) -> bool {
+    instruction.kind == ControlFlowInstructionKind::Call
+        && graph
+            .guided_direct_call_suppressions
+            .iter()
+            .any(|suppression| {
+                suppression.instruction_address == instruction.address
+                    && suppression.target_address == target_address
+            })
 }
 
 impl<'data> MachoExt<'data> for XrefIndex {
@@ -1063,7 +1263,100 @@ fn collect_format_refs(
     max_refs: usize,
     truncated: &mut bool,
 ) -> Vec<XrefCollectorReceipt> {
+    collect_format_refs_with_leaf_collectors(
+        macho,
+        refs,
+        max_refs,
+        truncated,
+        FormatRefCollectors {
+            stubs: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_stub_refs(macho, local, limit, truncated)
+                })
+            },
+            chained: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_chained_fixup_refs(macho, local, limit, truncated)
+                })
+            },
+            legacy_rebases: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_legacy_rebase_refs(macho, local, limit, truncated)
+                })
+            },
+            legacy_binds: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_legacy_bind_refs(macho, local, limit, truncated)
+                })
+            },
+        },
+    )
+}
+
+fn collect_format_refs_with_evidence(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Vec<XrefCollectorReceipt> {
+    collect_format_refs_with_leaf_collectors(
+        evidence.image(),
+        refs,
+        max_refs,
+        truncated,
+        FormatRefCollectors {
+            stubs: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_stub_refs_with_evidence(evidence, local, limit, truncated)
+                })
+            },
+            chained: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_chained_fixup_refs_with_evidence(evidence, local, limit, truncated)
+                })
+            },
+            legacy_rebases: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_legacy_rebase_refs_with_evidence(evidence, local, limit, truncated)
+                })
+            },
+            legacy_binds: |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_legacy_bind_refs_with_evidence(evidence, local, limit, truncated)
+                })
+            },
+        },
+    )
+}
+
+struct FormatRefCollectors<Stubs, Chained, LegacyRebases, LegacyBinds> {
+    stubs: Stubs,
+    chained: Chained,
+    legacy_rebases: LegacyRebases,
+    legacy_binds: LegacyBinds,
+}
+
+fn collect_format_refs_with_leaf_collectors<Stubs, Chained, LegacyRebases, LegacyBinds>(
+    macho: &MachoFile<'_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+    collectors: FormatRefCollectors<Stubs, Chained, LegacyRebases, LegacyBinds>,
+) -> Vec<XrefCollectorReceipt>
+where
+    Stubs: FnOnce(usize) -> CollectedFormatRefs,
+    Chained: FnOnce(usize) -> CollectedFormatRefs,
+    LegacyRebases: FnOnce(usize) -> CollectedFormatRefs,
+    LegacyBinds: FnOnce(usize) -> CollectedFormatRefs,
+{
     use crate::analysis::model::load_command::LoadCommand;
+
+    let FormatRefCollectors {
+        stubs: stub_collector,
+        chained: chained_collector,
+        legacy_rebases: legacy_rebase_collector,
+        legacy_binds: legacy_bind_collector,
+    } = collectors;
 
     let has_stubs = macho
         .load_commands()
@@ -1073,15 +1366,17 @@ fn collect_format_refs(
         .load_commands()
         .iter()
         .any(|command| matches!(command.kind(), LoadCommand::DyldChainedFixups(_)));
-    let has_legacy = macho
+    let (has_legacy_rebases, has_legacy_binds) = macho
         .load_commands()
         .iter()
-        .any(|command| match command.kind() {
-            LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => {
-                data.bind_size != 0 || data.weak_bind_size != 0 || data.lazy_bind_size != 0
-            }
-            _ => false,
-        });
+        .find_map(|command| match command.kind() {
+            LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => Some((
+                data.rebase_size != 0,
+                data.bind_size != 0 || data.weak_bind_size != 0 || data.lazy_bind_size != 0,
+            )),
+            _ => None,
+        })
+        .unwrap_or((false, false));
     let has_relocations = macho
         .all_sections()
         .any(|section| section.relocation_count() != 0);
@@ -1093,7 +1388,7 @@ fn collect_format_refs(
             refs,
             max_refs,
             truncated,
-            |local, limit, local_truncated| collect_stub_refs(macho, local, limit, local_truncated),
+            stub_collector,
         ),
         run_format_collector(
             XrefEvidenceSource::ChainedFixups,
@@ -1102,20 +1397,25 @@ fn collect_format_refs(
             refs,
             max_refs,
             truncated,
-            |local, limit, local_truncated| {
-                collect_chained_fixup_refs(macho, local, limit, local_truncated)
-            },
+            chained_collector,
+        ),
+        run_format_collector(
+            XrefEvidenceSource::LegacyRebases,
+            "xrefs.legacy_rebases_malformed",
+            has_legacy_rebases,
+            refs,
+            max_refs,
+            truncated,
+            legacy_rebase_collector,
         ),
         run_format_collector(
             XrefEvidenceSource::LegacyBinds,
             "xrefs.legacy_binds_malformed",
-            has_legacy,
+            has_legacy_binds,
             refs,
             max_refs,
             truncated,
-            |local, limit, local_truncated| {
-                collect_legacy_bind_refs(macho, local, limit, local_truncated)
-            },
+            legacy_bind_collector,
         ),
         run_format_collector(
             XrefEvidenceSource::Relocations,
@@ -1124,11 +1424,33 @@ fn collect_format_refs(
             refs,
             max_refs,
             truncated,
-            |local, limit, local_truncated| {
-                collect_relocation_refs(macho, local, limit, local_truncated)
+            |limit| {
+                collect_local_refs(limit, |local, truncated| {
+                    collect_relocation_refs(macho, local, limit, truncated)
+                })
             },
         ),
     ]
+}
+
+struct CollectedFormatRefs {
+    refs: Vec<Xref>,
+    truncated: bool,
+    result: Result<()>,
+}
+
+fn collect_local_refs(
+    _limit: usize,
+    collector: impl FnOnce(&mut Vec<Xref>, &mut bool) -> Result<()>,
+) -> CollectedFormatRefs {
+    let mut refs = Vec::new();
+    let mut truncated = false;
+    let result = collector(&mut refs, &mut truncated);
+    CollectedFormatRefs {
+        refs,
+        truncated,
+        result,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1139,7 +1461,7 @@ fn run_format_collector(
     refs: &mut Vec<Xref>,
     max_refs: usize,
     truncated: &mut bool,
-    collector: impl FnOnce(&mut Vec<Xref>, usize, &mut bool) -> Result<()>,
+    collector: impl FnOnce(usize) -> CollectedFormatRefs,
 ) -> XrefCollectorReceipt {
     if !present {
         return XrefCollectorReceipt {
@@ -1149,10 +1471,12 @@ fn run_format_collector(
             diagnostic: None,
         };
     }
-    let mut local = Vec::new();
-    let mut local_truncated = false;
     let remaining = max_refs.saturating_sub(refs.len());
-    let result = collector(&mut local, remaining, &mut local_truncated);
+    let CollectedFormatRefs {
+        refs: local,
+        truncated: local_truncated,
+        result,
+    } = collector(remaining);
     if result.is_err() {
         return XrefCollectorReceipt {
             source,
@@ -1775,6 +2099,62 @@ fn collect_stub_refs(
     Ok(())
 }
 
+fn collect_stub_refs_with_evidence(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Result<()> {
+    use crate::metadata::symbols::{IndirectBindingsOutcome, IndirectSymbolTarget};
+
+    let outcome = evidence
+        .indirect_bindings(max_refs as u64)
+        .map_err(|error| {
+            crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Parse,
+                format!("decode indirect-symbol evidence: {error}"),
+            )
+        })?;
+    let bindings = match outcome {
+        IndirectBindingsOutcome::Absent => return Ok(()),
+        IndirectBindingsOutcome::Complete(bindings) => bindings,
+        IndirectBindingsOutcome::Truncated { bindings, .. } => {
+            *truncated = true;
+            bindings
+        }
+    };
+    for binding in bindings {
+        let IndirectSymbolTarget::Symbol(symbol) = binding.target else {
+            continue;
+        };
+        let target = if symbol.is_undefined() {
+            let ordinal = i32::from(symbol.library_ordinal());
+            XrefTarget::Import {
+                name: symbol.name,
+                ordinal,
+            }
+        } else {
+            XrefTarget::Internal {
+                va: Va(symbol.value),
+            }
+        };
+        if !push_ref(
+            refs,
+            max_refs,
+            truncated,
+            Xref {
+                source: binding.address,
+                target,
+                kind: XrefKind::Stub,
+            },
+        ) {
+            break;
+        }
+    }
+    Ok(())
+}
+
 fn collect_chained_fixup_refs(
     macho: &MachoFile<'_>,
     refs: &mut Vec<Xref>,
@@ -1834,6 +2214,215 @@ fn collect_chained_fixup_refs(
                 }
             }
             _ => continue,
+        }
+    }
+    Ok(())
+}
+
+fn collect_chained_fixup_refs_with_evidence(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Result<()> {
+    use crate::metadata::dyld::resolve::{
+        InventoryPointerTarget, PointerEncoding, PointerInventory,
+    };
+
+    let outcome = evidence
+        .pointer_inventory(u64::try_from(max_refs.max(1)).unwrap_or(u64::MAX))
+        .map_err(|error| {
+            crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Parse,
+                format!("decode chained-pointer evidence: {error}"),
+            )
+        })?;
+    let pointers = match outcome {
+        PointerInventory::Absent => return Ok(()),
+        PointerInventory::Complete(pointers) => pointers,
+        PointerInventory::Truncated { pointers, .. } => {
+            *truncated = true;
+            pointers
+        }
+    };
+    for pointer in pointers {
+        let (kind, target) = match (pointer.encoding, pointer.target) {
+            (
+                PointerEncoding::ChainedBind,
+                InventoryPointerTarget::Import {
+                    name,
+                    library_ordinal: Some(ordinal),
+                    ..
+                },
+            ) => (XrefKind::ChainedBind, XrefTarget::Import { name, ordinal }),
+            (PointerEncoding::ChainedRebase, InventoryPointerTarget::Address(va)) => {
+                (XrefKind::ChainedRebase, XrefTarget::Internal { va })
+            }
+            (PointerEncoding::ChainedBind | PointerEncoding::ChainedRebase, _) => {
+                return Err(crate::analysis::AnalysisError::new(
+                    crate::analysis::AnalysisDomain::Xrefs,
+                    crate::analysis::AnalysisErrorKind::Parse,
+                    "chained-pointer evidence has an incompatible semantic target",
+                ));
+            }
+            (
+                PointerEncoding::Direct
+                | PointerEncoding::LegacyRebase
+                | PointerEncoding::LegacyBind,
+                _,
+            ) => continue,
+        };
+        if !push_ref(
+            refs,
+            max_refs,
+            truncated,
+            Xref {
+                source: pointer.source_va,
+                target,
+                kind,
+            },
+        ) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn collect_legacy_rebase_refs_with_evidence(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Result<()> {
+    use crate::metadata::dyld::resolve::{
+        InventoryPointerTarget, PointerEncoding, PointerInventory,
+    };
+
+    let outcome = evidence
+        .legacy_rebases(u64::try_from(max_refs.max(1)).unwrap_or(u64::MAX))
+        .map_err(|error| {
+            crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Parse,
+                format!("decode legacy-rebase evidence: {error}"),
+            )
+        })?;
+    let pointers = match outcome {
+        PointerInventory::Absent => return Ok(()),
+        PointerInventory::Complete(pointers) => pointers,
+        PointerInventory::Truncated { pointers, .. } => {
+            *truncated = true;
+            pointers
+        }
+    };
+    for pointer in pointers {
+        let target = match (pointer.encoding, pointer.target) {
+            (PointerEncoding::LegacyRebase, InventoryPointerTarget::Address(va)) => {
+                XrefTarget::Internal { va }
+            }
+            (PointerEncoding::LegacyRebase, InventoryPointerTarget::Null) => continue,
+            _ => {
+                return Err(crate::analysis::AnalysisError::new(
+                    crate::analysis::AnalysisDomain::Xrefs,
+                    crate::analysis::AnalysisErrorKind::Parse,
+                    "legacy-rebase evidence has an incompatible encoding or target",
+                ));
+            }
+        };
+        if !push_ref(
+            refs,
+            max_refs,
+            truncated,
+            Xref {
+                source: pointer.source_va,
+                target,
+                kind: XrefKind::LegacyRebase,
+            },
+        ) {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn collect_legacy_rebase_refs(
+    macho: &MachoFile<'_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Result<()> {
+    let evidence = crate::evidence::SelectedImageEvidence::new(macho).map_err(|error| {
+        crate::analysis::AnalysisError::new(
+            crate::analysis::AnalysisDomain::Xrefs,
+            crate::analysis::AnalysisErrorKind::Parse,
+            format!("decode legacy-rebase evidence: {error}"),
+        )
+    })?;
+    collect_legacy_rebase_refs_with_evidence(&evidence, refs, max_refs, truncated)
+}
+
+fn collect_legacy_bind_refs_with_evidence(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    refs: &mut Vec<Xref>,
+    max_refs: usize,
+    truncated: &mut bool,
+) -> Result<()> {
+    use crate::metadata::dyld::resolve::{
+        InventoryPointerTarget, PointerEncoding, PointerInventory,
+    };
+
+    let outcome = evidence
+        .legacy_bindings(u64::try_from(max_refs.max(1)).unwrap_or(u64::MAX))
+        .map_err(|error| {
+            crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Parse,
+                format!("decode legacy-bind evidence: {error}"),
+            )
+        })?;
+    let pointers = match outcome {
+        PointerInventory::Absent => return Ok(()),
+        PointerInventory::Complete(pointers) => pointers,
+        PointerInventory::Truncated { pointers, .. } => {
+            *truncated = true;
+            pointers
+        }
+    };
+    for pointer in pointers {
+        let name = match (pointer.encoding, pointer.target) {
+            (PointerEncoding::LegacyBind, InventoryPointerTarget::Import { name, .. }) => name,
+            _ => {
+                return Err(crate::analysis::AnalysisError::new(
+                    crate::analysis::AnalysisDomain::Xrefs,
+                    crate::analysis::AnalysisErrorKind::Parse,
+                    "legacy-bind evidence has an incompatible encoding or target",
+                ));
+            }
+        };
+        if pointer.legacy_bind_occurrences.is_empty() {
+            return Err(crate::analysis::AnalysisError::new(
+                crate::analysis::AnalysisDomain::Xrefs,
+                crate::analysis::AnalysisErrorKind::Parse,
+                "legacy-bind evidence has no retained source occurrence",
+            ));
+        }
+        for occurrence in pointer.legacy_bind_occurrences {
+            if !push_ref(
+                refs,
+                max_refs,
+                truncated,
+                Xref {
+                    source: pointer.source_va,
+                    target: XrefTarget::Import {
+                        name: name.clone(),
+                        ordinal: occurrence.library_ordinal,
+                    },
+                    kind: XrefKind::LegacyBind,
+                },
+            ) {
+                return Ok(());
+            }
         }
     }
     Ok(())
@@ -2362,8 +2951,16 @@ mod targeted_tests {
             },
         ];
         format.refs_truncated = false;
-        format.completeness.collectors.clear();
         format.completeness.retained_refs = format.refs.len() as u64;
+        let stub_receipt = format
+            .completeness
+            .collectors
+            .iter_mut()
+            .find(|receipt| receipt.source == XrefEvidenceSource::Stubs)
+            .unwrap();
+        stub_receipt.status = XrefCollectorStatus::Complete;
+        stub_receipt.retained = format.refs.len() as u64;
+        stub_receipt.diagnostic = None;
 
         for max_refs in [1, 2, 3] {
             let limits = XrefRecoveryLimits {
@@ -2376,6 +2973,7 @@ mod targeted_tests {
                 XrefIndex::recover_seeded(macho, &control_flow, limits, Some(&format)).unwrap();
             assert_eq!(first, repeated);
             assert_eq!(first.all_refs().len(), max_refs);
+            assert!(first.durable_invariants_hold());
             assert_eq!(
                 first
                     .all_refs()
@@ -2384,6 +2982,20 @@ mod targeted_tests {
                     .count(),
                 max_refs.min(2)
             );
+            if max_refs == 1 {
+                let receipt = first
+                    .completeness()
+                    .collectors
+                    .iter()
+                    .find(|receipt| receipt.source == XrefEvidenceSource::Stubs)
+                    .unwrap();
+                assert_eq!(receipt.status, XrefCollectorStatus::Truncated);
+                assert_eq!(receipt.retained, 1);
+                assert_eq!(
+                    receipt.diagnostic.as_deref(),
+                    Some("xrefs.retention_budget")
+                );
+            }
         }
     }
 

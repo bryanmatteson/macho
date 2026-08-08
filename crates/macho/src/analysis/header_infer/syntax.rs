@@ -78,7 +78,15 @@ pub(crate) fn declaration(value: &wire::HeaderDecl) -> Result<syntax::Decl, Arti
                             })
                         })
                         .collect::<Result<_, ArtifactError>>()?,
-                    members: members.iter().map(declaration).collect::<Result<_, _>>()?,
+                    members: members
+                        .iter()
+                        .map(|member| {
+                            Ok(syntax::Decl::AccessSection {
+                                access: access(member.access),
+                                declarations: vec![declaration(&member.declaration)?],
+                            })
+                        })
+                        .collect::<Result<_, ArtifactError>>()?,
                 }
             }
         }
@@ -167,6 +175,77 @@ pub(crate) fn declaration(value: &wire::HeaderDecl) -> Result<syntax::Decl, Arti
                 .collect::<Result<_, _>>()?,
         },
     })
+}
+
+pub(crate) fn declaration_in_owner(
+    value: &wire::HeaderDecl,
+    owner: &wire::HeaderOwnerRef,
+) -> Result<syntax::Decl, ArtifactError> {
+    if !owner.has_exact_scopes() {
+        return Err(ArtifactError::Invalid(
+            "grouping owner must provide one exact kind and access slot per path component".into(),
+        ));
+    }
+    let mut declaration = declaration(value)?;
+    let components = owner.path.as_slice();
+    let kinds = owner.scope_kinds.as_slice();
+    let scope_access = owner.scope_access.as_slice();
+    for index in (0..components.len()).rev() {
+        let path = syntax::IdentifierPath::new(vec![identifier(&components[index])?])
+            .expect("one owner component");
+        declaration = match kinds[index] {
+            wire::HeaderOwnerKind::Namespace => {
+                if (index == 0 && scope_access[index].is_some())
+                    || (index + 1 == components.len() && owner.member_access.is_some())
+                {
+                    return Err(ArtifactError::Invalid(
+                        "namespace ownership cannot carry member access".into(),
+                    ));
+                }
+                syntax::Decl::Namespace {
+                    path,
+                    declarations: vec![declaration],
+                }
+            }
+            wire::HeaderOwnerKind::Record | wire::HeaderOwnerKind::Class => {
+                let access = if index + 1 == components.len() {
+                    owner.member_access
+                } else {
+                    scope_access[index + 1]
+                }
+                .ok_or_else(|| {
+                    ArtifactError::Invalid(
+                        "record grouping requires exact member access at every boundary".into(),
+                    )
+                })?;
+                let access = match access {
+                    wire::Access::Public => syntax::Access::Public,
+                    wire::Access::Protected => syntax::Access::Protected,
+                    wire::Access::Private => syntax::Access::Private,
+                    wire::Access::Unspecified => {
+                        return Err(ArtifactError::Invalid(
+                            "record grouping cannot use unspecified member access".into(),
+                        ));
+                    }
+                };
+                syntax::Decl::Record {
+                    kind: if kinds[index] == wire::HeaderOwnerKind::Class {
+                        syntax::RecordKind::Class
+                    } else {
+                        syntax::RecordKind::Struct
+                    },
+                    path,
+                    bases: Vec::new(),
+                    fields: Vec::new(),
+                    members: vec![syntax::Decl::AccessSection {
+                        access,
+                        declarations: vec![declaration],
+                    }],
+                }
+            }
+        };
+    }
+    Ok(declaration)
 }
 
 fn objc_members(

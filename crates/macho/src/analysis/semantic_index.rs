@@ -231,7 +231,8 @@ pub struct SemanticIndexCompleteness {
 }
 
 /// Unified image-bound semantic inventory.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SemanticIndex {
     image: FunctionImageIdentity,
     limits: SemanticRecoveryLimits,
@@ -337,7 +338,7 @@ impl SemanticIndex {
         } else {
             SemanticIndexStatus::Partial
         };
-        Ok(Self {
+        let index = Self {
             image,
             limits,
             data_objects,
@@ -351,12 +352,18 @@ impl SemanticIndex {
                 retained,
                 continuation,
             },
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact image identity.
     pub fn image(&self) -> &FunctionImageIdentity {
         &self.image
+    }
+    /// Exact recovery limits.
+    pub const fn limits(&self) -> SemanticRecoveryLimits {
+        self.limits
     }
     /// Recovered addressable data identities.
     pub fn data_objects(&self) -> &[RecoveredDataObject] {
@@ -402,6 +409,105 @@ impl SemanticIndex {
             .binary_search_by_key(&entry, |item| item.function_entry)
             .ok()
             .map(|index| &self.frames[index])
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.data_objects.len() > self.limits.max_data_objects
+            || self.signatures.len() > self.limits.max_signatures
+            || self.frames.len() > self.limits.max_frames
+            || self.locals.len() > self.limits.max_locals
+        {
+            return false;
+        }
+        let data_are_canonical = self.data_objects.windows(2).all(|pair| {
+            (pair[0].address, pair[0].kind, &pair[0].id)
+                <= (pair[1].address, pair[1].kind, &pair[1].id)
+        }) && self.data_objects.iter().all(|object| {
+            !object.id.is_empty()
+                && !object.evidence.is_empty()
+                && object.end_exclusive.is_none_or(|end| object.address < end)
+        });
+        let signatures_are_canonical = self
+            .signatures
+            .windows(2)
+            .all(|pair| pair[0].function_entry < pair[1].function_entry)
+            && self.signatures.iter().all(|signature| {
+                signature.evidence.windows(2).all(|pair| pair[0] < pair[1])
+                    && signature.reasons.windows(2).all(|pair| pair[0] < pair[1])
+            });
+        let frames_are_canonical = self
+            .frames
+            .windows(2)
+            .all(|pair| pair[0].function_entry < pair[1].function_entry)
+            && self.frames.iter().all(|frame| {
+                frame
+                    .saved_registers
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+                    && frame.reasons.windows(2).all(|pair| pair[0] < pair[1])
+            });
+        let locals_are_canonical = self.locals.windows(2).all(|pair| {
+            (pair[0].function_entry, pair[0].die_offset)
+                <= (pair[1].function_entry, pair[1].die_offset)
+        });
+        let reasons_are_canonical = self
+            .completeness
+            .reasons
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+        let retained = self
+            .data_objects
+            .len()
+            .checked_add(self.signatures.len())
+            .and_then(|count| count.checked_add(self.frames.len()))
+            .and_then(|count| count.checked_add(self.locals.len()))
+            .and_then(|count| u64::try_from(count).ok());
+        let continuation_is_valid = self
+            .completeness
+            .continuation
+            .as_deref()
+            .is_none_or(|value| {
+                [
+                    ("data_object", self.limits.max_data_objects),
+                    ("signature", self.limits.max_signatures),
+                    ("frame", self.limits.max_frames),
+                    ("local", self.limits.max_locals),
+                ]
+                .into_iter()
+                .any(|(kind, limit)| value == format!("{kind}:{limit}"))
+            });
+        let status_is_derived = match self.completeness.status {
+            SemanticIndexStatus::Complete => {
+                self.completeness.continuation.is_none()
+                    && self.completeness.reasons.is_empty()
+                    && self.completeness.observed == self.completeness.retained
+            }
+            SemanticIndexStatus::Partial => {
+                self.completeness.continuation.is_none()
+                    && !self.completeness.reasons.is_empty()
+                    && self.completeness.observed == self.completeness.retained
+            }
+            SemanticIndexStatus::Truncated => {
+                self.completeness.continuation.is_some()
+                    && self
+                        .completeness
+                        .reasons
+                        .binary_search_by(|reason| reason.as_str().cmp("semantics.record_budget"))
+                        .is_ok()
+                    && self.completeness.observed > self.completeness.retained
+            }
+        };
+
+        data_are_canonical
+            && signatures_are_canonical
+            && frames_are_canonical
+            && locals_are_canonical
+            && reasons_are_canonical
+            && retained == Some(self.completeness.retained)
+            && self.completeness.observed >= self.completeness.retained
+            && continuation_is_valid
+            && status_is_derived
     }
 }
 

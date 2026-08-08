@@ -4,6 +4,7 @@ use crate::core::MachoFile;
 use crate::core::model::addr::{ThinFileOffset, Va};
 use crate::core::model::load_command::{DysymtabData, LoadCommand};
 use crate::core::model::section::SectionType;
+use crate::core::model::symbol::SymbolType;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::metadata::symbols::error::{Result, SymbolsError};
@@ -26,18 +27,48 @@ pub enum IndirectBindingKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndirectSymbolTarget {
     /// Ordinary symbol-table reference.
-    Symbol {
-        /// Zero-based `nlist` index.
-        index: u32,
-        /// Validated symbol name, including the possibility of an intentionally empty name.
-        name: String,
-    },
+    Symbol(IndirectBoundSymbol),
     /// `INDIRECT_SYMBOL_LOCAL` special entry.
     Local,
     /// `INDIRECT_SYMBOL_ABS` special entry.
     Absolute,
     /// Both special bits are present and retained exactly.
     LocalAbsolute,
+}
+
+/// Exact owned `nlist` evidence referenced by an indirect-symbol row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndirectBoundSymbol {
+    /// Zero-based `nlist` index.
+    pub index: u32,
+    /// Validated symbol name, including an intentionally empty name.
+    pub name: String,
+    /// Decoded Mach-O symbol type.
+    pub symbol_type: SymbolType,
+    /// Whether `N_EXT` is set.
+    pub external: bool,
+    /// Whether `N_PEXT` is set.
+    pub private_external: bool,
+    /// One-based defining section ordinal, or zero when not section-defined.
+    pub section_index: u8,
+    /// Raw `n_desc`, retaining library ordinal and weak/reference flags.
+    pub desc: u16,
+    /// Raw `n_value` interpreted for the selected image bitness and endianness.
+    pub value: u64,
+}
+
+impl IndirectBoundSymbol {
+    /// Whether this symbol names an unresolved import.
+    #[must_use]
+    pub fn is_undefined(&self) -> bool {
+        matches!(self.symbol_type, SymbolType::Undefined)
+    }
+
+    /// Dynamic-library ordinal encoded in `n_desc`.
+    #[must_use]
+    pub const fn library_ordinal(&self) -> u8 {
+        ((self.desc >> 8) & 0xff) as u8
+    }
 }
 
 /// One section slot and its indirect-symbol binding.
@@ -225,10 +256,16 @@ pub fn decode_indirect_bindings(
                                 "indirect-symbol row {indirect_table_index} references absent symbol {raw_indirect_index}"
                             ))
                         })?;
-                    IndirectSymbolTarget::Symbol {
+                    IndirectSymbolTarget::Symbol(IndirectBoundSymbol {
                         index: raw_indirect_index,
                         name: symbol.name.to_owned(),
-                    }
+                        symbol_type: symbol.sym_type,
+                        external: symbol.external,
+                        private_external: symbol.private_external,
+                        section_index: symbol.section_index,
+                        desc: symbol.desc,
+                        value: symbol.value,
+                    })
                 }
                 INDIRECT_SYMBOL_LOCAL => IndirectSymbolTarget::Local,
                 INDIRECT_SYMBOL_ABS => IndirectSymbolTarget::Absolute,

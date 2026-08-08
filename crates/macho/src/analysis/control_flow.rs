@@ -104,6 +104,8 @@ pub(crate) struct ControlFlowRecoveryGuidance {
     pub(crate) image: FunctionImageIdentity,
     pub(crate) non_instruction_ranges: Vec<(u64, u64)>,
     pub(crate) instruction_ranges: Vec<(u64, u64)>,
+    pub(crate) suppressed_edges: BTreeSet<(u64, u64, u64, ControlFlowEdgeKind)>,
+    pub(crate) suppressed_direct_calls: BTreeSet<(u64, u64, u64)>,
 }
 
 /// Coarse instruction semantics retained for graph consumers.
@@ -511,6 +513,18 @@ pub struct ControlFlowEdge {
     pub kind: ControlFlowEdgeKind,
 }
 
+/// Exact CFG edge omitted by caller guidance from this recovered function.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuidedControlFlowEdgeSuppression {
+    /// Source block start address.
+    pub source: u64,
+    /// Destination block start address.
+    pub target: u64,
+    /// Exact suppressed edge semantics.
+    pub edge_kind: ControlFlowEdgeKind,
+}
+
 /// Supported on-disk jump-table encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -716,6 +730,16 @@ pub struct ControlFlowCallsite {
     pub landing_pads: Vec<u64>,
 }
 
+/// Exact decoded direct call omitted by caller guidance from this function.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuidedDirectCallSuppression {
+    /// Call instruction address.
+    pub instruction_address: u64,
+    /// Decoded direct target address.
+    pub target_address: u64,
+}
+
 /// Supported exceptional behavior of one retained callsite.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -888,6 +912,12 @@ pub struct FunctionControlFlow {
     pub exits: Vec<ControlFlowExit>,
     /// Callsites sorted by instruction address.
     pub calls: Vec<ControlFlowCallsite>,
+    /// Exact independently recovered edges omitted by caller guidance.
+    #[serde(default)]
+    pub guided_edge_suppressions: Vec<GuidedControlFlowEdgeSuppression>,
+    /// Exact independently recovered direct calls omitted by caller guidance.
+    #[serde(default)]
+    pub guided_direct_call_suppressions: Vec<GuidedDirectCallSuppression>,
     /// Exceptional transfers with exact LSDA provenance.
     #[serde(default)]
     pub exceptional_transfers: Vec<ControlFlowExceptionalTransfer>,
@@ -910,7 +940,8 @@ pub enum ControlFlowIndexStatus {
 }
 
 /// Bounded control-flow inventory tied to one function index and image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ControlFlowIndex {
     image: FunctionImageIdentity,
     limits: ControlFlowLimits,
@@ -1277,6 +1308,285 @@ impl ControlFlowIndex {
             .ok()
             .map(|index| &self.functions[index])
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let functions_are_canonical = self
+            .functions
+            .windows(2)
+            .all(|pair| pair[0].function_entry < pair[1].function_entry);
+        let decoded_bytes = self.functions.iter().try_fold(0_u64, |total, graph| {
+            total.checked_add(graph.completeness.decoded_bytes)
+        });
+        let graphs_are_valid = self
+            .functions
+            .iter()
+            .all(|graph| function_control_flow_durable_invariants_hold(graph, self.limits));
+        let first_local_continuation = self
+            .functions
+            .iter()
+            .find_map(|graph| graph.completeness.continuation.as_ref());
+        let continuation_is_valid = match (first_local_continuation, &self.continuation) {
+            (Some(local), Some(global)) => local == global,
+            (Some(_), None) => false,
+            (None, Some(ControlFlowContinuation::Function { .. })) => {
+                self.truncated_function_count != 0
+            }
+            (None, Some(_)) => false,
+            (None, None) => self.truncated_function_count == 0,
+        };
+        let any_truncated = self
+            .functions
+            .iter()
+            .any(|graph| graph.completeness.status == FunctionControlFlowStatus::Truncated);
+        let any_partial = self
+            .functions
+            .iter()
+            .any(|graph| graph.completeness.status != FunctionControlFlowStatus::Complete);
+        let expected_status = if self.truncated_function_count != 0 || any_truncated {
+            ControlFlowIndexStatus::Truncated
+        } else if any_partial {
+            ControlFlowIndexStatus::Partial
+        } else {
+            ControlFlowIndexStatus::Complete
+        };
+        self.limits.validate().is_ok()
+            && self.functions.len() <= self.limits.max_functions
+            && functions_are_canonical
+            && graphs_are_valid
+            && decoded_bytes == Some(self.decoded_bytes)
+            && self.decoded_bytes <= self.limits.max_decoded_bytes as u64
+            && continuation_is_valid
+            && self.status == expected_status
+    }
+}
+
+fn function_control_flow_durable_invariants_hold(
+    graph: &FunctionControlFlow,
+    limits: ControlFlowLimits,
+) -> bool {
+    let instructions_are_canonical = graph.instructions.iter().all(|instruction| {
+        instruction.byte_len != 0
+            && instruction
+                .address
+                .checked_add(u64::from(instruction.byte_len))
+                .is_some()
+    }) && graph
+        .instructions
+        .windows(2)
+        .all(|pair| pair[0].address + u64::from(pair[0].byte_len) <= pair[1].address);
+    let gaps_are_canonical = graph.gaps.iter().all(|gap| gap.start < gap.end_exclusive)
+        && graph.gaps.windows(2).all(|pair| {
+            (pair[0].start, pair[0].end_exclusive) <= (pair[1].start, pair[1].end_exclusive)
+        });
+    let data_ranges_are_canonical = graph
+        .data_ranges
+        .iter()
+        .all(|range| range.start < range.end_exclusive)
+        && graph.data_ranges.windows(2).all(|pair| {
+            (pair[0].start, pair[0].end_exclusive, pair[0].reason)
+                <= (pair[1].start, pair[1].end_exclusive, pair[1].reason)
+        });
+    let byte_ranges_are_canonical = graph
+        .byte_ranges
+        .iter()
+        .all(|range| range.start < range.end_exclusive)
+        && graph
+            .byte_ranges
+            .windows(2)
+            .all(|pair| pair[0].end_exclusive <= pair[1].start);
+    let byte_totals = graph
+        .byte_ranges
+        .iter()
+        .try_fold([0_u64; 4], |mut totals, range| {
+            let length = range.end_exclusive.checked_sub(range.start)?;
+            let index = match range.kind {
+                ControlFlowByteRangeKind::Instruction => 0,
+                ControlFlowByteRangeKind::Data => 1,
+                ControlFlowByteRangeKind::Gap => 2,
+                ControlFlowByteRangeKind::Omitted => 3,
+            };
+            totals[index] = totals[index].checked_add(length)?;
+            Some(totals)
+        });
+    let blocks_are_canonical = graph.blocks.iter().enumerate().all(|(index, block)| {
+        let Ok(first) = usize::try_from(block.first_instruction) else {
+            return false;
+        };
+        let Ok(count) = usize::try_from(block.instruction_count) else {
+            return false;
+        };
+        let Some(end) = first.checked_add(count) else {
+            return false;
+        };
+        let Some(instructions) = graph.instructions.get(first..end) else {
+            return false;
+        };
+        let (Some(first_instruction), Some(last_instruction)) =
+            (instructions.first(), instructions.last())
+        else {
+            return false;
+        };
+        block.id == index as u64
+            && block.start == first_instruction.address
+            && last_instruction
+                .address
+                .checked_add(u64::from(last_instruction.byte_len))
+                == Some(block.end_exclusive)
+            && index.checked_sub(1).is_none_or(|prior| {
+                let previous = &graph.blocks[prior];
+                previous
+                    .first_instruction
+                    .checked_add(previous.instruction_count)
+                    == Some(block.first_instruction)
+            })
+    }) && graph.blocks.last().map_or(
+        graph.instructions.is_empty(),
+        |block| {
+            block.first_instruction.checked_add(block.instruction_count)
+                == Some(graph.instructions.len() as u64)
+        },
+    );
+    let edges_are_canonical = graph.edges.windows(2).all(|pair| {
+        (pair[0].from, pair[0].to, pair[0].kind) < (pair[1].from, pair[1].to, pair[1].kind)
+    }) && graph.edges.iter().all(|edge| {
+        (edge.from as usize) < graph.blocks.len() && (edge.to as usize) < graph.blocks.len()
+    });
+    let exits_are_canonical = graph.exits.windows(2).all(|pair| {
+        (
+            pair[0].block,
+            pair[0].instruction_address,
+            pair[0].kind as u8,
+            pair[0].target,
+        ) <= (
+            pair[1].block,
+            pair[1].instruction_address,
+            pair[1].kind as u8,
+            pair[1].target,
+        )
+    }) && graph
+        .exits
+        .iter()
+        .all(|exit| (exit.block as usize) < graph.blocks.len());
+    let calls_are_canonical = graph
+        .calls
+        .windows(2)
+        .all(|pair| pair[0].instruction_address < pair[1].instruction_address)
+        && graph.calls.iter().all(|call| {
+            (call.block as usize) < graph.blocks.len()
+                && graph
+                    .instructions
+                    .binary_search_by_key(&call.instruction_address, |instruction| {
+                        instruction.address
+                    })
+                    .is_ok_and(|index| {
+                        graph.instructions[index].kind == ControlFlowInstructionKind::Call
+                    })
+        });
+    let suppressions_are_canonical = graph
+        .guided_edge_suppressions
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+        && graph
+            .guided_direct_call_suppressions
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+    let exceptional_transfers_are_canonical =
+        graph.exceptional_transfers.windows(2).all(|pair| {
+            (
+                pair[0].instruction_address,
+                pair[0].landing_pad,
+                pair[0].lsda_address,
+            ) < (
+                pair[1].instruction_address,
+                pair[1].landing_pad,
+                pair[1].lsda_address,
+            )
+        }) && graph.exceptional_transfers.iter().all(|transfer| {
+            (transfer.source_block as usize) < graph.blocks.len()
+                && transfer
+                    .destination_block
+                    .is_none_or(|block| (block as usize) < graph.blocks.len())
+        });
+    let jump_tables_are_canonical = graph
+        .jump_tables
+        .windows(2)
+        .all(|pair| pair[0].instruction_address <= pair[1].instruction_address)
+        && graph.jump_tables.iter().all(|table| {
+            table.table_address <= table.end_exclusive
+                && (table.source_block as usize) < graph.blocks.len()
+                && table.entries.len() <= limits.max_jump_table_entries
+                && table
+                    .entries
+                    .windows(2)
+                    .all(|pair| pair[0].index < pair[1].index)
+                && table.entries.iter().all(|entry| {
+                    (entry.target_block as usize) < graph.blocks.len()
+                        && graph.blocks[entry.target_block as usize].start == entry.target
+                })
+        });
+    let reasons_are_canonical = graph
+        .completeness
+        .reasons
+        .windows(2)
+        .all(|pair| pair[0] < pair[1]);
+    let continuation_is_bound =
+        graph
+            .completeness
+            .continuation
+            .as_ref()
+            .is_none_or(|continuation| match continuation {
+                ControlFlowContinuation::Function { .. } => false,
+                ControlFlowContinuation::Byte { function_entry, .. }
+                | ControlFlowContinuation::Instruction { function_entry, .. }
+                | ControlFlowContinuation::Block { function_entry, .. }
+                | ControlFlowContinuation::Edge { function_entry, .. }
+                | ControlFlowContinuation::Gap { function_entry, .. }
+                | ControlFlowContinuation::JumpTable { function_entry, .. } => {
+                    *function_entry == graph.function_entry
+                }
+            });
+    let expected_status = if graph.completeness.continuation.is_some() {
+        FunctionControlFlowStatus::Truncated
+    } else if graph.instructions.is_empty() {
+        FunctionControlFlowStatus::Unavailable
+    } else if !graph.completeness.reasons.is_empty() || !graph.gaps.is_empty() {
+        FunctionControlFlowStatus::Partial
+    } else {
+        FunctionControlFlowStatus::Complete
+    };
+    let expected_observed_bytes = graph
+        .completeness
+        .instruction_bytes
+        .checked_add(graph.completeness.data_bytes)
+        .and_then(|total| total.checked_add(graph.completeness.gap_bytes))
+        .and_then(|total| total.checked_add(graph.completeness.omitted_bytes));
+    graph.instructions.len() <= limits.max_instructions_per_function
+        && graph.blocks.len() <= limits.max_blocks_per_function
+        && graph.edges.len() <= limits.max_edges_per_function
+        && graph.gaps.len() <= limits.max_gaps_per_function
+        && graph.jump_tables.len() <= limits.max_jump_tables_per_function
+        && instructions_are_canonical
+        && gaps_are_canonical
+        && data_ranges_are_canonical
+        && byte_ranges_are_canonical
+        && byte_totals
+            == Some([
+                graph.completeness.instruction_bytes,
+                graph.completeness.data_bytes,
+                graph.completeness.gap_bytes,
+                graph.completeness.omitted_bytes,
+            ])
+        && blocks_are_canonical
+        && edges_are_canonical
+        && exits_are_canonical
+        && calls_are_canonical
+        && suppressions_are_canonical
+        && exceptional_transfers_are_canonical
+        && jump_tables_are_canonical
+        && reasons_are_canonical
+        && continuation_is_bound
+        && expected_observed_bytes == Some(graph.completeness.observed_bytes)
+        && graph.completeness.status == expected_status
 }
 
 fn graph_proves_non_returning(graph: &FunctionControlFlow) -> bool {
@@ -2006,6 +2316,80 @@ fn recover_function(
             edge,
         });
     }
+    let mut guided_edge_suppressions = Vec::new();
+    let mut guided_direct_call_suppressions = Vec::new();
+    if let Some(guidance) = guidance {
+        edges.retain(|edge| {
+            let source = blocks.get(edge.from as usize).map(|block| block.start);
+            let target = blocks.get(edge.to as usize).map(|block| block.start);
+            let suppressed = source.zip(target).is_some_and(|(source, target)| {
+                guidance
+                    .suppressed_edges
+                    .contains(&(function.entry, source, target, edge.kind))
+            });
+            if suppressed {
+                guided_edge_suppressions.push(GuidedControlFlowEdgeSuppression {
+                    source: source.expect("suppressed edge has a source block"),
+                    target: target.expect("suppressed edge has a target block"),
+                    edge_kind: edge.kind,
+                });
+            }
+            !suppressed
+        });
+        calls.retain(|call| {
+            let target_address = match call.target {
+                ControlFlowCallTarget::Direct { address, .. } => Some(address),
+                ControlFlowCallTarget::Indirect { .. } => None,
+            };
+            let suppressed = target_address.is_some_and(|target_address| {
+                guidance.suppressed_direct_calls.contains(&(
+                    function.entry,
+                    call.instruction_address,
+                    target_address,
+                ))
+            });
+            if let Some(target_address) = target_address.filter(|_| suppressed) {
+                guided_direct_call_suppressions.push(GuidedDirectCallSuppression {
+                    instruction_address: call.instruction_address,
+                    target_address,
+                });
+            }
+            !suppressed
+        });
+        // The first provisional graph can make function-extent refinement
+        // remove the suppressed observation from the final rebuild entirely.
+        // Retain every validated premise as a durable receipt even in that
+        // case; validation has already proven it existed in the unguided base.
+        guided_edge_suppressions.extend(
+            guidance
+                .suppressed_edges
+                .iter()
+                .filter(|(function_entry, ..)| *function_entry == function.entry)
+                .map(
+                    |(_, source, target, edge_kind)| GuidedControlFlowEdgeSuppression {
+                        source: *source,
+                        target: *target,
+                        edge_kind: *edge_kind,
+                    },
+                ),
+        );
+        guided_direct_call_suppressions.extend(
+            guidance
+                .suppressed_direct_calls
+                .iter()
+                .filter(|(function_entry, ..)| *function_entry == function.entry)
+                .map(
+                    |(_, instruction_address, target_address)| GuidedDirectCallSuppression {
+                        instruction_address: *instruction_address,
+                        target_address: *target_address,
+                    },
+                ),
+        );
+        guided_edge_suppressions.sort();
+        guided_edge_suppressions.dedup();
+        guided_direct_call_suppressions.sort();
+        guided_direct_call_suppressions.dedup();
+    }
     // Boundary confidence answers whether decoded bytes belong to this function;
     // it does not make a missing path through a fully decoded graph possible.
     // First solve the retained graph exactly. Negative answers are weakened only
@@ -2088,6 +2472,8 @@ fn recover_function(
         edges,
         exits,
         calls,
+        guided_edge_suppressions,
+        guided_direct_call_suppressions,
         exceptional_transfers,
         jump_tables,
         completeness: FunctionControlFlowCompleteness {
@@ -4515,7 +4901,9 @@ mod tests {
     fn recover(bytes: &[u8], limits: ControlFlowLimits) -> ControlFlowIndex {
         let macho = image(bytes);
         let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
-        ControlFlowIndex::recover(&macho, &functions, limits).unwrap()
+        let index = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
+        assert!(index.durable_invariants_hold());
+        index
     }
 
     #[test]

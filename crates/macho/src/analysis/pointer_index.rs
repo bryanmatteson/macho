@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 
 use crate::core::model::macho_file::MachoFile;
-use crate::metadata::dyld::{FixupKind, parse_chained_fixups};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -56,6 +55,8 @@ pub enum PointerRecordKind {
     ChainedBind,
     /// Dyld chained rebase.
     ChainedRebase,
+    /// Legacy dyld rebase.
+    LegacyRebase,
     /// Legacy dyld bind.
     LegacyBind,
     /// Mach-O relocation.
@@ -100,13 +101,13 @@ pub struct PointerIndexCompleteness {
 }
 
 /// Deterministic pointer and fixup inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PointerIndex {
     image: FunctionImageIdentity,
     limits: PointerRecoveryLimits,
     pointers: Vec<RecoveredPointer>,
     completeness: PointerIndexCompleteness,
-    #[serde(skip)]
     format: XrefIndex,
 }
 
@@ -116,27 +117,43 @@ impl PointerIndex {
         macho: &MachoFile<'_>,
         limits: PointerRecoveryLimits,
     ) -> Result<Self, PointerRecoveryError> {
-        let limits = limits.validate()?;
-        let format = XrefIndex::recover_format(macho, limits.max_records)
+        let evidence = crate::evidence::SelectedImageEvidence::new(macho)
             .map_err(|error| PointerRecoveryError::Recovery(error.to_string()))?;
-        let authentication = chained_authentication(macho);
+        Self::recover_with_evidence(&evidence, limits)
+    }
+
+    /// Recover through the shared selected-image evidence session.
+    pub fn recover_with_evidence(
+        evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+        limits: PointerRecoveryLimits,
+    ) -> Result<Self, PointerRecoveryError> {
+        let limits = limits.validate()?;
+        let format = XrefIndex::recover_format_with_evidence(evidence, limits.max_records)
+            .map_err(|error| PointerRecoveryError::Recovery(error.to_string()))?;
+        let authentication = evidence_chained_authentication(evidence, &format)?;
+        Self::from_format(evidence.image(), limits, format, authentication)
+    }
+
+    fn from_format(
+        macho: &MachoFile<'_>,
+        limits: PointerRecoveryLimits,
+        format: XrefIndex,
+        authentication: BTreeMap<u64, PointerAuthentication>,
+    ) -> Result<Self, PointerRecoveryError> {
         let mut pointers = format
             .all_refs()
             .iter()
             .filter_map(|reference| {
-                let kind = match reference.kind {
-                    XrefKind::Stub => PointerRecordKind::Stub,
-                    XrefKind::ChainedBind => PointerRecordKind::ChainedBind,
-                    XrefKind::ChainedRebase => PointerRecordKind::ChainedRebase,
-                    XrefKind::LegacyBind => PointerRecordKind::LegacyBind,
-                    XrefKind::Relocation => PointerRecordKind::Relocation,
-                    XrefKind::DirectBranch | XrefKind::Data => return None,
-                };
+                let kind = pointer_kind_for_xref(reference.kind)?;
                 Some(RecoveredPointer {
                     address: reference.source.0,
                     target: reference.target.clone(),
                     kind,
-                    authentication: authentication.get(&reference.source.0).copied(),
+                    authentication: record_authentication(
+                        kind,
+                        reference.source.0,
+                        &authentication,
+                    ),
                 })
             })
             .collect::<Vec<_>>();
@@ -191,41 +208,138 @@ impl PointerIndex {
     pub(crate) const fn format_index(&self) -> &XrefIndex {
         &self.format
     }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let pointers_are_sorted = self
+            .pointers
+            .windows(2)
+            .all(|pair| pointer_sort_key(&pair[0]) <= pointer_sort_key(&pair[1]));
+        let mut expected = Vec::with_capacity(self.format.all_refs().len());
+        for reference in self.format.all_refs() {
+            let Some(kind) = pointer_kind_for_xref(reference.kind) else {
+                return false;
+            };
+            expected.push((reference.source.0, kind, &reference.target));
+        }
+        expected.sort_by_key(|(address, kind, _)| (*address, *kind as u8));
+        let pointers_match_format = expected.len() == self.pointers.len()
+            && expected
+                .iter()
+                .zip(&self.pointers)
+                .all(|((address, kind, target), pointer)| {
+                    *address == pointer.address
+                        && *kind == pointer.kind
+                        && *target == &pointer.target
+                        && pointer.authentication.is_none_or(|authentication| {
+                            matches!(
+                                pointer.kind,
+                                PointerRecordKind::ChainedBind | PointerRecordKind::ChainedRebase
+                            ) && authentication.key <= 3
+                        })
+                });
+        let format_status = self.format.status();
+        self.limits.validate().is_ok()
+            && self.image == *self.format.image()
+            && self.format.limits().max_refs == self.limits.max_records
+            && self.pointers.len() <= self.limits.max_records
+            && pointers_are_sorted
+            && pointers_match_format
+            && self.completeness.retained == self.pointers.len() as u64
+            && self.completeness.complete == (format_status == XrefIndexStatus::Complete)
+            && self.completeness.truncated == (format_status == XrefIndexStatus::Truncated)
+            && self.completeness.reasons == self.format.completeness().reasons
+            && self.format.durable_invariants_hold()
+    }
 }
 
-fn chained_authentication(macho: &MachoFile<'_>) -> BTreeMap<u64, PointerAuthentication> {
-    let Ok(fixups) = parse_chained_fixups(macho) else {
-        return BTreeMap::new();
-    };
-    fixups
-        .fixups
-        .iter()
-        .filter_map(|fixup| {
-            let segment = macho.segments().get(fixup.segment_index)?;
-            let address = segment.vm_addr().0.checked_add(fixup.segment_offset)?;
-            let (diversity, key, address_diversity) = match fixup.kind {
-                FixupKind::AuthRebase {
-                    diversity,
-                    key,
-                    addr_div,
-                    ..
-                }
-                | FixupKind::AuthBind {
-                    diversity,
-                    key,
-                    addr_div,
-                    ..
-                } => (diversity, key, addr_div),
-                _ => return None,
-            };
-            Some((
-                address,
+const fn pointer_kind_for_xref(kind: XrefKind) -> Option<PointerRecordKind> {
+    match kind {
+        XrefKind::Stub => Some(PointerRecordKind::Stub),
+        XrefKind::ChainedBind => Some(PointerRecordKind::ChainedBind),
+        XrefKind::ChainedRebase => Some(PointerRecordKind::ChainedRebase),
+        XrefKind::LegacyRebase => Some(PointerRecordKind::LegacyRebase),
+        XrefKind::LegacyBind => Some(PointerRecordKind::LegacyBind),
+        XrefKind::Relocation => Some(PointerRecordKind::Relocation),
+        XrefKind::DirectBranch | XrefKind::Data => None,
+    }
+}
+
+const fn pointer_sort_key(pointer: &RecoveredPointer) -> (u64, u8) {
+    (pointer.address, pointer.kind as u8)
+}
+
+fn record_authentication(
+    kind: PointerRecordKind,
+    address: u64,
+    authentication: &BTreeMap<u64, PointerAuthentication>,
+) -> Option<PointerAuthentication> {
+    if matches!(
+        kind,
+        PointerRecordKind::ChainedBind | PointerRecordKind::ChainedRebase
+    ) {
+        authentication.get(&address).copied()
+    } else {
+        None
+    }
+}
+
+fn evidence_chained_authentication(
+    evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+    format: &XrefIndex,
+) -> Result<BTreeMap<u64, PointerAuthentication>, PointerRecoveryError> {
+    let mut authentication = BTreeMap::new();
+    for reference in format.all_refs().iter().filter(|reference| {
+        matches!(
+            reference.kind,
+            XrefKind::ChainedBind | XrefKind::ChainedRebase
+        )
+    }) {
+        let observation = evidence
+            .pointers()
+            .observe_at_va(reference.source)
+            .map_err(|error| PointerRecoveryError::Recovery(error.to_string()))?;
+        if let Some(value) = observation.authentication {
+            authentication.insert(
+                reference.source.0,
                 PointerAuthentication {
-                    key,
-                    diversity,
-                    address_diversity,
+                    key: value.key,
+                    diversity: value.diversity,
+                    address_diversity: value.address_diversity,
                 },
-            ))
-        })
-        .collect()
+            );
+        }
+    }
+    Ok(authentication)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BTreeMap, PointerAuthentication, PointerRecordKind, record_authentication};
+
+    #[test]
+    fn authentication_belongs_only_to_chained_records_at_an_address() {
+        let authentication = PointerAuthentication {
+            key: 2,
+            diversity: 0x1234,
+            address_diversity: true,
+        };
+        let by_address = BTreeMap::from([(0x1000, authentication)]);
+
+        assert_eq!(
+            record_authentication(PointerRecordKind::ChainedBind, 0x1000, &by_address),
+            Some(authentication)
+        );
+        assert_eq!(
+            record_authentication(PointerRecordKind::ChainedRebase, 0x1000, &by_address),
+            Some(authentication)
+        );
+        assert_eq!(
+            record_authentication(PointerRecordKind::Stub, 0x1000, &by_address),
+            None
+        );
+        assert_eq!(
+            record_authentication(PointerRecordKind::LegacyBind, 0x1000, &by_address),
+            None
+        );
+    }
 }

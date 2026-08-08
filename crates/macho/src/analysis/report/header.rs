@@ -248,9 +248,33 @@ pub enum HeaderType {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderOwnerRef {
-    pub kind: HeaderOwnerKind,
     pub path: NonEmpty<Identifier>,
+    /// One exact scope kind for every component in `path`.
+    pub scope_kinds: NonEmpty<HeaderOwnerKind>,
+    /// Access of each scope within its parent, parallel to `path`. Namespace
+    /// components and top-level scopes use `None`.
+    pub scope_access: NonEmpty<Option<Access>>,
+    /// Access of the declaration within the terminal record owner. Namespace
+    /// ownership has no member access.
+    pub member_access: Option<Access>,
     pub entity_id: Option<EntityId>,
+}
+
+impl HeaderOwnerRef {
+    /// Returns the terminal owner kind when the typed scope path is well formed.
+    pub fn terminal_kind(&self) -> HeaderOwnerKind {
+        *self
+            .scope_kinds
+            .as_slice()
+            .last()
+            .expect("HeaderOwnerRef scope kinds are non-empty")
+    }
+
+    /// Returns whether every path component has an exact corresponding kind.
+    pub fn has_exact_scopes(&self) -> bool {
+        self.path.as_slice().len() == self.scope_kinds.as_slice().len()
+            && self.path.as_slice().len() == self.scope_access.as_slice().len()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -272,6 +296,13 @@ pub struct HeaderField {
     pub offset: Option<u64>,
     pub bit_width: Option<u32>,
     pub access: Access,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderRecordMember {
+    pub access: Access,
+    pub declaration: Box<HeaderDecl>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -348,7 +379,7 @@ pub enum HeaderDecl {
         complete: bool,
         bases: Vec<HeaderBase>,
         fields: Vec<HeaderField>,
-        members: Vec<HeaderDecl>,
+        members: Vec<HeaderRecordMember>,
     },
     Forward {
         id: EntityId,

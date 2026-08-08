@@ -37,8 +37,9 @@ use crate::analysis::executable_bytes::{
 };
 use crate::analysis::functions::{
     FunctionCollectorStatus, FunctionEvidenceSource, FunctionImageIdentity, FunctionIndex,
-    FunctionLookup, FunctionOwners, FunctionRecoveryError, FunctionRecoveryGuidance,
-    FunctionRecoveryInputs, FunctionRecoveryLimits, FunctionRelationshipKind, RecoveredFunction,
+    FunctionLookup, FunctionOwner, FunctionOwners, FunctionRecoveryAuthority,
+    FunctionRecoveryError, FunctionRecoveryGuidance, FunctionRecoveryInputs,
+    FunctionRecoveryLimits, FunctionRelationshipKind, RecoveredFunction,
 };
 use crate::analysis::image_layout::{ImageLayoutError, ImageLayoutIndex, ImageLayoutLimits};
 use crate::analysis::indirect_calls::{
@@ -51,14 +52,15 @@ use crate::analysis::objc_index::{
 };
 use crate::analysis::pointer_index::{PointerIndex, PointerRecoveryError, PointerRecoveryLimits};
 use crate::analysis::recovery::{
-    ProgramCoverage, ProgramCoverageDelta, ProgramCoverageDimension, ProgramCoverageUnit,
-    ProgramSubjectKey, RecoveryChoice, RecoveryContractSchema, RecoveryDecision,
-    RecoveryDecisionApplicability, RecoveryDecisionApplication, RecoveryDecisionApplicationStatus,
-    RecoveryDecisionDerivation, RecoveryDecisionDerivationKind, RecoveryDelta, RecoveryDeltaError,
-    RecoveryDeltaKind, RecoveryDeltaRecord, RecoveryDeltaSummary, RecoveryGuide,
-    RecoveryGuideApplicability, RecoveryGuideApplication, RecoveryGuideValidation, RecoveryLayer,
-    RecoveryQuestion, RecoveryQuestionKind, RecoveryReferenceTargetKey, build_recovery_questions,
-    validate_recovery_guide,
+    GuidedReferenceOwnership, ProgramCoverage, ProgramCoverageDelta, ProgramCoverageDimension,
+    ProgramCoverageUnit, ProgramSubjectKey, RecoveryChoice, RecoveryContractSchema,
+    RecoveryDecision, RecoveryDecisionApplicability, RecoveryDecisionApplication,
+    RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation, RecoveryDecisionDerivationKind,
+    RecoveryDelta, RecoveryDeltaError, RecoveryDeltaKind, RecoveryDeltaRecord,
+    RecoveryDeltaSummary, RecoveryGuide, RecoveryGuideApplicability, RecoveryGuideApplication,
+    RecoveryGuideValidation, RecoveryLayer, RecoveryQuestion, RecoveryQuestionKind,
+    RecoveryReferenceKind, RecoveryReferenceTargetKey, build_recovery_questions,
+    cross_reference_subject, validate_recovery_guide,
 };
 use crate::analysis::rtti::{
     RecoveredTypeInfo, RecoveredVtable, RttiIndex, RttiIndexStatus, RttiRecoveryError,
@@ -82,14 +84,14 @@ use crate::analysis::transfers::{
     DirectFunctionTransfer, DirectTransferIndex, FunctionTargetResolution, RecoveredThunk,
     TransferIndexStatus, TransferRecoveryError, TransferRecoveryLimits,
 };
-use crate::analysis::xref::{
-    Xref, XrefIndex, XrefIndexStatus, XrefKind, XrefRecoveryLimits, XrefTarget,
-};
+use crate::analysis::xref::{Xref, XrefIndex, XrefIndexStatus, XrefRecoveryLimits, XrefTarget};
 
 /// Current schema for serialized whole-program recovery limits.
 pub const PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION: u32 = 1;
 /// Current schema for examined-universe and stage completeness receipts.
 pub const PROGRAM_COMPLETENESS_SCHEMA_VERSION: u32 = 1;
+/// Current schema for durable whole-program Fact IR documents.
+pub const PROGRAM_FACT_IR_SCHEMA_VERSION: u32 = 1;
 
 /// Explicit limits for every independently selectable recovery module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -211,17 +213,17 @@ pub enum ProgramRecoveryError {
     /// A supplied function inventory belongs to different image bytes.
     #[error("supplied function inventory and Mach-O image identities differ")]
     FunctionImageMismatch,
+    /// A prior recovered program belongs to different image bytes.
+    #[error("prior recovered program and Mach-O image identities differ")]
+    ProgramImageMismatch,
+    /// The selected-image leaf evidence session could not be constructed.
+    #[error("selected-image evidence session failed: {0}")]
+    Evidence(String),
     /// A recovery guide is stale, conflicting, or unsupported for the base program.
     #[error("recovery guide validation failed")]
     GuideValidationFailed {
         /// Complete non-mutating validation report.
         validation: RecoveryGuideValidation,
-    },
-    /// A validated decision kind does not yet have a coherent cold-rebuild implementation.
-    #[error("recovery guide decision {decision_index} is not yet supported for cold rebuild")]
-    UnsupportedGuideApplication {
-        /// Zero-based decision position in the guide.
-        decision_index: u64,
     },
     /// Image layout construction failed.
     #[error(transparent)]
@@ -279,6 +281,91 @@ pub enum ProgramRecoveryError {
     Semantics(#[from] SemanticRecoveryError),
 }
 
+/// Structural failure in a durable program Fact IR document.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum ProgramFactValidationError {
+    /// The document uses an unsupported Fact IR schema.
+    #[error("unsupported program Fact IR schema {actual}; supported schema is {supported}")]
+    UnsupportedSchema {
+        /// Supported schema.
+        supported: u32,
+        /// Supplied schema.
+        actual: u32,
+    },
+    /// The selected-image content identity is malformed.
+    #[error("program Fact IR image identity is malformed")]
+    InvalidImageIdentity,
+    /// The recovery question/guide contract does not match this library.
+    #[error("program Fact IR recovery contract is unsupported")]
+    UnsupportedRecoveryContract,
+    /// Executed stages are not the dependency closure of the request.
+    #[error("program Fact IR executed stages do not match request dependency closure")]
+    StageClosureMismatch,
+    /// A selected stage and its durable payload disagree.
+    #[error("program Fact IR payload presence disagrees for stage {stage:?}")]
+    StagePayloadMismatch {
+        /// Inconsistent stage.
+        stage: ProgramRecoveryStage,
+    },
+    /// A stage payload is bound to different image bytes.
+    #[error("program Fact IR payload image differs for stage {stage:?}")]
+    StageImageMismatch {
+        /// Inconsistent stage.
+        stage: ProgramRecoveryStage,
+    },
+    /// A stage payload was built under different limits.
+    #[error("program Fact IR payload limits differ for stage {stage:?}")]
+    StageLimitsMismatch {
+        /// Inconsistent stage.
+        stage: ProgramRecoveryStage,
+    },
+    /// A stage payload violates ordering or receipt invariants required by its readers.
+    #[error("program Fact IR payload invariants are invalid for stage {stage:?}")]
+    StagePayloadInvariant {
+        /// Invalid stage.
+        stage: ProgramRecoveryStage,
+    },
+    /// The stored completeness ledger is invalid.
+    #[error(transparent)]
+    Completeness(#[from] ProgramCompletenessValidationError),
+    /// The stored completeness ledger is not derived from the payload.
+    #[error("program Fact IR completeness does not match its stage payloads")]
+    CompletenessMismatch,
+    /// Stored coverage is not derived from the payload.
+    #[error("program Fact IR coverage does not match its stage payloads")]
+    CoverageMismatch,
+    /// Stored recovery questions are not derived from the payload.
+    #[error("program Fact IR questions do not match its stage payloads")]
+    QuestionsMismatch,
+    /// A guided reference owner does not identify one exact retained xref and
+    /// one independently possible source-range owner.
+    #[error("program Fact IR guided reference ownership is inconsistent")]
+    GuidedReferenceOwnershipMismatch,
+    /// Guide and application receipt presence or identity is inconsistent.
+    #[error("program Fact IR guide application is inconsistent")]
+    GuideApplicationMismatch,
+    /// A nested recovery limit is invalid.
+    #[error("program Fact IR recovery limits are invalid: {0}")]
+    InvalidLimits(String),
+}
+
+/// JSON decoding or validation failure for a durable Fact IR document.
+#[derive(Debug, Error)]
+pub enum ProgramFactDocumentError {
+    /// The input is not a syntactically valid document.
+    #[error("invalid program Fact IR JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    /// A nested record contained a field outside the current wire schema.
+    #[error("unknown program Fact IR field at {path}")]
+    UnknownField {
+        /// JSON path of the first unrecognized field.
+        path: String,
+    },
+    /// The decoded document violates the Fact IR contract.
+    #[error(transparent)]
+    Validation(#[from] ProgramFactValidationError),
+}
+
 /// One layer of the unified recovery pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -322,6 +409,30 @@ pub enum ProgramRecoveryStage {
 }
 
 impl ProgramRecoveryStage {
+    /// Stable wire spelling used by diagnostics and frontier subjects.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::ImageLayout => "image_layout",
+            Self::Pointers => "pointers",
+            Self::Symbols => "symbols",
+            Self::Strings => "strings",
+            Self::Objc => "objc",
+            Self::Swift => "swift",
+            Self::Dwarf => "dwarf",
+            Self::Functions => "functions",
+            Self::ControlFlow => "control_flow",
+            Self::ExecutableBytes => "executable_bytes",
+            Self::DirectCalls => "direct_calls",
+            Self::Transfers => "transfers",
+            Self::IndirectCalls => "indirect_calls",
+            Self::Xrefs => "xrefs",
+            Self::Rtti => "rtti",
+            Self::Exceptions => "exceptions",
+            Self::Dependencies => "dependencies",
+            Self::Semantics => "semantics",
+        }
+    }
+
     /// Deterministic direct dependencies required by this stage.
     pub const fn dependencies(self) -> &'static [Self] {
         match self {
@@ -396,6 +507,7 @@ impl ProgramRecoveryStage {
 
 /// Selective program-recovery request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProgramRecoveryRequest {
     requested: BTreeSet<ProgramRecoveryStage>,
     limits: ProgramRecoveryLimits,
@@ -641,6 +753,8 @@ pub struct ResolvedDirectCallEdge<'program> {
 pub struct ProgramReferenceView<'program> {
     /// Underlying authoritative xref.
     pub reference: &'program Xref,
+    /// Selected source owner and its independent-or-guided authority.
+    pub source_owner: Option<ProgramReferenceOwner<'program>>,
     /// Function ownership of an internal target, when function recovery was selected.
     pub target_function: Option<FunctionLookup<'program>>,
     /// Symbol records defining the internal target.
@@ -653,6 +767,15 @@ pub struct ProgramReferenceView<'program> {
     pub target_data_object: Option<&'program crate::analysis::semantic_index::RecoveredDataObject>,
     /// Typed terminal binding for the target rather than a bare address.
     pub target_binding: ProgramReferenceBinding,
+}
+
+/// One selected function owner for an exact reference use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramReferenceOwner<'program> {
+    /// Recovered owner and its range-ownership confidence.
+    pub owner: FunctionOwner<'program>,
+    /// Whether this exact ownership relation is independent or caller-guided.
+    pub authority: ProgramFactAuthority,
 }
 
 /// Terminal classification of one cross-reference target.
@@ -682,6 +805,11 @@ impl<'program> ProgramReferenceAnnotations<'program> {
     /// Underlying authoritative xref.
     pub const fn reference(&self) -> &'program Xref {
         self.reference
+    }
+
+    /// Selected source owner, preserving whether the relation was guided.
+    pub fn source_owner(&self) -> Option<ProgramReferenceOwner<'program>> {
+        self.program.reference_owner(self.reference)
     }
 
     /// Function ownership of an internal target, when function recovery was selected.
@@ -1004,6 +1132,8 @@ pub struct ProgramFacts<'program> {
     pub indirect_calls: Option<&'program IndirectCallIndex>,
     /// Cross-reference inventory, when selected.
     pub xrefs: Option<&'program XrefIndex>,
+    /// Caller-guided owners of exact reference uses.
+    pub guided_reference_ownerships: &'program [GuidedReferenceOwnership],
     /// Named and structural RTTI and vtable inventory, when selected.
     pub rtti: Option<&'program RttiIndex>,
     /// Exception and unwind boundary inventory, when selected.
@@ -1121,8 +1251,756 @@ impl<'program> ProgramFacts<'program> {
     }
 }
 
+/// Owned stage payloads in the durable whole-program Fact IR.
+///
+/// These fields are deliberately separate from the document's identity,
+/// request, receipts, and guide metadata. They contain queryable recovery
+/// products only; selected-image bytes remain outside the document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveredProgramBody {
+    /// Indexed image layout, when selected.
+    pub image_layout: Option<ImageLayoutIndex>,
+    /// Pointer, fixup, bind, stub, and relocation inventory, when selected.
+    pub pointers: Option<PointerIndex>,
+    /// Symbol inventory, when selected.
+    pub symbols: Option<SymbolInventory>,
+    /// String inventory, when selected.
+    pub strings: Option<StringIndex>,
+    /// Objective-C facts, when selected.
+    pub objc: Option<ObjcIndex>,
+    /// Swift ABI facts, when selected.
+    pub swift: Option<SwiftIndex>,
+    /// DWARF facts, when selected.
+    pub dwarf: Option<DwarfIndex>,
+    /// Function identities and ownership, when selected.
+    pub functions: Option<FunctionIndex>,
+    /// Control-flow graphs, when selected.
+    pub control_flow: Option<ControlFlowIndex>,
+    /// Executable-byte classifications, when selected.
+    pub executable_bytes: Option<ExecutableByteIndex>,
+    /// Direct-call graph, when selected.
+    pub direct_calls: Option<DirectCallGraph>,
+    /// Direct transfers and thunks, when selected.
+    pub transfers: Option<DirectTransferIndex>,
+    /// Indirect transfers and dynamic dispatch, when selected.
+    pub indirect_calls: Option<IndirectCallIndex>,
+    /// Cross references, when selected.
+    pub xrefs: Option<XrefIndex>,
+    /// Caller-guided owners of exact cross-reference uses.
+    pub guided_reference_ownerships: Vec<GuidedReferenceOwnership>,
+    /// C++ RTTI and vtable facts, when selected.
+    pub rtti: Option<RttiIndex>,
+    /// Exception and unwind facts, when selected.
+    pub exceptions: Option<ExceptionIndex>,
+    /// Named dependencies and runtime frontiers, when selected.
+    pub dependencies: Option<DependencyIndex>,
+    /// Semantic data, signature, frame, and local facts, when selected.
+    pub semantics: Option<SemanticIndex>,
+}
+
+/// Strict, versioned, durable Fact IR for one exact selected Mach-O image.
+///
+/// The document is queryable without image bytes. Any operation that decodes
+/// or deepens recovery still requires a live [`MachoFile`] whose identity
+/// exactly matches [`Self::image`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramFactDocument {
+    /// Exact Fact IR schema version.
+    pub schema_version: u32,
+    /// Version of stable recovery subject, question, and guide identities.
+    pub recovery_schema: RecoveryContractSchema,
+    /// Content hash, architecture, and byte length of the selected thin image.
+    pub image: FunctionImageIdentity,
+    /// Selective request and nested budgets that produced this document.
+    pub request: ProgramRecoveryRequest,
+    /// Requested stages plus deterministic dependency closure.
+    pub executed: BTreeSet<ProgramRecoveryStage>,
+    /// Validated completion ledger.
+    pub completeness: ProgramRecoveryCompleteness,
+    /// Materialized truth-aware coverage for offline inspection.
+    pub coverage: ProgramCoverage,
+    /// Guide retained by the current state, when caller guidance was applied.
+    pub guide: Option<RecoveryGuide>,
+    /// Application and provenance receipt for the retained guide.
+    pub guide_application: Option<RecoveryGuideApplication>,
+    /// Current stable ambiguities.
+    pub questions: Vec<RecoveryQuestion>,
+    /// Owned recovery-stage payloads.
+    pub program: RecoveredProgramBody,
+}
+
+/// Availability and completion of one recovery stage in a program state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramStageStatus {
+    /// The stage was outside the dependency-closed request.
+    Absent,
+    /// The stage retained its complete declared universe.
+    Complete,
+    /// The stage retained useful but incomplete or unresolved evidence.
+    Partial,
+    /// An explicit budget omitted stage evidence.
+    Truncated,
+}
+
+/// Epistemic authority attached to a structural program subject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgramFactAuthority {
+    /// Established without caller guidance in the current state.
+    Independent,
+    /// Established, reclassified, or admitted through caller guidance.
+    Guided,
+}
+
+impl ProgramFactDocument {
+    /// Decode and validate one strict JSON Fact IR document.
+    pub fn load_json(bytes: &[u8]) -> Result<Self, ProgramFactDocumentError> {
+        let input: serde_json::Value = serde_json::from_slice(bytes)?;
+        let document: Self = serde_json::from_value(input.clone())?;
+        let canonical = serde_json::to_value(&document)?;
+        if let Some(path) = first_unknown_json_field(&input, &canonical, "$".to_owned()) {
+            return Err(ProgramFactDocumentError::UnknownField { path });
+        }
+        document.validate()?;
+        Ok(document)
+    }
+
+    /// Encode a stable, human-inspectable JSON Fact IR document.
+    pub fn to_json_pretty(&self) -> Result<Vec<u8>, ProgramFactDocumentError> {
+        self.validate()?;
+        Ok(serde_json::to_vec_pretty(self)?)
+    }
+
+    /// Validate schema, identity, request closure, payload binding, receipts,
+    /// coverage, questions, and guide provenance without image bytes.
+    pub fn validate(&self) -> Result<(), ProgramFactValidationError> {
+        if self.schema_version != PROGRAM_FACT_IR_SCHEMA_VERSION {
+            return Err(ProgramFactValidationError::UnsupportedSchema {
+                supported: PROGRAM_FACT_IR_SCHEMA_VERSION,
+                actual: self.schema_version,
+            });
+        }
+        if self.recovery_schema != RecoveryContractSchema::CURRENT {
+            return Err(ProgramFactValidationError::UnsupportedRecoveryContract);
+        }
+        if self.image.byte_len == 0
+            || self.image.cpu_type == 0
+            || self.image.content_sha256.len() != 64
+            || !self
+                .image
+                .content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(ProgramFactValidationError::InvalidImageIdentity);
+        }
+        self.request
+            .limits
+            .validate()
+            .map_err(|error| ProgramFactValidationError::InvalidLimits(error.to_string()))?;
+        if self.executed != self.request.resolved() {
+            return Err(ProgramFactValidationError::StageClosureMismatch);
+        }
+
+        macro_rules! validate_stage {
+            ($stage:expr, $payload:expr, $limits:expr) => {{
+                let selected = self.executed.contains(&$stage);
+                if selected != $payload.is_some() {
+                    return Err(ProgramFactValidationError::StagePayloadMismatch { stage: $stage });
+                }
+                if let Some(index) = $payload.as_ref() {
+                    if index.image() != &self.image {
+                        return Err(ProgramFactValidationError::StageImageMismatch {
+                            stage: $stage,
+                        });
+                    }
+                    if index.limits() != $limits {
+                        return Err(ProgramFactValidationError::StageLimitsMismatch {
+                            stage: $stage,
+                        });
+                    }
+                }
+            }};
+        }
+        let limits = self.request.limits;
+        validate_stage!(
+            ProgramRecoveryStage::ImageLayout,
+            self.program.image_layout,
+            limits.image_layout
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Pointers,
+            self.program.pointers,
+            limits.pointers
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Symbols,
+            self.program.symbols,
+            limits.symbols
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Strings,
+            self.program.strings,
+            limits.strings
+        );
+        validate_stage!(ProgramRecoveryStage::Objc, self.program.objc, limits.objc);
+        validate_stage!(
+            ProgramRecoveryStage::Swift,
+            self.program.swift,
+            limits.swift
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Dwarf,
+            self.program.dwarf,
+            limits.dwarf
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Functions,
+            self.program.functions,
+            limits.functions
+        );
+        validate_stage!(
+            ProgramRecoveryStage::ControlFlow,
+            self.program.control_flow,
+            limits.control_flow
+        );
+        validate_stage!(
+            ProgramRecoveryStage::ExecutableBytes,
+            self.program.executable_bytes,
+            limits.executable_bytes
+        );
+        validate_stage!(
+            ProgramRecoveryStage::DirectCalls,
+            self.program.direct_calls,
+            limits.direct_calls
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Transfers,
+            self.program.transfers,
+            limits.transfers
+        );
+        validate_stage!(
+            ProgramRecoveryStage::IndirectCalls,
+            self.program.indirect_calls,
+            limits.indirect_calls
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Xrefs,
+            self.program.xrefs,
+            limits.xrefs
+        );
+        validate_stage!(ProgramRecoveryStage::Rtti, self.program.rtti, limits.rtti);
+        validate_stage!(
+            ProgramRecoveryStage::Exceptions,
+            self.program.exceptions,
+            limits.exceptions
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Dependencies,
+            self.program.dependencies,
+            limits.dependencies
+        );
+        validate_stage!(
+            ProgramRecoveryStage::Semantics,
+            self.program.semantics,
+            limits.semantics
+        );
+        if self
+            .program
+            .image_layout
+            .as_ref()
+            .is_some_and(|layout| !layout.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::ImageLayout,
+            });
+        }
+        if self
+            .program
+            .pointers
+            .as_ref()
+            .is_some_and(|pointers| !pointers.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Pointers,
+            });
+        }
+        if self
+            .program
+            .symbols
+            .as_ref()
+            .is_some_and(|symbols| !symbols.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Symbols,
+            });
+        }
+        if self
+            .program
+            .strings
+            .as_ref()
+            .is_some_and(|strings| !strings.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Strings,
+            });
+        }
+        if self
+            .program
+            .objc
+            .as_ref()
+            .is_some_and(|objc| !objc.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Objc,
+            });
+        }
+        if self
+            .program
+            .swift
+            .as_ref()
+            .is_some_and(|swift| !swift.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Swift,
+            });
+        }
+        if self
+            .program
+            .dwarf
+            .as_ref()
+            .is_some_and(|dwarf| !dwarf.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Dwarf,
+            });
+        }
+        if self
+            .program
+            .exceptions
+            .as_ref()
+            .is_some_and(|exceptions| !exceptions.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Exceptions,
+            });
+        }
+        if self
+            .program
+            .semantics
+            .as_ref()
+            .is_some_and(|semantics| !semantics.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Semantics,
+            });
+        }
+        if self
+            .program
+            .xrefs
+            .as_ref()
+            .is_some_and(|xrefs| !xrefs.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Xrefs,
+            });
+        }
+        if self
+            .program
+            .functions
+            .as_ref()
+            .is_some_and(|functions| !functions.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Functions,
+            });
+        }
+        if self
+            .program
+            .control_flow
+            .as_ref()
+            .is_some_and(|control_flow| !control_flow.durable_invariants_hold())
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::ControlFlow,
+            });
+        }
+        macro_rules! validate_durable_payload {
+            ($stage:expr, $payload:expr) => {
+                if $payload
+                    .as_ref()
+                    .is_some_and(|index| !index.durable_invariants_hold())
+                {
+                    return Err(ProgramFactValidationError::StagePayloadInvariant {
+                        stage: $stage,
+                    });
+                }
+            };
+        }
+        validate_durable_payload!(
+            ProgramRecoveryStage::ExecutableBytes,
+            self.program.executable_bytes
+        );
+        validate_durable_payload!(ProgramRecoveryStage::DirectCalls, self.program.direct_calls);
+        validate_durable_payload!(ProgramRecoveryStage::Transfers, self.program.transfers);
+        validate_durable_payload!(
+            ProgramRecoveryStage::IndirectCalls,
+            self.program.indirect_calls
+        );
+        validate_durable_payload!(ProgramRecoveryStage::Rtti, self.program.rtti);
+        validate_durable_payload!(
+            ProgramRecoveryStage::Dependencies,
+            self.program.dependencies
+        );
+        if let (Some(functions), Some(control_flow)) =
+            (&self.program.functions, &self.program.control_flow)
+            && control_flow.functions().iter().any(|graph| {
+                functions
+                    .by_entry(graph.function_entry)
+                    .is_none_or(|function| function.identity != graph.identity)
+            })
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::ControlFlow,
+            });
+        }
+        if let (Some(layout), Some(bytes)) =
+            (&self.program.image_layout, &self.program.executable_bytes)
+            && !bytes.layout_invariants_hold(layout)
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::ExecutableBytes,
+            });
+        }
+        if let (Some(functions), Some(control_flow), Some(calls)) = (
+            &self.program.functions,
+            &self.program.control_flow,
+            &self.program.direct_calls,
+        ) && !calls.source_invariants_hold(functions, control_flow)
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::DirectCalls,
+            });
+        }
+        if let (Some(functions), Some(control_flow), Some(transfers)) = (
+            &self.program.functions,
+            &self.program.control_flow,
+            &self.program.transfers,
+        ) && !transfers.source_invariants_hold(functions, control_flow)
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::Transfers,
+            });
+        }
+        if let (Some(functions), Some(control_flow), Some(indirect)) = (
+            &self.program.functions,
+            &self.program.control_flow,
+            &self.program.indirect_calls,
+        ) && !indirect.source_invariants_hold(functions, control_flow)
+        {
+            return Err(ProgramFactValidationError::StagePayloadInvariant {
+                stage: ProgramRecoveryStage::IndirectCalls,
+            });
+        }
+
+        let mut prior_reference = None;
+        for ownership in &self.program.guided_reference_ownerships {
+            let reference_key = (
+                ownership.source,
+                ownership.target.clone(),
+                ownership.reference_kind,
+            );
+            if prior_reference
+                .as_ref()
+                .is_some_and(|prior| prior >= &reference_key)
+            {
+                return Err(ProgramFactValidationError::GuidedReferenceOwnershipMismatch);
+            }
+            prior_reference = Some(reference_key);
+            let exact_reference = ProgramSubjectKey::CrossReference {
+                source: ownership.source,
+                target: ownership.target.clone(),
+                reference_kind: ownership.reference_kind,
+            };
+            if !self.program.xrefs.as_ref().is_some_and(|xrefs| {
+                xrefs
+                    .all_refs()
+                    .iter()
+                    .any(|reference| cross_reference_subject(reference) == exact_reference)
+            }) || !self.program.functions.as_ref().is_some_and(|functions| {
+                functions
+                    .owners(ownership.source)
+                    .any(|owner| owner.function.entry == ownership.function_entry)
+            }) {
+                return Err(ProgramFactValidationError::GuidedReferenceOwnershipMismatch);
+            }
+        }
+
+        self.completeness.validate()?;
+        if self.completeness.examined_universe.image != self.image
+            || self.completeness.examined_universe.stages
+                != self.executed.iter().copied().collect::<Vec<_>>()
+        {
+            return Err(ProgramFactValidationError::CompletenessMismatch);
+        }
+        let program = self.as_program_unchecked();
+        let expected_completeness =
+            program_completeness(&self.image, &self.request, program.facts());
+        if self.completeness != expected_completeness {
+            return Err(ProgramFactValidationError::CompletenessMismatch);
+        }
+        if self.coverage != build_program_coverage(&program) {
+            return Err(ProgramFactValidationError::CoverageMismatch);
+        }
+        if self.questions
+            != build_recovery_questions(
+                &self.image,
+                self.program.functions.as_ref(),
+                self.program.control_flow.as_ref(),
+                self.program.executable_bytes.as_ref(),
+                self.program.xrefs.as_ref(),
+                &self.program.guided_reference_ownerships,
+            )
+        {
+            return Err(ProgramFactValidationError::QuestionsMismatch);
+        }
+        match (&self.guide, &self.guide_application) {
+            (None, None) if self.program.guided_reference_ownerships.is_empty() => {}
+            (Some(guide), Some(application))
+                if guide.schema == self.recovery_schema
+                    && guide.image == self.image
+                    && guide_application_is_consistent(
+                        &self.image,
+                        &self.coverage,
+                        guide,
+                        application,
+                    )
+                    && guided_reference_ownerships_are_consistent(
+                        guide,
+                        application,
+                        &self.program.guided_reference_ownerships,
+                    ) => {}
+            _ => return Err(ProgramFactValidationError::GuideApplicationMismatch),
+        }
+        Ok(())
+    }
+
+    fn as_program_unchecked(&self) -> RecoveredProgram {
+        RecoveredProgram {
+            image: self.image.clone(),
+            recovery_schema: self.recovery_schema,
+            request: self.request.clone(),
+            executed: self.executed.clone(),
+            image_layout: self.program.image_layout.clone(),
+            pointers: self.program.pointers.clone(),
+            symbols: self.program.symbols.clone(),
+            strings: self.program.strings.clone(),
+            objc: self.program.objc.clone(),
+            swift: self.program.swift.clone(),
+            dwarf: self.program.dwarf.clone(),
+            functions: self.program.functions.clone(),
+            control_flow: self.program.control_flow.clone(),
+            executable_bytes: self.program.executable_bytes.clone(),
+            direct_calls: self.program.direct_calls.clone(),
+            transfers: self.program.transfers.clone(),
+            indirect_calls: self.program.indirect_calls.clone(),
+            xrefs: self.program.xrefs.clone(),
+            guided_reference_ownerships: self.program.guided_reference_ownerships.clone(),
+            rtti: self.program.rtti.clone(),
+            exceptions: self.program.exceptions.clone(),
+            dependencies: self.program.dependencies.clone(),
+            semantics: self.program.semantics.clone(),
+            questions: self.questions.clone(),
+            guide: self.guide.clone(),
+            guide_application: self.guide_application.clone(),
+            completeness: self.completeness.clone(),
+        }
+    }
+
+    fn into_program_unchecked(self) -> RecoveredProgram {
+        RecoveredProgram {
+            image: self.image,
+            recovery_schema: self.recovery_schema,
+            request: self.request,
+            executed: self.executed,
+            image_layout: self.program.image_layout,
+            pointers: self.program.pointers,
+            symbols: self.program.symbols,
+            strings: self.program.strings,
+            objc: self.program.objc,
+            swift: self.program.swift,
+            dwarf: self.program.dwarf,
+            functions: self.program.functions,
+            control_flow: self.program.control_flow,
+            executable_bytes: self.program.executable_bytes,
+            direct_calls: self.program.direct_calls,
+            transfers: self.program.transfers,
+            indirect_calls: self.program.indirect_calls,
+            xrefs: self.program.xrefs,
+            guided_reference_ownerships: self.program.guided_reference_ownerships,
+            rtti: self.program.rtti,
+            exceptions: self.program.exceptions,
+            dependencies: self.program.dependencies,
+            semantics: self.program.semantics,
+            questions: self.questions,
+            guide: self.guide,
+            guide_application: self.guide_application,
+            completeness: self.completeness,
+        }
+    }
+}
+
+fn first_unknown_json_field(
+    input: &serde_json::Value,
+    canonical: &serde_json::Value,
+    path: String,
+) -> Option<String> {
+    match (input, canonical) {
+        (serde_json::Value::Object(input), serde_json::Value::Object(canonical)) => {
+            for (key, value) in input {
+                let field_path = format!("{path}.{key}");
+                let Some(canonical_value) = canonical.get(key) else {
+                    return Some(field_path);
+                };
+                if let Some(unknown) = first_unknown_json_field(value, canonical_value, field_path)
+                {
+                    return Some(unknown);
+                }
+            }
+            None
+        }
+        (serde_json::Value::Array(input), serde_json::Value::Array(canonical)) => input
+            .iter()
+            .zip(canonical)
+            .enumerate()
+            .find_map(|(index, (value, canonical_value))| {
+                first_unknown_json_field(value, canonical_value, format!("{path}[{index}]"))
+            }),
+        _ => None,
+    }
+}
+
+fn guide_application_is_consistent(
+    image: &FunctionImageIdentity,
+    coverage: &ProgramCoverage,
+    guide: &RecoveryGuide,
+    application: &RecoveryGuideApplication,
+) -> bool {
+    if application.validation.decisions.len() != guide.decisions.len()
+        || application.decisions.len() != guide.decisions.len()
+        || application.delta.image != *image
+        || application.coverage_delta.before.image != *image
+        || application.coverage_delta.after != *coverage
+        || application
+            .suppressed_signals
+            .iter()
+            .any(|signal| signal.key.image != *image)
+        || application
+            .delta
+            .records
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+    {
+        return false;
+    }
+    if application
+        .validation
+        .decisions
+        .iter()
+        .enumerate()
+        .any(|(index, decision)| decision.decision_index != index as u64)
+        || application
+            .decisions
+            .iter()
+            .enumerate()
+            .any(|(index, decision)| decision.decision_index != index as u64)
+        || application.delta.records.iter().any(|record| {
+            record.derivations.windows(2).any(|pair| pair[0] >= pair[1])
+                || record
+                    .derivations
+                    .iter()
+                    .any(|derivation| derivation.decision_index as usize >= guide.decisions.len())
+        })
+    {
+        return false;
+    }
+    let mut validation = application.validation.clone();
+    summarize_guide_validation(&mut validation);
+    if validation.applicability != application.validation.applicability {
+        return false;
+    }
+    let mut summary = RecoveryDeltaSummary::default();
+    for record in &application.delta.records {
+        match record.kind {
+            RecoveryDeltaKind::Added => summary.added += 1,
+            RecoveryDeltaKind::Removed => summary.removed += 1,
+            RecoveryDeltaKind::Reclassified => summary.reclassified += 1,
+            RecoveryDeltaKind::Resolved => summary.resolved += 1,
+            RecoveryDeltaKind::NewlyUnresolved => summary.newly_unresolved += 1,
+        }
+    }
+    summary == application.delta.summary
+}
+
+fn guided_reference_ownerships_are_consistent(
+    guide: &RecoveryGuide,
+    application: &RecoveryGuideApplication,
+    ownerships: &[GuidedReferenceOwnership],
+) -> bool {
+    let every_ownership_has_applied_decision = ownerships.iter().all(|ownership| {
+        guide.decisions.iter().enumerate().any(|(index, decision)| {
+            matches!(
+                (&decision.point.subject, &decision.choice),
+                (
+                    ProgramSubjectKey::CrossReference {
+                        source,
+                        target,
+                        reference_kind,
+                    },
+                    RecoveryChoice::ReferenceOwner { function_entry },
+                ) if *source == ownership.source
+                    && *target == ownership.target
+                    && *reference_kind == ownership.reference_kind
+                    && *function_entry == ownership.function_entry
+            ) && application.decisions.iter().any(|result| {
+                result.decision_index == index as u64
+                    && result.status == RecoveryDecisionApplicationStatus::Applied
+            })
+        })
+    });
+    let every_applied_decision_has_ownership =
+        guide.decisions.iter().enumerate().all(|(index, decision)| {
+            let applied = application.decisions.iter().any(|result| {
+                result.decision_index == index as u64
+                    && result.status == RecoveryDecisionApplicationStatus::Applied
+            });
+            match (&decision.point.subject, &decision.choice, applied) {
+                (
+                    ProgramSubjectKey::CrossReference {
+                        source,
+                        target,
+                        reference_kind,
+                    },
+                    RecoveryChoice::ReferenceOwner { function_entry },
+                    true,
+                ) => ownerships.iter().any(|ownership| {
+                    ownership.source == *source
+                        && ownership.target == *target
+                        && ownership.reference_kind == *reference_kind
+                        && ownership.function_entry == *function_entry
+                }),
+                _ => true,
+            }
+        });
+    every_ownership_has_applied_decision && every_applied_decision_has_ownership
+}
+
 /// Deterministic Macho-owned recovery of one exact thin image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RecoveredProgram {
     image: FunctionImageIdentity,
     recovery_schema: RecoveryContractSchema,
@@ -1142,6 +2020,7 @@ pub struct RecoveredProgram {
     transfers: Option<DirectTransferIndex>,
     indirect_calls: Option<IndirectCallIndex>,
     xrefs: Option<XrefIndex>,
+    guided_reference_ownerships: Vec<GuidedReferenceOwnership>,
     rtti: Option<RttiIndex>,
     exceptions: Option<ExceptionIndex>,
     dependencies: Option<DependencyIndex>,
@@ -1158,6 +2037,84 @@ pub struct RecoveredProgram {
 pub struct RecoveryPreview {
     base: RecoveredProgram,
     guided: RecoveredProgram,
+}
+
+/// An internal, image-bound source of stage payloads whose inputs are known to
+/// be unchanged for the next immutable program state.
+struct ProgramRecoveryReuse<'program> {
+    prior: &'program RecoveredProgram,
+    dirty: BTreeSet<ProgramRecoveryStage>,
+}
+
+#[derive(Default)]
+struct ProgramRecoveryGuidance<'guide> {
+    functions: Option<&'guide FunctionRecoveryGuidance>,
+    executable_bytes: Option<&'guide ExecutableByteRecoveryGuidance>,
+    control_flow: Option<&'guide ControlFlowRecoveryGuidance>,
+    guide: Option<RecoveryGuide>,
+    reference_ownerships: Vec<GuidedReferenceOwnership>,
+}
+
+impl ProgramRecoveryReuse<'_> {
+    fn can_reuse(&self, stage: ProgramRecoveryStage) -> bool {
+        self.prior.executed.contains(&stage) && !self.dirty.contains(&stage)
+    }
+}
+
+fn dependent_stage_closure(
+    roots: impl IntoIterator<Item = ProgramRecoveryStage>,
+    executed: &BTreeSet<ProgramRecoveryStage>,
+) -> BTreeSet<ProgramRecoveryStage> {
+    let mut dirty = roots.into_iter().collect::<BTreeSet<_>>();
+    loop {
+        let prior_len = dirty.len();
+        for stage in executed {
+            let declared_input_is_dirty = stage
+                .dependencies()
+                .iter()
+                .any(|dependency| dirty.contains(dependency));
+            // Symbols are optional function evidence rather than a mandatory
+            // request dependency. When both stages are selected, however, the
+            // function inventory consumes that symbol payload and must be
+            // invalidated if it changes or is newly added.
+            let optional_input_is_dirty = *stage == ProgramRecoveryStage::Functions
+                && executed.contains(&ProgramRecoveryStage::Symbols)
+                && dirty.contains(&ProgramRecoveryStage::Symbols);
+            if declared_input_is_dirty || optional_input_is_dirty {
+                dirty.insert(*stage);
+            }
+        }
+        if dirty.len() == prior_len {
+            return dirty;
+        }
+    }
+}
+
+fn stage_limits_equal(
+    stage: ProgramRecoveryStage,
+    left: ProgramRecoveryLimits,
+    right: ProgramRecoveryLimits,
+) -> bool {
+    match stage {
+        ProgramRecoveryStage::ImageLayout => left.image_layout == right.image_layout,
+        ProgramRecoveryStage::Pointers => left.pointers == right.pointers,
+        ProgramRecoveryStage::Symbols => left.symbols == right.symbols,
+        ProgramRecoveryStage::Strings => left.strings == right.strings,
+        ProgramRecoveryStage::Objc => left.objc == right.objc,
+        ProgramRecoveryStage::Swift => left.swift == right.swift,
+        ProgramRecoveryStage::Dwarf => left.dwarf == right.dwarf,
+        ProgramRecoveryStage::Functions => left.functions == right.functions,
+        ProgramRecoveryStage::ControlFlow => left.control_flow == right.control_flow,
+        ProgramRecoveryStage::ExecutableBytes => left.executable_bytes == right.executable_bytes,
+        ProgramRecoveryStage::DirectCalls => left.direct_calls == right.direct_calls,
+        ProgramRecoveryStage::Transfers => left.transfers == right.transfers,
+        ProgramRecoveryStage::IndirectCalls => left.indirect_calls == right.indirect_calls,
+        ProgramRecoveryStage::Xrefs => left.xrefs == right.xrefs,
+        ProgramRecoveryStage::Rtti => left.rtti == right.rtti,
+        ProgramRecoveryStage::Exceptions => left.exceptions == right.exceptions,
+        ProgramRecoveryStage::Dependencies => left.dependencies == right.dependencies,
+        ProgramRecoveryStage::Semantics => left.semantics == right.semantics,
+    }
 }
 
 impl RecoveryPreview {
@@ -1190,7 +2147,7 @@ impl RecoveredProgram {
         macho: &MachoFile<'_>,
         request: ProgramRecoveryRequest,
     ) -> Result<Self, ProgramRecoveryError> {
-        Self::recover_selected(macho, None, request, None, None, None)
+        Self::recover_selected(macho, None, request, ProgramRecoveryGuidance::default())
     }
 
     /// Convenience entry point selecting every recovery module.
@@ -1201,8 +2158,140 @@ impl RecoveredProgram {
         Self::recover(macho, ProgramRecoveryRequest::all(limits))
     }
 
-    /// Validate a guide against an unguided base and cold-rebuild every
-    /// selected stage affected by its supported decisions.
+    /// Produce an immutable next program state by applying a guide to a prior
+    /// state under the same request and limits.
+    ///
+    /// The live image must match the prior state's content hash, architecture,
+    /// and byte length. The returned state always carries a guide-application
+    /// receipt, including for redundant or empty guides.
+    pub fn refine(
+        macho: &MachoFile<'_>,
+        prior: &Self,
+        guide: &RecoveryGuide,
+    ) -> Result<Self, ProgramRecoveryError> {
+        if prior.image != FunctionImageIdentity::from_macho(macho) {
+            return Err(ProgramRecoveryError::ProgramImageMismatch);
+        }
+        if prior.guide.as_ref() == Some(guide) && prior.guide_application.is_some() {
+            return Ok(prior.clone());
+        }
+        let base = match prior.guide {
+            None => prior.clone(),
+            Some(_) => Self::recover(macho, prior.request.clone())?,
+        };
+        let validation = base.validate_guide_for_image(macho, guide);
+        let mut next = Self::recover_guided_from_base(macho, prior.request.clone(), guide, &base)?;
+        if next.guide_application.is_none() {
+            next.guide = Some(guide.clone());
+            next.guide_application = Some(build_guide_application(&base, &next, guide, validation));
+        }
+        Ok(next)
+    }
+
+    /// Deepen a prior state by unioning additional requested stages and
+    /// recomputing dependency closure. Passing limits replaces the complete
+    /// nested limit set; `None` preserves the prior limits exactly.
+    pub fn deepen(
+        &self,
+        macho: &MachoFile<'_>,
+        extra_stages: impl IntoIterator<Item = ProgramRecoveryStage>,
+        limit_overrides: Option<ProgramRecoveryLimits>,
+    ) -> Result<Self, ProgramRecoveryError> {
+        if self.image != FunctionImageIdentity::from_macho(macho) {
+            return Err(ProgramRecoveryError::ProgramImageMismatch);
+        }
+        let mut requested = self.request.requested.clone();
+        requested.extend(extra_stages);
+        let request =
+            ProgramRecoveryRequest::new(requested, limit_overrides.unwrap_or(self.request.limits));
+        match self.guide.as_ref() {
+            Some(guide) => Self::recover_with_guide(macho, request, guide),
+            None => {
+                let executed = request.resolved();
+                let mut roots = executed
+                    .iter()
+                    .copied()
+                    .filter(|stage| {
+                        !self.executed.contains(stage)
+                            || !stage_limits_equal(*stage, self.request.limits, request.limits)
+                    })
+                    .collect::<BTreeSet<_>>();
+                // The final function inventory is refined by a newly selected
+                // CFG. Treat that feedback edge as dirty even though the
+                // declared dependency direction is Functions -> ControlFlow.
+                if roots.contains(&ProgramRecoveryStage::ControlFlow)
+                    && self.executed.contains(&ProgramRecoveryStage::Functions)
+                {
+                    roots.insert(ProgramRecoveryStage::Functions);
+                }
+                let dirty = dependent_stage_closure(roots, &executed);
+                Self::recover_selected_reusing(
+                    macho,
+                    None,
+                    request,
+                    ProgramRecoveryGuidance::default(),
+                    Some(ProgramRecoveryReuse { prior: self, dirty }),
+                )
+            }
+        }
+    }
+
+    /// Convert this state to the current durable Fact IR document.
+    pub fn to_fact_document(&self) -> ProgramFactDocument {
+        ProgramFactDocument {
+            schema_version: PROGRAM_FACT_IR_SCHEMA_VERSION,
+            recovery_schema: self.recovery_schema,
+            image: self.image.clone(),
+            request: self.request.clone(),
+            executed: self.executed.clone(),
+            completeness: self.completeness.clone(),
+            coverage: self.coverage(),
+            guide: self.guide.clone(),
+            guide_application: self.guide_application.clone(),
+            questions: self.questions.clone(),
+            program: RecoveredProgramBody {
+                image_layout: self.image_layout.clone(),
+                pointers: self.pointers.clone(),
+                symbols: self.symbols.clone(),
+                strings: self.strings.clone(),
+                objc: self.objc.clone(),
+                swift: self.swift.clone(),
+                dwarf: self.dwarf.clone(),
+                functions: self.functions.clone(),
+                control_flow: self.control_flow.clone(),
+                executable_bytes: self.executable_bytes.clone(),
+                direct_calls: self.direct_calls.clone(),
+                transfers: self.transfers.clone(),
+                indirect_calls: self.indirect_calls.clone(),
+                xrefs: self.xrefs.clone(),
+                guided_reference_ownerships: self.guided_reference_ownerships.clone(),
+                rtti: self.rtti.clone(),
+                exceptions: self.exceptions.clone(),
+                dependencies: self.dependencies.clone(),
+                semantics: self.semantics.clone(),
+            },
+        }
+    }
+
+    /// Validate and load a durable Fact IR document for offline queries.
+    pub fn from_document(
+        document: ProgramFactDocument,
+    ) -> Result<Self, ProgramFactValidationError> {
+        document.validate()?;
+        Ok(document.into_program_unchecked())
+    }
+
+    /// Compatibility spelling for [`Self::from_document`].
+    pub fn from_fact_document(
+        document: ProgramFactDocument,
+    ) -> Result<Self, ProgramFactValidationError> {
+        Self::from_document(document)
+    }
+
+    /// Validate a guide against an unguided base and rebuild every selected
+    /// stage affected by its supported decisions. Unchanged stage payloads are
+    /// reused only when their inputs and transitive dependencies are equal to
+    /// the cold-recovery inputs.
     pub fn recover_with_guide(
         macho: &MachoFile<'_>,
         request: ProgramRecoveryRequest,
@@ -1229,7 +2318,17 @@ impl RecoveredProgram {
         guide: &RecoveryGuide,
         base: &RecoveredProgram,
     ) -> Result<Self, ProgramRecoveryError> {
-        let validation = base.validate_guide_for_image(macho, guide);
+        Self::recover_guided_from_base_with_reuse(macho, request, guide, base, true)
+    }
+
+    fn recover_guided_from_base_with_reuse(
+        macho: &MachoFile<'_>,
+        request: ProgramRecoveryRequest,
+        guide: &RecoveryGuide,
+        base: &RecoveredProgram,
+        reuse_unchanged_stages: bool,
+    ) -> Result<Self, ProgramRecoveryError> {
+        let mut validation = base.validate_guide_for_image(macho, guide);
         if validation.decisions.iter().any(|decision| {
             matches!(
                 decision.applicability,
@@ -1243,16 +2342,26 @@ impl RecoveredProgram {
 
         let mut function_guidance = FunctionRecoveryGuidance::new(base.image.clone());
         let mut byte_roles = Vec::new();
+        let mut suppressed_edges = BTreeSet::new();
+        let mut suppressed_direct_calls = BTreeSet::new();
+        let mut guided_reference_ownerships = Vec::new();
+        let mut dirty_roots = BTreeSet::new();
         for (index, decision) in guide.decisions.iter().enumerate() {
+            if validation.decisions[index].applicability == RecoveryDecisionApplicability::Redundant
+            {
+                continue;
+            }
             match (&decision.point.subject, &decision.choice) {
                 (_, RecoveryChoice::KeepUnresolved) => {}
                 (
                     ProgramSubjectKey::FunctionCandidate { address },
                     RecoveryChoice::AcceptFunctionEntry,
                 ) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
                     function_guidance.accepted_entries.insert(*address);
                 }
                 (ProgramSubjectKey::FunctionCandidate { address }, RecoveryChoice::Reject) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
                     function_guidance.rejected_entries.insert(*address);
                 }
                 (
@@ -1262,6 +2371,7 @@ impl RecoveredProgram {
                         relationship,
                     },
                 ) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
                     let kind = function_relationship_kind(*relationship);
                     function_guidance
                         .relationships
@@ -1271,6 +2381,7 @@ impl RecoveredProgram {
                     ProgramSubjectKey::Function { entry },
                     RecoveryChoice::FunctionRanges { ranges },
                 ) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
                     function_guidance.ranges.insert(
                         *entry,
                         ranges
@@ -1287,6 +2398,10 @@ impl RecoveredProgram {
                     },
                     RecoveryChoice::ByteRole { role },
                 ) => {
+                    // Byte guidance can suppress code recovery and always
+                    // changes the final CFG/byte ledger, so Functions is the
+                    // conservative root of the cyclic refinement pair.
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
                     byte_roles.push(GuidedExecutableByteRole {
                         section_ordinal: *section_ordinal,
                         start: *start,
@@ -1306,10 +2421,56 @@ impl RecoveredProgram {
                             .push((*start, *end_exclusive));
                     }
                 }
+                (
+                    ProgramSubjectKey::ControlFlowEdge {
+                        function_entry,
+                        source,
+                        target,
+                        edge_kind,
+                    },
+                    RecoveryChoice::SuppressControlFlowEdge,
+                ) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
+                    suppressed_edges.insert((*function_entry, *source, *target, *edge_kind));
+                }
+                (
+                    ProgramSubjectKey::DirectCallsite {
+                        caller,
+                        instruction_address,
+                        target_address,
+                    },
+                    RecoveryChoice::SuppressDirectCall,
+                ) => {
+                    dirty_roots.insert(ProgramRecoveryStage::Functions);
+                    suppressed_direct_calls.insert((
+                        *caller,
+                        *instruction_address,
+                        *target_address,
+                    ));
+                    function_guidance
+                        .suppressed_direct_calls
+                        .insert((*instruction_address, *target_address));
+                }
+                (
+                    ProgramSubjectKey::CrossReference {
+                        source,
+                        target,
+                        reference_kind,
+                    },
+                    RecoveryChoice::ReferenceOwner { function_entry },
+                ) => guided_reference_ownerships.push(GuidedReferenceOwnership {
+                    source: *source,
+                    target: target.clone(),
+                    reference_kind: *reference_kind,
+                    function_entry: *function_entry,
+                }),
                 _ => {
-                    return Err(ProgramRecoveryError::UnsupportedGuideApplication {
-                        decision_index: index as u64,
-                    });
+                    validation.decisions[index].applicability =
+                        RecoveryDecisionApplicability::Unsupported;
+                    validation.decisions[index].reason =
+                        "recovery_guide.unsupported_application".to_owned();
+                    summarize_guide_validation(&mut validation);
+                    return Err(ProgramRecoveryError::GuideValidationFailed { validation });
                 }
             }
         }
@@ -1318,6 +2479,9 @@ impl RecoveredProgram {
             && function_guidance.relationships.is_empty()
             && function_guidance.ranges.is_empty()
             && byte_roles.is_empty()
+            && suppressed_edges.is_empty()
+            && suppressed_direct_calls.is_empty()
+            && guided_reference_ownerships.is_empty()
         {
             return Ok(base.clone());
         }
@@ -1326,13 +2490,38 @@ impl RecoveredProgram {
             image: base.image.clone(),
             roles: byte_roles,
         };
-        let mut guided = Self::recover_selected(
+        let control_flow_guidance = ControlFlowRecoveryGuidance {
+            image: base.image.clone(),
+            non_instruction_ranges: byte_guidance
+                .roles
+                .iter()
+                .filter(|role| role.kind != ExecutableByteKind::Instruction)
+                .map(|role| (role.start, role.end_exclusive))
+                .collect(),
+            instruction_ranges: byte_guidance
+                .roles
+                .iter()
+                .filter(|role| role.kind == ExecutableByteKind::Instruction)
+                .map(|role| (role.start, role.end_exclusive))
+                .collect(),
+            suppressed_edges,
+            suppressed_direct_calls,
+        };
+        let executed = request.resolved();
+        let dirty = dependent_stage_closure(dirty_roots, &executed);
+        let reuse = reuse_unchanged_stages.then_some(ProgramRecoveryReuse { prior: base, dirty });
+        let mut guided = Self::recover_selected_reusing(
             macho,
             None,
             request,
-            Some(&function_guidance),
-            Some(&byte_guidance),
-            Some(guide.clone()),
+            ProgramRecoveryGuidance {
+                functions: Some(&function_guidance),
+                executable_bytes: Some(&byte_guidance),
+                control_flow: Some(&control_flow_guidance),
+                guide: Some(guide.clone()),
+                reference_ownerships: guided_reference_ownerships,
+            },
+            reuse,
         )?;
         guided.guide_application = Some(build_guide_application(base, &guided, guide, validation));
         Ok(guided)
@@ -1359,7 +2548,12 @@ impl RecoveredProgram {
         if functions.image() != &FunctionImageIdentity::from_macho(macho) {
             return Err(ProgramRecoveryError::FunctionImageMismatch);
         }
-        Self::recover_selected(macho, Some(functions), request, None, None, None)
+        Self::recover_selected(
+            macho,
+            Some(functions),
+            request,
+            ProgramRecoveryGuidance::default(),
+        )
     }
 
     /// Convenience entry point selecting every module while reusing functions.
@@ -1375,108 +2569,209 @@ impl RecoveredProgram {
         macho: &MachoFile<'_>,
         supplied_functions: Option<FunctionIndex>,
         request: ProgramRecoveryRequest,
-        function_guidance: Option<&FunctionRecoveryGuidance>,
-        byte_guidance: Option<&ExecutableByteRecoveryGuidance>,
-        guide: Option<RecoveryGuide>,
+        guidance: ProgramRecoveryGuidance<'_>,
     ) -> Result<Self, ProgramRecoveryError> {
+        Self::recover_selected_reusing(macho, supplied_functions, request, guidance, None)
+    }
+
+    fn recover_selected_reusing(
+        macho: &MachoFile<'_>,
+        supplied_functions: Option<FunctionIndex>,
+        request: ProgramRecoveryRequest,
+        guidance: ProgramRecoveryGuidance<'_>,
+        reuse: Option<ProgramRecoveryReuse<'_>>,
+    ) -> Result<Self, ProgramRecoveryError> {
+        let ProgramRecoveryGuidance {
+            functions: function_guidance,
+            executable_bytes: byte_guidance,
+            control_flow: control_flow_guidance,
+            guide,
+            reference_ownerships: mut guided_reference_ownerships,
+        } = guidance;
         let limits = request.limits;
         let executed = request.resolved();
-        let control_flow_guidance = byte_guidance.map(|guidance| ControlFlowRecoveryGuidance {
-            image: guidance.image.clone(),
-            non_instruction_ranges: guidance
-                .roles
-                .iter()
-                .filter(|role| role.kind != ExecutableByteKind::Instruction)
-                .map(|role| (role.start, role.end_exclusive))
-                .collect(),
-            instruction_ranges: guidance
-                .roles
-                .iter()
-                .filter(|role| role.kind == ExecutableByteKind::Instruction)
-                .map(|role| (role.start, role.end_exclusive))
-                .collect(),
+        debug_assert!(reuse.as_ref().is_none_or(|reuse| {
+            reuse.prior.image == FunctionImageIdentity::from_macho(macho)
+                && ProgramRecoveryStage::all().iter().all(|stage| {
+                    !reuse.can_reuse(*stage)
+                        || stage_limits_equal(*stage, reuse.prior.request.limits, request.limits)
+                })
+        }));
+        let can_reuse = |stage| reuse.as_ref().is_some_and(|reuse| reuse.can_reuse(stage));
+        let recovers_function_inventory = executed.contains(&ProgramRecoveryStage::Functions)
+            && !can_reuse(ProgramRecoveryStage::Functions)
+            && supplied_functions.is_none();
+        let uses_leaf_evidence = [
+            ProgramRecoveryStage::Pointers,
+            ProgramRecoveryStage::Objc,
+            ProgramRecoveryStage::Swift,
+            ProgramRecoveryStage::Rtti,
+        ]
+        .iter()
+        .any(|stage| executed.contains(stage) && !can_reuse(*stage));
+        let evidence = (uses_leaf_evidence || recovers_function_inventory)
+            .then(|| crate::evidence::SelectedImageEvidence::new(macho))
+            .transpose()
+            .map_err(|error| ProgramRecoveryError::Evidence(error.to_string()))?;
+        let function_starts = recovers_function_inventory.then(|| {
+            evidence
+                .as_ref()
+                .expect("function recovery opened evidence")
+                .function_starts(limits.functions.max_evidence_per_source as u64)
+                .map_err(|error| error.to_string())
         });
-        let image_layout = executed
-            .contains(&ProgramRecoveryStage::ImageLayout)
-            .then(|| ImageLayoutIndex::recover(macho, limits.image_layout))
-            .transpose()?;
-        let pointers = executed
-            .contains(&ProgramRecoveryStage::Pointers)
-            .then(|| PointerIndex::recover(macho, limits.pointers))
-            .transpose()?;
-        let symbols = executed
-            .contains(&ProgramRecoveryStage::Symbols)
-            .then(|| SymbolInventory::recover(macho, limits.symbols))
-            .transpose()?;
-        let dependencies = executed
-            .contains(&ProgramRecoveryStage::Dependencies)
-            .then(|| DependencyIndex::recover(macho, symbols.as_ref(), limits.dependencies))
-            .transpose()?;
-        let strings = executed
-            .contains(&ProgramRecoveryStage::Strings)
-            .then(|| StringIndex::recover(macho, limits.strings))
-            .transpose()?;
-        let objc = executed
-            .contains(&ProgramRecoveryStage::Objc)
-            .then(|| ObjcIndex::recover(macho, limits.objc))
-            .transpose()?;
-        let swift = executed
-            .contains(&ProgramRecoveryStage::Swift)
-            .then(|| SwiftIndex::recover(macho, limits.swift))
-            .transpose()?;
-        let dwarf = executed
-            .contains(&ProgramRecoveryStage::Dwarf)
-            .then(|| DwarfIndex::recover(macho, limits.dwarf))
-            .transpose()?;
-        let rtti = executed
-            .contains(&ProgramRecoveryStage::Rtti)
-            .then(|| RttiIndex::recover(macho, limits.rtti))
-            .transpose()?;
-        let exceptions = executed
-            .contains(&ProgramRecoveryStage::Exceptions)
-            .then(|| ExceptionIndex::recover(macho, limits.exceptions))
-            .transpose()?;
+        let image_layout = if can_reuse(ProgramRecoveryStage::ImageLayout) {
+            reuse.as_ref().unwrap().prior.image_layout.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::ImageLayout)
+                .then(|| ImageLayoutIndex::recover(macho, limits.image_layout))
+                .transpose()?
+        };
+        let pointers = if can_reuse(ProgramRecoveryStage::Pointers) {
+            reuse.as_ref().unwrap().prior.pointers.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Pointers)
+                .then(|| {
+                    PointerIndex::recover_with_evidence(
+                        evidence.as_ref().expect("pointer stage opened evidence"),
+                        limits.pointers,
+                    )
+                })
+                .transpose()?
+        };
+        let symbols = if can_reuse(ProgramRecoveryStage::Symbols) {
+            reuse.as_ref().unwrap().prior.symbols.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Symbols)
+                .then(|| SymbolInventory::recover(macho, limits.symbols))
+                .transpose()?
+        };
+        let dependencies = if can_reuse(ProgramRecoveryStage::Dependencies) {
+            reuse.as_ref().unwrap().prior.dependencies.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Dependencies)
+                .then(|| DependencyIndex::recover(macho, symbols.as_ref(), limits.dependencies))
+                .transpose()?
+        };
+        let strings = if can_reuse(ProgramRecoveryStage::Strings) {
+            reuse.as_ref().unwrap().prior.strings.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Strings)
+                .then(|| StringIndex::recover(macho, limits.strings))
+                .transpose()?
+        };
+        let objc = if can_reuse(ProgramRecoveryStage::Objc) {
+            reuse.as_ref().unwrap().prior.objc.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Objc)
+                .then(|| {
+                    ObjcIndex::recover_with_evidence(
+                        evidence
+                            .as_ref()
+                            .expect("Objective-C stage opened evidence"),
+                        limits.objc,
+                    )
+                })
+                .transpose()?
+        };
+        let swift = if can_reuse(ProgramRecoveryStage::Swift) {
+            reuse.as_ref().unwrap().prior.swift.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Swift)
+                .then(|| {
+                    SwiftIndex::recover_with_evidence(
+                        evidence.as_ref().expect("Swift stage opened evidence"),
+                        limits.swift,
+                    )
+                })
+                .transpose()?
+        };
+        let dwarf = if can_reuse(ProgramRecoveryStage::Dwarf) {
+            reuse.as_ref().unwrap().prior.dwarf.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Dwarf)
+                .then(|| DwarfIndex::recover(macho, limits.dwarf))
+                .transpose()?
+        };
+        let rtti = if can_reuse(ProgramRecoveryStage::Rtti) {
+            reuse.as_ref().unwrap().prior.rtti.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Rtti)
+                .then(|| {
+                    RttiIndex::recover_with_evidence(
+                        evidence.as_ref().expect("RTTI stage opened evidence"),
+                        limits.rtti,
+                    )
+                })
+                .transpose()?
+        };
+        let exceptions = if can_reuse(ProgramRecoveryStage::Exceptions) {
+            reuse.as_ref().unwrap().prior.exceptions.clone()
+        } else {
+            executed
+                .contains(&ProgramRecoveryStage::Exceptions)
+                .then(|| ExceptionIndex::recover(macho, limits.exceptions))
+                .transpose()?
+        };
         let mut functions = if executed.contains(&ProgramRecoveryStage::Functions) {
-            Some(match supplied_functions {
-                Some(functions) => functions,
-                None => FunctionIndex::recover_with_inputs(
-                    macho,
-                    limits.functions,
-                    FunctionRecoveryInputs {
-                        pointers: pointers.as_ref(),
-                        symbols: symbols.as_ref(),
-                        dwarf: dwarf.as_ref(),
-                        objc: objc.as_ref(),
-                        swift: swift.as_ref(),
-                        exceptions: exceptions.as_ref(),
-                        guidance: function_guidance,
-                    },
-                )?,
-            })
+            if can_reuse(ProgramRecoveryStage::Functions) {
+                reuse.as_ref().unwrap().prior.functions.clone()
+            } else {
+                Some(match supplied_functions {
+                    Some(functions) => functions,
+                    None => FunctionIndex::recover_with_inputs(
+                        macho,
+                        limits.functions,
+                        FunctionRecoveryInputs {
+                            function_starts: function_starts.as_ref(),
+                            pointers: pointers.as_ref(),
+                            symbols: symbols.as_ref(),
+                            dwarf: dwarf.as_ref(),
+                            objc: objc.as_ref(),
+                            swift: swift.as_ref(),
+                            exceptions: exceptions.as_ref(),
+                            guidance: function_guidance,
+                        },
+                    )?,
+                })
+            }
         } else {
             None
         };
         let mut control_flow = if executed.contains(&ProgramRecoveryStage::ControlFlow) {
-            let functions = functions
-                .as_ref()
-                .expect("resolved control-flow dependency includes functions");
-            Some(match control_flow_guidance.as_ref() {
-                Some(guidance) => ControlFlowIndex::recover_with_guidance(
-                    macho,
-                    functions,
-                    pointers.as_ref(),
-                    exceptions.as_ref(),
-                    limits.control_flow,
-                    guidance,
-                )?,
-                None => ControlFlowIndex::recover_with_evidence(
-                    macho,
-                    functions,
-                    pointers.as_ref(),
-                    exceptions.as_ref(),
-                    limits.control_flow,
-                )?,
-            })
+            if can_reuse(ProgramRecoveryStage::ControlFlow) {
+                reuse.as_ref().unwrap().prior.control_flow.clone()
+            } else {
+                let functions = functions
+                    .as_ref()
+                    .expect("resolved control-flow dependency includes functions");
+                Some(match control_flow_guidance {
+                    Some(guidance) => ControlFlowIndex::recover_with_guidance(
+                        macho,
+                        functions,
+                        pointers.as_ref(),
+                        exceptions.as_ref(),
+                        limits.control_flow,
+                        guidance,
+                    )?,
+                    None => ControlFlowIndex::recover_with_evidence(
+                        macho,
+                        functions,
+                        pointers.as_ref(),
+                        exceptions.as_ref(),
+                        limits.control_flow,
+                    )?,
+                })
+            }
         } else {
             None
         };
@@ -1500,7 +2795,7 @@ impl RecoveredProgram {
                 let refined = functions
                     .as_ref()
                     .expect("refined function inventory was just installed");
-                let rebuilt = match control_flow_guidance.as_ref() {
+                let rebuilt = match control_flow_guidance {
                     Some(guidance) => ControlFlowIndex::recover_with_guidance(
                         macho,
                         refined,
@@ -1521,146 +2816,174 @@ impl RecoveredProgram {
             }
         }
         let executable_bytes = if executed.contains(&ProgramRecoveryStage::ExecutableBytes) {
-            let functions = functions
-                .as_ref()
-                .expect("resolved executable-byte dependency includes functions");
-            let control_flow = control_flow
-                .as_ref()
-                .expect("resolved executable-byte dependency includes control flow");
-            Some(match byte_guidance {
-                Some(guidance) => ExecutableByteIndex::recover_with_guidance(
-                    macho,
-                    functions,
-                    control_flow,
-                    limits.executable_bytes,
-                    guidance,
-                )?,
-                None => ExecutableByteIndex::recover(
-                    macho,
-                    functions,
-                    control_flow,
-                    limits.executable_bytes,
-                )?,
-            })
+            if can_reuse(ProgramRecoveryStage::ExecutableBytes) {
+                reuse.as_ref().unwrap().prior.executable_bytes.clone()
+            } else {
+                let functions = functions
+                    .as_ref()
+                    .expect("resolved executable-byte dependency includes functions");
+                let control_flow = control_flow
+                    .as_ref()
+                    .expect("resolved executable-byte dependency includes control flow");
+                Some(match byte_guidance {
+                    Some(guidance) => ExecutableByteIndex::recover_with_guidance(
+                        macho,
+                        functions,
+                        control_flow,
+                        limits.executable_bytes,
+                        guidance,
+                    )?,
+                    None => ExecutableByteIndex::recover(
+                        macho,
+                        functions,
+                        control_flow,
+                        limits.executable_bytes,
+                    )?,
+                })
+            }
         } else {
             None
         };
         let direct_calls = if executed.contains(&ProgramRecoveryStage::DirectCalls) {
-            Some(DirectCallGraph::build(
-                functions
-                    .as_ref()
-                    .expect("resolved direct-call dependency includes functions"),
-                control_flow
-                    .as_ref()
-                    .expect("resolved direct-call dependency includes control flow"),
-                limits.direct_calls,
-            )?)
+            if can_reuse(ProgramRecoveryStage::DirectCalls) {
+                reuse.as_ref().unwrap().prior.direct_calls.clone()
+            } else {
+                Some(DirectCallGraph::build(
+                    functions
+                        .as_ref()
+                        .expect("resolved direct-call dependency includes functions"),
+                    control_flow
+                        .as_ref()
+                        .expect("resolved direct-call dependency includes control flow"),
+                    limits.direct_calls,
+                )?)
+            }
         } else {
             None
         };
         let transfers = if executed.contains(&ProgramRecoveryStage::Transfers) {
-            Some(DirectTransferIndex::recover(
-                functions
-                    .as_ref()
-                    .expect("resolved transfer dependency includes functions"),
-                control_flow
-                    .as_ref()
-                    .expect("resolved transfer dependency includes control flow"),
-                limits.transfers,
-            )?)
+            if can_reuse(ProgramRecoveryStage::Transfers) {
+                reuse.as_ref().unwrap().prior.transfers.clone()
+            } else {
+                Some(DirectTransferIndex::recover(
+                    functions
+                        .as_ref()
+                        .expect("resolved transfer dependency includes functions"),
+                    control_flow
+                        .as_ref()
+                        .expect("resolved transfer dependency includes control flow"),
+                    limits.transfers,
+                )?)
+            }
         } else {
             None
         };
         let indirect_calls = if executed.contains(&ProgramRecoveryStage::IndirectCalls) {
-            Some(IndirectCallIndex::recover_with_evidence(
-                macho,
-                functions
-                    .as_ref()
-                    .expect("resolved indirect-call dependency includes functions"),
-                control_flow
-                    .as_ref()
-                    .expect("resolved indirect-call dependency includes control flow"),
-                IndirectCallRecoveryInputs {
-                    pointers: pointers
+            if can_reuse(ProgramRecoveryStage::IndirectCalls) {
+                reuse.as_ref().unwrap().prior.indirect_calls.clone()
+            } else {
+                Some(IndirectCallIndex::recover_with_evidence(
+                    macho,
+                    functions
                         .as_ref()
-                        .expect("resolved indirect-call dependency includes pointers"),
-                    rtti: rtti
+                        .expect("resolved indirect-call dependency includes functions"),
+                    control_flow
                         .as_ref()
-                        .expect("resolved indirect-call dependency includes RTTI"),
-                    objc: objc
-                        .as_ref()
-                        .expect("resolved indirect-call dependency includes Objective-C"),
-                    swift: swift
-                        .as_ref()
-                        .expect("resolved indirect-call dependency includes Swift"),
-                },
-                limits.indirect_calls,
-            )?)
+                        .expect("resolved indirect-call dependency includes control flow"),
+                    IndirectCallRecoveryInputs {
+                        pointers: pointers
+                            .as_ref()
+                            .expect("resolved indirect-call dependency includes pointers"),
+                        rtti: rtti
+                            .as_ref()
+                            .expect("resolved indirect-call dependency includes RTTI"),
+                        objc: objc
+                            .as_ref()
+                            .expect("resolved indirect-call dependency includes Objective-C"),
+                        swift: swift
+                            .as_ref()
+                            .expect("resolved indirect-call dependency includes Swift"),
+                    },
+                    limits.indirect_calls,
+                )?)
+            }
         } else {
             None
         };
         let xrefs = if executed.contains(&ProgramRecoveryStage::Xrefs) {
-            Some(
-                XrefIndex::recover_with_pointers(
-                    macho,
-                    control_flow
-                        .as_ref()
-                        .expect("resolved xref dependency includes control flow"),
-                    pointers
-                        .as_ref()
-                        .expect("resolved xref dependency includes pointers"),
-                    limits.xrefs,
+            if can_reuse(ProgramRecoveryStage::Xrefs) {
+                reuse.as_ref().unwrap().prior.xrefs.clone()
+            } else {
+                Some(
+                    XrefIndex::recover_with_pointers(
+                        macho,
+                        control_flow
+                            .as_ref()
+                            .expect("resolved xref dependency includes control flow"),
+                        pointers
+                            .as_ref()
+                            .expect("resolved xref dependency includes pointers"),
+                        limits.xrefs,
+                    )
+                    .map_err(|error| ProgramRecoveryError::Xrefs(error.to_string()))?,
                 )
-                .map_err(|error| ProgramRecoveryError::Xrefs(error.to_string()))?,
-            )
+            }
         } else {
             None
         };
         let semantics = if executed.contains(&ProgramRecoveryStage::Semantics) {
-            Some(SemanticIndex::recover(
-                SemanticRecoveryInputs {
-                    image_layout: image_layout
-                        .as_ref()
-                        .expect("resolved semantic dependency includes image layout"),
-                    pointers: pointers
-                        .as_ref()
-                        .expect("resolved semantic dependency includes pointers"),
-                    symbols: symbols
-                        .as_ref()
-                        .expect("resolved semantic dependency includes symbols"),
-                    strings: strings
-                        .as_ref()
-                        .expect("resolved semantic dependency includes strings"),
-                    objc: objc
-                        .as_ref()
-                        .expect("resolved semantic dependency includes Objective-C"),
-                    swift: swift
-                        .as_ref()
-                        .expect("resolved semantic dependency includes Swift"),
-                    rtti: rtti
-                        .as_ref()
-                        .expect("resolved semantic dependency includes RTTI"),
-                    dwarf: dwarf
-                        .as_ref()
-                        .expect("resolved semantic dependency includes DWARF"),
-                    exceptions: exceptions
-                        .as_ref()
-                        .expect("resolved semantic dependency includes exceptions"),
-                    functions: functions
-                        .as_ref()
-                        .expect("resolved semantic dependency includes functions"),
-                },
-                limits.semantics,
-            )?)
+            if can_reuse(ProgramRecoveryStage::Semantics) {
+                reuse.as_ref().unwrap().prior.semantics.clone()
+            } else {
+                Some(SemanticIndex::recover(
+                    SemanticRecoveryInputs {
+                        image_layout: image_layout
+                            .as_ref()
+                            .expect("resolved semantic dependency includes image layout"),
+                        pointers: pointers
+                            .as_ref()
+                            .expect("resolved semantic dependency includes pointers"),
+                        symbols: symbols
+                            .as_ref()
+                            .expect("resolved semantic dependency includes symbols"),
+                        strings: strings
+                            .as_ref()
+                            .expect("resolved semantic dependency includes strings"),
+                        objc: objc
+                            .as_ref()
+                            .expect("resolved semantic dependency includes Objective-C"),
+                        swift: swift
+                            .as_ref()
+                            .expect("resolved semantic dependency includes Swift"),
+                        rtti: rtti
+                            .as_ref()
+                            .expect("resolved semantic dependency includes RTTI"),
+                        dwarf: dwarf
+                            .as_ref()
+                            .expect("resolved semantic dependency includes DWARF"),
+                        exceptions: exceptions
+                            .as_ref()
+                            .expect("resolved semantic dependency includes exceptions"),
+                        functions: functions
+                            .as_ref()
+                            .expect("resolved semantic dependency includes functions"),
+                    },
+                    limits.semantics,
+                )?)
+            }
         } else {
             None
         };
+        guided_reference_ownerships.sort();
+        guided_reference_ownerships.dedup();
         let image = FunctionImageIdentity::from_macho(macho);
         let questions = build_recovery_questions(
             &image,
             functions.as_ref(),
             control_flow.as_ref(),
             executable_bytes.as_ref(),
+            xrefs.as_ref(),
+            &guided_reference_ownerships,
         );
         let completeness = program_completeness(
             &image,
@@ -1680,6 +3003,7 @@ impl RecoveredProgram {
                 transfers: transfers.as_ref(),
                 indirect_calls: indirect_calls.as_ref(),
                 xrefs: xrefs.as_ref(),
+                guided_reference_ownerships: &guided_reference_ownerships,
                 rtti: rtti.as_ref(),
                 exceptions: exceptions.as_ref(),
                 dependencies: dependencies.as_ref(),
@@ -1706,6 +3030,7 @@ impl RecoveredProgram {
             transfers,
             indirect_calls,
             xrefs,
+            guided_reference_ownerships,
             rtti,
             exceptions,
             dependencies,
@@ -1742,6 +3067,20 @@ impl RecoveredProgram {
         &self.executed
     }
 
+    /// Availability and completion for one stage without guessing from an
+    /// optional payload.
+    pub fn stage_status(&self, stage: ProgramRecoveryStage) -> ProgramStageStatus {
+        self.completeness
+            .stages
+            .iter()
+            .find(|receipt| receipt.stage == stage)
+            .map_or(ProgramStageStatus::Absent, |receipt| match receipt.status {
+                ProgramRecoveryStatus::Complete => ProgramStageStatus::Complete,
+                ProgramRecoveryStatus::Partial => ProgramStageStatus::Partial,
+                ProgramRecoveryStatus::Truncated => ProgramStageStatus::Truncated,
+            })
+    }
+
     /// Unified completion ledger.
     pub fn completeness(&self) -> &ProgramRecoveryCompleteness {
         &self.completeness
@@ -1755,6 +3094,319 @@ impl RecoveredProgram {
     /// Stable ambiguities where caller knowledge could materially change recovery.
     pub fn questions(&self) -> &[RecoveryQuestion] {
         &self.questions
+    }
+
+    /// Authority of a retained structural subject in the current state.
+    ///
+    /// Subjects causally attributed to an applied guide decision are guided;
+    /// all other retained subjects remain independent. Returns `None` when the
+    /// subject is not present in the current facts, questions, or frontiers, so
+    /// absence cannot be mistaken for independent authority. Function subjects
+    /// also honor the authority retained directly by function recovery.
+    pub fn subject_authority(&self, subject: &ProgramSubjectKey) -> Option<ProgramFactAuthority> {
+        if !self.contains_subject(subject) {
+            return None;
+        }
+        if let ProgramSubjectKey::Function { entry } = subject
+            && self
+                .functions
+                .as_ref()
+                .and_then(|functions| functions.by_entry(*entry))
+                .is_some_and(|function| {
+                    function.authority
+                        == crate::analysis::functions::FunctionRecoveryAuthority::CallerGuided
+                })
+        {
+            return Some(ProgramFactAuthority::Guided);
+        }
+        if matches!(subject, ProgramSubjectKey::ReferenceOwnership { .. }) {
+            return Some(ProgramFactAuthority::Guided);
+        }
+        if self.guide_application.as_ref().is_some_and(|application| {
+            application
+                .delta
+                .records
+                .iter()
+                .any(|record| &record.subject == subject && !record.derivations.is_empty())
+        }) {
+            Some(ProgramFactAuthority::Guided)
+        } else {
+            Some(ProgramFactAuthority::Independent)
+        }
+    }
+
+    fn contains_subject(&self, subject: &ProgramSubjectKey) -> bool {
+        if self
+            .questions
+            .iter()
+            .any(|question| &question.subject == subject)
+        {
+            return true;
+        }
+        match subject {
+            ProgramSubjectKey::Function { entry } => self
+                .functions
+                .as_ref()
+                .and_then(|functions| functions.by_entry(*entry))
+                .is_some(),
+            ProgramSubjectKey::FunctionCandidate { address } => {
+                self.functions.as_ref().is_some_and(|functions| {
+                    functions
+                        .entry_candidates()
+                        .iter()
+                        .any(|candidate| candidate.address == *address)
+                })
+            }
+            ProgramSubjectKey::FunctionRelationship {
+                address,
+                owner_entry,
+            } => self.functions.as_ref().is_some_and(|functions| {
+                functions.relationships().iter().any(|relationship| {
+                    relationship.address == *address && relationship.owner_entry == *owner_entry
+                })
+            }),
+            ProgramSubjectKey::SuppressedFunctionEntry {
+                entry,
+                range_start,
+                range_end_exclusive,
+            } => self.functions.as_ref().is_some_and(|functions| {
+                functions.suppressed_entries().iter().any(|suppressed| {
+                    suppressed.entry == *entry
+                        && suppressed.range_start == *range_start
+                        && suppressed.range_end_exclusive == *range_end_exclusive
+                })
+            }),
+            ProgramSubjectKey::FunctionRange {
+                function_entry,
+                start,
+                end_exclusive,
+            } => {
+                self.functions
+                    .as_ref()
+                    .and_then(|functions| functions.by_entry(*function_entry))
+                    .is_some_and(|function| {
+                        function.extent.is_some_and(|extent| {
+                            extent.start == *start && extent.end_exclusive == *end_exclusive
+                        }) || function.caller_guided_ranges.iter().any(|range| {
+                            range.start == *start && range.end_exclusive == *end_exclusive
+                        })
+                    })
+            }
+            ProgramSubjectKey::BasicBlock {
+                function_entry,
+                start,
+            } => self
+                .control_flow
+                .as_ref()
+                .and_then(|control_flow| control_flow.by_entry(*function_entry))
+                .is_some_and(|graph| graph.blocks.iter().any(|block| block.start == *start)),
+            ProgramSubjectKey::Instruction { address, byte_len } => {
+                self.control_flow.as_ref().is_some_and(|control_flow| {
+                    control_flow.functions().iter().any(|graph| {
+                        graph.instructions.iter().any(|instruction| {
+                            instruction.address == *address && instruction.byte_len == *byte_len
+                        })
+                    })
+                })
+            }
+            ProgramSubjectKey::InstructionInterpretation { .. } => false,
+            ProgramSubjectKey::ControlFlowEdge {
+                function_entry,
+                source,
+                target,
+                edge_kind,
+            } => self
+                .control_flow
+                .as_ref()
+                .and_then(|control_flow| control_flow.by_entry(*function_entry))
+                .is_some_and(|graph| {
+                    graph.edges.iter().any(|edge| {
+                        graph
+                            .blocks
+                            .get(edge.from as usize)
+                            .map(|block| block.start)
+                            == Some(*source)
+                            && graph.blocks.get(edge.to as usize).map(|block| block.start)
+                                == Some(*target)
+                            && edge.kind == *edge_kind
+                    })
+                }),
+            ProgramSubjectKey::DirectCall { caller, callee } => {
+                self.direct_calls.as_ref().is_some_and(|calls| {
+                    calls
+                        .edges()
+                        .iter()
+                        .any(|edge| edge.caller == *caller && edge.callee == *callee)
+                })
+            }
+            ProgramSubjectKey::DirectCallsite {
+                caller,
+                instruction_address,
+                target_address,
+            } => self
+                .control_flow
+                .as_ref()
+                .and_then(|control_flow| control_flow.by_entry(*caller))
+                .is_some_and(|graph| {
+                    graph.calls.iter().any(|call| {
+                        call.instruction_address == *instruction_address
+                            && matches!(
+                                &call.target,
+                                crate::analysis::control_flow::ControlFlowCallTarget::Direct {
+                                    address,
+                                    ..
+                                } if address == target_address
+                            )
+                    })
+                }),
+            ProgramSubjectKey::DirectTransfer {
+                function_entry,
+                instruction_address,
+                target_address,
+            } => self.transfers.as_ref().is_some_and(|transfers| {
+                transfers.transfers().iter().any(|transfer| {
+                    transfer.source == *function_entry
+                        && transfer.instruction_address == *instruction_address
+                        && transfer.target_address == *target_address
+                })
+            }),
+            ProgramSubjectKey::JumpTable {
+                instruction_address,
+                table_address,
+                end_exclusive,
+            } => self.control_flow.as_ref().is_some_and(|control_flow| {
+                control_flow.functions().iter().any(|graph| {
+                    graph.jump_tables.iter().any(|table| {
+                        table.instruction_address == *instruction_address
+                            && table.table_address == *table_address
+                            && table.end_exclusive == *end_exclusive
+                    })
+                })
+            }),
+            ProgramSubjectKey::IndirectTransfer {
+                function_entry,
+                instruction_address,
+            } => self.indirect_calls.as_ref().is_some_and(|calls| {
+                calls.calls().iter().any(|call| {
+                    call.source_function == *function_entry
+                        && call.instruction_address == *instruction_address
+                })
+            }),
+            ProgramSubjectKey::CrossReference {
+                source,
+                target,
+                reference_kind,
+            } => self.xrefs.as_ref().is_some_and(|xrefs| {
+                xrefs.all_refs().iter().any(|reference| {
+                    cross_reference_subject(reference)
+                        == ProgramSubjectKey::CrossReference {
+                            source: *source,
+                            target: target.clone(),
+                            reference_kind: *reference_kind,
+                        }
+                })
+            }),
+            ProgramSubjectKey::ReferenceOwnership {
+                source,
+                target,
+                reference_kind,
+                function_entry,
+            } => self.guided_reference_ownerships.iter().any(|ownership| {
+                ownership.source == *source
+                    && ownership.target == *target
+                    && ownership.reference_kind == *reference_kind
+                    && ownership.function_entry == *function_entry
+            }),
+            ProgramSubjectKey::ExecutableByteRange {
+                section_ordinal,
+                start,
+                end_exclusive,
+            } => self.executable_bytes.as_ref().is_some_and(|bytes| {
+                bytes.spans().iter().any(|span| {
+                    span.section_ordinal == *section_ordinal
+                        && span.start == *start
+                        && span.end_exclusive == *end_exclusive
+                })
+            }),
+            ProgramSubjectKey::DataObject { address } => {
+                self.semantics.as_ref().is_some_and(|semantics| {
+                    semantics
+                        .data_objects()
+                        .iter()
+                        .any(|object| object.address == *address)
+                })
+            }
+            ProgramSubjectKey::FunctionSignature { function_entry } => {
+                self.semantics.as_ref().is_some_and(|semantics| {
+                    semantics
+                        .signatures()
+                        .iter()
+                        .any(|signature| signature.function_entry == *function_entry)
+                })
+            }
+            ProgramSubjectKey::StackFrame { function_entry } => {
+                self.semantics.as_ref().is_some_and(|semantics| {
+                    semantics
+                        .frames()
+                        .iter()
+                        .any(|frame| frame.function_entry == *function_entry)
+                })
+            }
+            ProgramSubjectKey::LocalVariable { die_offset } => {
+                self.semantics.as_ref().is_some_and(|semantics| {
+                    semantics
+                        .locals()
+                        .iter()
+                        .any(|local| local.die_offset == *die_offset)
+                })
+            }
+            ProgramSubjectKey::Conflict { .. } => false,
+            ProgramSubjectKey::Frontier { .. } => self.frontier_subjects().contains(subject),
+        }
+    }
+
+    /// Stable unresolved frontier subjects from incomplete stage contracts and
+    /// explicit runtime-open dependency boundaries.
+    pub fn frontier_subjects(&self) -> Vec<ProgramSubjectKey> {
+        let mut frontiers = self
+            .completeness
+            .contracts
+            .iter()
+            .filter(|contract| {
+                !contract.globally_complete
+                    || contract.budget_excluded != 0
+                    || contract.continuation.is_some()
+            })
+            .map(|contract| ProgramSubjectKey::Frontier {
+                layer: format!("program.{}", contract.stage.key()),
+                address: None,
+            })
+            .collect::<Vec<_>>();
+        if let Some(dependencies) = &self.dependencies {
+            frontiers.extend(dependencies.frontiers().iter().map(|frontier| {
+                let layer = match frontier.kind {
+                    crate::analysis::dependency_index::RuntimeFrontierKind::RuntimeLoadedImage => {
+                        "dependencies.runtime_loaded_image"
+                    }
+                    crate::analysis::dependency_index::RuntimeFrontierKind::ObjectiveCRuntimeMutation => {
+                        "dependencies.objective_c_runtime_mutation"
+                    }
+                    crate::analysis::dependency_index::RuntimeFrontierKind::GeneratedCode => {
+                        "dependencies.generated_code"
+                    }
+                    crate::analysis::dependency_index::RuntimeFrontierKind::EncryptedCode => {
+                        "dependencies.encrypted_code"
+                    }
+                };
+                ProgramSubjectKey::Frontier {
+                    layer: layer.to_owned(),
+                    address: None,
+                }
+            }));
+        }
+        frontiers.sort();
+        frontiers.dedup();
+        frontiers
     }
 
     /// Validate a neutral recovery guide without applying it or changing this program.
@@ -1805,7 +3457,7 @@ impl RecoveredProgram {
     /// optional, or use its typed input helpers when a complete prerequisite
     /// set is mandatory. The returned view performs no recovery and copies no
     /// recovered records.
-    pub const fn facts(&self) -> ProgramFacts<'_> {
+    pub fn facts(&self) -> ProgramFacts<'_> {
         ProgramFacts {
             image_layout: self.image_layout.as_ref(),
             pointers: self.pointers.as_ref(),
@@ -1821,6 +3473,7 @@ impl RecoveredProgram {
             transfers: self.transfers.as_ref(),
             indirect_calls: self.indirect_calls.as_ref(),
             xrefs: self.xrefs.as_ref(),
+            guided_reference_ownerships: &self.guided_reference_ownerships,
             rtti: self.rtti.as_ref(),
             exceptions: self.exceptions.as_ref(),
             dependencies: self.dependencies.as_ref(),
@@ -1901,6 +3554,56 @@ impl RecoveredProgram {
     /// Cross-reference inventory, when selected.
     pub fn xrefs(&self) -> Option<&XrefIndex> {
         self.xrefs.as_ref()
+    }
+
+    /// Caller-guided owners for exact reference uses, sorted by reference key.
+    pub fn guided_reference_ownerships(&self) -> &[GuidedReferenceOwnership] {
+        &self.guided_reference_ownerships
+    }
+
+    /// Select the source owner for one retained xref.
+    ///
+    /// A caller-guided relation wins only for that exact source/target/kind
+    /// tuple. Otherwise this returns an independently unique range owner and
+    /// leaves ambiguous or unowned references unresolved.
+    pub fn reference_owner<'program>(
+        &'program self,
+        reference: &Xref,
+    ) -> Option<ProgramReferenceOwner<'program>> {
+        let functions = self.functions.as_ref()?;
+        let subject = cross_reference_subject(reference);
+        if let ProgramSubjectKey::CrossReference {
+            source,
+            target,
+            reference_kind,
+        } = subject
+            && let Some(guided) = self.guided_reference_ownerships.iter().find(|ownership| {
+                ownership.source == source
+                    && ownership.target == target
+                    && ownership.reference_kind == reference_kind
+            })
+        {
+            let owner = functions
+                .owners(source)
+                .find(|owner| owner.function.entry == guided.function_entry)?;
+            return Some(ProgramReferenceOwner {
+                owner,
+                authority: ProgramFactAuthority::Guided,
+            });
+        }
+        let mut owners = functions.owners(reference.source.0);
+        let owner = owners.next()?;
+        if owners.next().is_some() {
+            return None;
+        }
+        Some(ProgramReferenceOwner {
+            owner,
+            authority: if owner.function.authority == FunctionRecoveryAuthority::CallerGuided {
+                ProgramFactAuthority::Guided
+            } else {
+                ProgramFactAuthority::Independent
+            },
+        })
     }
 
     /// Named and structural RTTI and vtable inventory, when selected.
@@ -2122,6 +3825,7 @@ impl RecoveredProgram {
         };
         ProgramReferenceView {
             reference,
+            source_owner: self.reference_owner(reference),
             target_function,
             target_symbols: target
                 .and_then(|address| {
@@ -2418,20 +4122,23 @@ fn reference_coverage(program: &RecoveredProgram) -> ProgramCoverageDimension {
     let mut guided = 0_u64;
     let mut candidate = 0_u64;
     for reference in index.all_refs() {
-        match program.function_containing(reference.source.0) {
-            Some(FunctionLookup::One(owner)) => {
-                if owner.function.authority
-                    == crate::analysis::functions::FunctionRecoveryAuthority::CallerGuided
-                {
-                    guided += 1;
-                } else if owner.confidence
-                    == crate::analysis::functions::FunctionOwnershipConfidence::Candidate
-                {
-                    candidate += 1;
-                }
+        match program.reference_owner(reference) {
+            Some(owner) if owner.authority == ProgramFactAuthority::Guided => guided += 1,
+            Some(owner)
+                if owner.owner.confidence
+                    == crate::analysis::functions::FunctionOwnershipConfidence::Candidate =>
+            {
+                candidate += 1;
             }
-            Some(FunctionLookup::Ambiguous(_)) => candidate += 1,
-            _ => {}
+            Some(_) => {}
+            None if program
+                .functions
+                .as_ref()
+                .is_some_and(|functions| functions.owners(reference.source.0).len() > 1) =>
+            {
+                candidate += 1;
+            }
+            None => {}
         }
     }
     let retained = index.all_refs().len() as u64;
@@ -2748,6 +4455,90 @@ fn validate_decision_for_program(
                 }
             }
         }
+        (ProgramSubjectKey::ControlFlowEdge { .. }, RecoveryChoice::SuppressControlFlowEdge) => {
+            if !program
+                .executed
+                .contains(&ProgramRecoveryStage::ControlFlow)
+            {
+                return Some((
+                    RecoveryDecisionApplicability::Unsupported,
+                    "recovery_guide.control_flow_stage_not_selected",
+                ));
+            }
+            if !program.contains_subject(&decision.point.subject) {
+                return Some((
+                    RecoveryDecisionApplicability::Stale,
+                    "recovery_guide.control_flow_edge_missing",
+                ));
+            }
+        }
+        (ProgramSubjectKey::DirectCallsite { .. }, RecoveryChoice::SuppressDirectCall) => {
+            if !program
+                .executed
+                .contains(&ProgramRecoveryStage::ControlFlow)
+            {
+                return Some((
+                    RecoveryDecisionApplicability::Unsupported,
+                    "recovery_guide.control_flow_stage_not_selected",
+                ));
+            }
+            if !program.contains_subject(&decision.point.subject) {
+                return Some((
+                    RecoveryDecisionApplicability::Stale,
+                    "recovery_guide.direct_callsite_missing",
+                ));
+            }
+        }
+        (
+            ProgramSubjectKey::CrossReference { source, .. },
+            RecoveryChoice::ReferenceOwner { function_entry },
+        ) => {
+            if !program.executed.contains(&ProgramRecoveryStage::Xrefs)
+                || !program.executed.contains(&ProgramRecoveryStage::Functions)
+            {
+                return Some((
+                    RecoveryDecisionApplicability::Unsupported,
+                    "recovery_guide.reference_ownership_stage_not_selected",
+                ));
+            }
+            if !program.contains_subject(&decision.point.subject) {
+                return Some((
+                    RecoveryDecisionApplicability::Stale,
+                    "recovery_guide.cross_reference_missing",
+                ));
+            }
+            let mut owners = program
+                .functions
+                .as_ref()
+                .expect("selected function stage has payload")
+                .owners(*source)
+                .map(|owner| owner.function.entry)
+                .collect::<BTreeSet<_>>();
+            for candidate in &guide.decisions {
+                if let (
+                    ProgramSubjectKey::Function { entry },
+                    RecoveryChoice::FunctionRanges { ranges },
+                ) = (&candidate.point.subject, &candidate.choice)
+                    && ranges
+                        .iter()
+                        .any(|range| *source >= range.start && *source < range.end_exclusive)
+                {
+                    owners.insert(*entry);
+                }
+            }
+            if !owners.contains(function_entry) {
+                return Some((
+                    RecoveryDecisionApplicability::Stale,
+                    "recovery_guide.reference_owner_not_candidate",
+                ));
+            }
+            if owners.len() == 1 {
+                return Some((
+                    RecoveryDecisionApplicability::Redundant,
+                    "recovery_guide.reference_owner_already_unique",
+                ));
+            }
+        }
         _ => {
             return Some((
                 RecoveryDecisionApplicability::Unsupported,
@@ -2956,6 +4747,87 @@ fn build_guide_application(
                             )
                         }
                     }
+                    (
+                        ProgramSubjectKey::ControlFlowEdge {
+                            function_entry,
+                            source,
+                            target,
+                            edge_kind,
+                        },
+                        RecoveryChoice::SuppressControlFlowEdge,
+                    ) => {
+                        if program.control_flow.as_ref().is_some_and(|control_flow| {
+                            control_flow.by_entry(*function_entry).is_some_and(|graph| {
+                                graph.guided_edge_suppressions.iter().any(|suppression| {
+                                    suppression.source == *source
+                                        && suppression.target == *target
+                                        && suppression.edge_kind == *edge_kind
+                                })
+                            })
+                        }) {
+                            (
+                                RecoveryDecisionApplicationStatus::Applied,
+                                "recovery_guide.control_flow_edge_suppressed",
+                            )
+                        } else {
+                            (
+                                RecoveryDecisionApplicationStatus::Ineffective,
+                                "recovery_guide.control_flow_edge_suppression_ineffective",
+                            )
+                        }
+                    }
+                    (
+                        ProgramSubjectKey::DirectCallsite {
+                            caller,
+                            instruction_address,
+                            target_address,
+                        },
+                        RecoveryChoice::SuppressDirectCall,
+                    ) => {
+                        if program.control_flow.as_ref().is_some_and(|control_flow| {
+                            control_flow.by_entry(*caller).is_some_and(|graph| {
+                                graph.guided_direct_call_suppressions.iter().any(|suppression| {
+                                    suppression.instruction_address == *instruction_address
+                                        && suppression.target_address == *target_address
+                                })
+                            })
+                        }) {
+                            (
+                                RecoveryDecisionApplicationStatus::Applied,
+                                "recovery_guide.direct_call_suppressed",
+                            )
+                        } else {
+                            (
+                                RecoveryDecisionApplicationStatus::Ineffective,
+                                "recovery_guide.direct_call_suppression_ineffective",
+                            )
+                        }
+                    }
+                    (
+                        ProgramSubjectKey::CrossReference {
+                            source,
+                            target,
+                            reference_kind,
+                        },
+                        RecoveryChoice::ReferenceOwner { function_entry },
+                    ) => {
+                        if program.guided_reference_ownerships.iter().any(|ownership| {
+                            ownership.source == *source
+                                && ownership.target == *target
+                                && ownership.reference_kind == *reference_kind
+                                && ownership.function_entry == *function_entry
+                        }) {
+                            (
+                                RecoveryDecisionApplicationStatus::Applied,
+                                "recovery_guide.reference_owner_applied",
+                            )
+                        } else {
+                            (
+                                RecoveryDecisionApplicationStatus::Ineffective,
+                                "recovery_guide.reference_owner_ineffective",
+                            )
+                        }
+                    }
                     (_, RecoveryChoice::KeepUnresolved) => (
                         RecoveryDecisionApplicationStatus::Redundant,
                         "recovery_guide.kept_unresolved",
@@ -3132,6 +5004,16 @@ fn authored_affected_layers(decision: &RecoveryDecision) -> Vec<RecoveryLayer> {
             RecoveryLayer::ValueFlow,
             RecoveryLayer::Semantics,
         ],
+        RecoveryQuestionKind::DirectCall => vec![
+            RecoveryLayer::Functions,
+            RecoveryLayer::ControlFlow,
+            RecoveryLayer::ExecutableBytes,
+            RecoveryLayer::Calls,
+            RecoveryLayer::References,
+            RecoveryLayer::ValueFlow,
+            RecoveryLayer::Semantics,
+        ],
+        RecoveryQuestionKind::ReferenceOwnership => vec![RecoveryLayer::References],
         RecoveryQuestionKind::IndirectTargets | RecoveryQuestionKind::RuntimeDispatch => {
             vec![RecoveryLayer::Calls, RecoveryLayer::ValueFlow]
         }
@@ -3149,6 +5031,25 @@ fn narrow_derivation_kind(
     record: &RecoveryDeltaRecord,
 ) -> Option<RecoveryDecisionDerivationKind> {
     if context.decision.point.subject == record.subject {
+        return Some(RecoveryDecisionDerivationKind::DirectSubject);
+    }
+    if let (
+        ProgramSubjectKey::CrossReference {
+            source: decision_source,
+            target: decision_target,
+            reference_kind: decision_kind,
+        },
+        ProgramSubjectKey::ReferenceOwnership {
+            source,
+            target,
+            reference_kind,
+            ..
+        },
+    ) = (&context.decision.point.subject, &record.subject)
+        && decision_source == source
+        && decision_target == target
+        && decision_kind == reference_kind
+    {
         return Some(RecoveryDecisionDerivationKind::DirectSubject);
     }
     if matches!(
@@ -3236,6 +5137,22 @@ fn affected_functions(
                 }
             }
         }
+        (ProgramSubjectKey::ControlFlowEdge { function_entry, .. }, _)
+        | (
+            ProgramSubjectKey::DirectCallsite {
+                caller: function_entry,
+                ..
+            },
+            _,
+        ) => {
+            entries.insert(*function_entry);
+        }
+        (
+            ProgramSubjectKey::CrossReference { .. },
+            RecoveryChoice::ReferenceOwner { function_entry },
+        ) => {
+            entries.insert(*function_entry);
+        }
         _ => {}
     }
     entries
@@ -3292,10 +5209,19 @@ fn subject_range(subject: &ProgramSubjectKey) -> Option<(u64, u64)> {
         }
         | ProgramSubjectKey::CrossReference {
             source: address, ..
+        }
+        | ProgramSubjectKey::ReferenceOwnership {
+            source: address, ..
         } => address.checked_add(1).map(|end| (*address, end)),
         ProgramSubjectKey::ControlFlowEdge { source, .. } => {
             source.checked_add(1).map(|end| (*source, end))
         }
+        ProgramSubjectKey::DirectCallsite {
+            instruction_address,
+            ..
+        } => instruction_address
+            .checked_add(1)
+            .map(|end| (*instruction_address, end)),
         ProgramSubjectKey::DirectCall { .. }
         | ProgramSubjectKey::LocalVariable { .. }
         | ProgramSubjectKey::Conflict { .. }
@@ -3318,6 +5244,7 @@ fn subject_function_entries(subject: &ProgramSubjectKey) -> Vec<u64> {
             function_entry: entry,
             ..
         }
+        | ProgramSubjectKey::DirectCallsite { caller: entry, .. }
         | ProgramSubjectKey::DirectTransfer {
             function_entry: entry,
             ..
@@ -3334,6 +5261,7 @@ fn subject_function_entries(subject: &ProgramSubjectKey) -> Vec<u64> {
             owner_entry,
         } => vec![*address, *owner_entry],
         ProgramSubjectKey::DirectCall { caller, callee } => vec![*caller, *callee],
+        ProgramSubjectKey::ReferenceOwnership { function_entry, .. } => vec![*function_entry],
         ProgramSubjectKey::FunctionCandidate { address } => vec![*address],
         ProgramSubjectKey::Instruction { .. }
         | ProgramSubjectKey::InstructionInterpretation { .. }
@@ -3475,7 +5403,7 @@ fn build_recovery_delta(base: &RecoveredProgram, guided: &RecoveredProgram) -> R
         );
 
         let edge_records = |index: &ControlFlowIndex| {
-            let mut edges = BTreeMap::<(u64, u64, u64), Vec<_>>::new();
+            let mut edges = BTreeMap::new();
             for graph in index.functions() {
                 for edge in &graph.edges {
                     let Some(source) = graph
@@ -3489,10 +5417,10 @@ fn build_recovery_delta(base: &RecoveredProgram, guided: &RecoveredProgram) -> R
                     else {
                         continue;
                     };
-                    edges
-                        .entry((graph.function_entry, source, target))
-                        .or_default()
-                        .push(edge.kind);
+                    edges.insert(
+                        (graph.function_entry, source, target, edge.kind),
+                        edge.clone(),
+                    );
                 }
             }
             edges
@@ -3501,10 +5429,44 @@ fn build_recovery_delta(base: &RecoveredProgram, guided: &RecoveredProgram) -> R
             edge_records(base),
             edge_records(guided),
             RecoveryLayer::ControlFlow,
-            |(function_entry, source, target)| ProgramSubjectKey::ControlFlowEdge {
+            |(function_entry, source, target, edge_kind)| ProgramSubjectKey::ControlFlowEdge {
                 function_entry: *function_entry,
                 source: *source,
                 target: *target,
+                edge_kind: *edge_kind,
+            },
+            &mut records,
+        );
+
+        let direct_callsites = |index: &ControlFlowIndex| {
+            index
+                .functions()
+                .iter()
+                .flat_map(|graph| {
+                    graph.calls.iter().filter_map(move |call| {
+                        let crate::analysis::control_flow::ControlFlowCallTarget::Direct {
+                            address,
+                            ..
+                        } = &call.target
+                        else {
+                            return None;
+                        };
+                        Some((
+                            (graph.function_entry, call.instruction_address, *address),
+                            call.clone(),
+                        ))
+                    })
+                })
+                .collect()
+        };
+        compare_owned_record_maps(
+            direct_callsites(base),
+            direct_callsites(guided),
+            RecoveryLayer::Calls,
+            |(caller, instruction_address, target_address)| ProgramSubjectKey::DirectCallsite {
+                caller: *caller,
+                instruction_address: *instruction_address,
+                target_address: *target_address,
             },
             &mut records,
         );
@@ -3652,11 +5614,51 @@ fn build_recovery_delta(base: &RecoveredProgram, guided: &RecoveredProgram) -> R
             |(source, target, reference_kind)| ProgramSubjectKey::CrossReference {
                 source: *source,
                 target: target.clone(),
-                reference_kind: reference_kind.clone(),
+                reference_kind: *reference_kind,
             },
             &mut records,
         );
     }
+
+    compare_record_maps(
+        base.guided_reference_ownerships
+            .iter()
+            .map(|ownership| {
+                (
+                    (
+                        ownership.source,
+                        ownership.target.clone(),
+                        ownership.reference_kind,
+                        ownership.function_entry,
+                    ),
+                    ownership,
+                )
+            })
+            .collect(),
+        guided
+            .guided_reference_ownerships
+            .iter()
+            .map(|ownership| {
+                (
+                    (
+                        ownership.source,
+                        ownership.target.clone(),
+                        ownership.reference_kind,
+                        ownership.function_entry,
+                    ),
+                    ownership,
+                )
+            })
+            .collect(),
+        RecoveryLayer::References,
+        |(source, target, reference_kind, function_entry)| ProgramSubjectKey::ReferenceOwnership {
+            source: *source,
+            target: target.clone(),
+            reference_kind: *reference_kind,
+            function_entry: *function_entry,
+        },
+        &mut records,
+    );
 
     if let (Some(base), Some(guided)) = (&base.semantics, &guided.semantics) {
         compare_record_maps(
@@ -3743,7 +5745,7 @@ fn build_recovery_delta(base: &RecoveredProgram, guided: &RecoveredProgram) -> R
     }
 }
 
-fn xref_delta_key(reference: &Xref) -> (u64, RecoveryReferenceTargetKey, String) {
+fn xref_delta_key(reference: &Xref) -> (u64, RecoveryReferenceTargetKey, RecoveryReferenceKind) {
     let target = match &reference.target {
         XrefTarget::Internal { va } => RecoveryReferenceTargetKey::Internal { address: va.0 },
         XrefTarget::Import { name, ordinal } => RecoveryReferenceTargetKey::Import {
@@ -3751,16 +5753,7 @@ fn xref_delta_key(reference: &Xref) -> (u64, RecoveryReferenceTargetKey, String)
             name: name.clone(),
         },
     };
-    let reference_kind = match reference.kind {
-        XrefKind::Stub => "stub",
-        XrefKind::ChainedBind => "chained_bind",
-        XrefKind::ChainedRebase => "chained_rebase",
-        XrefKind::LegacyBind => "legacy_bind",
-        XrefKind::Relocation => "relocation",
-        XrefKind::DirectBranch => "direct_branch",
-        XrefKind::Data => "data",
-    }
-    .to_owned();
+    let reference_kind = RecoveryReferenceKind::from(reference.kind);
     (reference.source.0, target, reference_kind)
 }
 
@@ -3969,6 +5962,8 @@ const fn question_layer(kind: RecoveryQuestionKind) -> RecoveryLayer {
         RecoveryQuestionKind::ControlFlowEdge | RecoveryQuestionKind::NonReturningCall => {
             RecoveryLayer::ControlFlow
         }
+        RecoveryQuestionKind::DirectCall => RecoveryLayer::Calls,
+        RecoveryQuestionKind::ReferenceOwnership => RecoveryLayer::References,
         RecoveryQuestionKind::IndirectTargets | RecoveryQuestionKind::RuntimeDispatch => {
             RecoveryLayer::Calls
         }
@@ -4012,6 +6007,7 @@ fn program_completeness(
         transfers,
         indirect_calls,
         xrefs,
+        guided_reference_ownerships: _,
         rtti,
         exceptions,
         dependencies,
@@ -4911,6 +6907,478 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fact_document_round_trip_is_lossless_strict_and_versioned() {
+        let bytes = full_x86_fixture(true);
+        let macho = image(&bytes);
+        let program =
+            RecoveredProgram::recover_all(&macho, ProgramRecoveryLimits::default()).unwrap();
+        let document = program.to_fact_document();
+        document.validate().unwrap();
+
+        let json = document.to_json_pretty().unwrap();
+        let decoded = ProgramFactDocument::load_json(&json).unwrap();
+        assert_eq!(decoded, document);
+        assert_eq!(RecoveredProgram::from_document(decoded).unwrap(), program);
+
+        let mut unknown: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        unknown
+            .as_object_mut()
+            .unwrap()
+            .insert("future_field".to_owned(), serde_json::Value::Bool(true));
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&unknown).unwrap()),
+            Err(ProgramFactDocumentError::Json(_))
+        ));
+
+        let mut unknown_body: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        unknown_body["program"]
+            .as_object_mut()
+            .unwrap()
+            .insert("future_stage".to_owned(), serde_json::Value::Null);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&unknown_body).unwrap()),
+            Err(ProgramFactDocumentError::Json(_))
+        ));
+
+        let mut unknown_nested: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        unknown_nested["program"]["image_layout"]["segments"][0]
+            .as_object_mut()
+            .unwrap()
+            .insert("future_range_fact".to_owned(), serde_json::Value::Null);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&unknown_nested).unwrap()),
+            Err(ProgramFactDocumentError::UnknownField { path })
+                if path == "$.program.image_layout.segments[0].future_range_fact"
+        ));
+
+        let mut future = document.clone();
+        future.schema_version += 1;
+        assert!(matches!(
+            future.validate(),
+            Err(ProgramFactValidationError::UnsupportedSchema { .. })
+        ));
+    }
+
+    #[test]
+    fn fact_document_rejects_payload_and_identity_tampering() {
+        let bytes = macho_test_support::disassembly_x86_64();
+        let program = RecoveredProgram::recover(
+            &image(&bytes),
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Strings],
+                ProgramRecoveryLimits::default(),
+            ),
+        )
+        .unwrap();
+
+        let mut missing_payload = program.to_fact_document();
+        missing_payload.program.strings = None;
+        assert_eq!(
+            missing_payload.validate(),
+            Err(ProgramFactValidationError::StagePayloadMismatch {
+                stage: ProgramRecoveryStage::Strings,
+            })
+        );
+
+        let mut rebound = program.to_fact_document();
+        rebound.image.content_sha256 = "0".repeat(64);
+        assert_eq!(
+            rebound.validate(),
+            Err(ProgramFactValidationError::StageImageMismatch {
+                stage: ProgramRecoveryStage::Strings,
+            })
+        );
+    }
+
+    #[test]
+    fn fact_document_rejects_reordered_query_indexes() {
+        let bytes = full_x86_fixture(true);
+        let program = RecoveredProgram::recover(
+            &image(&bytes),
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Xrefs],
+                ProgramRecoveryLimits::default(),
+            ),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let refs = value["program"]["xrefs"]["refs"].as_array_mut().unwrap();
+        let adjacent = refs
+            .windows(2)
+            .position(|pair| pair[0]["source"] != pair[1]["source"])
+            .expect("fixture must recover references at distinct source addresses");
+        refs.swap(adjacent, adjacent + 1);
+
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Xrefs,
+                }
+            ))
+        ));
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let functions = value["program"]["functions"]["functions"]
+            .as_array_mut()
+            .unwrap();
+        assert!(functions.len() >= 2);
+        functions.swap(0, 1);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Functions,
+                }
+            ))
+        ));
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let graphs = value["program"]["control_flow"]["functions"]
+            .as_array_mut()
+            .unwrap();
+        assert!(graphs.len() >= 2);
+        graphs.swap(0, 1);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::ControlFlow,
+                }
+            ))
+        ));
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let graphs = value["program"]["control_flow"]["functions"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!graphs.is_empty());
+        graphs[0]["identity"] = serde_json::json!({
+            "kind": "anonymous",
+            "id": "tampered-control-flow-identity"
+        });
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::ControlFlow,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn fact_document_rejects_corrupt_secondary_lookup_tables() {
+        let bytes = x86_string_reference_fixture();
+        let strings = RecoveredProgram::recover(
+            &image(&bytes),
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Strings],
+                ProgramRecoveryLimits::default(),
+            ),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(strings.to_fact_document()).unwrap();
+        let by_reference = value["program"]["strings"]["by_reference"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!by_reference.is_empty());
+        by_reference[0] = serde_json::Value::from(u64::MAX);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Strings,
+                }
+            ))
+        ));
+
+        let bytes = full_x86_fixture(true);
+        let symbols = RecoveredProgram::recover(
+            &image(&bytes),
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Symbols],
+                ProgramRecoveryLimits::default(),
+            ),
+        )
+        .unwrap();
+        let mut value = serde_json::to_value(symbols.to_fact_document()).unwrap();
+        let by_address = value["program"]["symbols"]["by_address"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!by_address.is_empty());
+        by_address[0] = serde_json::Value::from(u64::MAX);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Symbols,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn fact_document_rejects_corrupt_language_receipts() {
+        let bytes = full_x86_fixture(true);
+        let program = RecoveredProgram::recover(
+            &image(&bytes),
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Objc, ProgramRecoveryStage::Swift],
+                ProgramRecoveryLimits::default(),
+            ),
+        )
+        .unwrap();
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        value["program"]["objc"]["completeness"]["attempted"] = serde_json::Value::from(u64::MAX);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Objc,
+                }
+            ))
+        ));
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        value["program"]["swift"]["completeness"]["included"] = serde_json::Value::from(u64::MAX);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Swift,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn fact_document_rejects_corrupt_derived_stage_receipts() {
+        let bytes = full_x86_fixture(true);
+        let program =
+            RecoveredProgram::recover_all(&image(&bytes), ProgramRecoveryLimits::default())
+                .unwrap();
+
+        for (stage, field, receipt_field) in [
+            (ProgramRecoveryStage::Dwarf, "dwarf", "sections"),
+            (
+                ProgramRecoveryStage::ExecutableBytes,
+                "executable_bytes",
+                "classified_bytes",
+            ),
+            (
+                ProgramRecoveryStage::DirectCalls,
+                "direct_calls",
+                "retained_direct_callsite_count",
+            ),
+            (
+                ProgramRecoveryStage::Transfers,
+                "transfers",
+                "observed_transfer_count",
+            ),
+            (
+                ProgramRecoveryStage::IndirectCalls,
+                "indirect_calls",
+                "observed_transfer_count",
+            ),
+            (ProgramRecoveryStage::Exceptions, "exceptions", "retained"),
+            (
+                ProgramRecoveryStage::Dependencies,
+                "dependencies",
+                "retained",
+            ),
+            (ProgramRecoveryStage::Semantics, "semantics", "retained"),
+        ] {
+            let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+            value["program"][field]["completeness"][receipt_field] =
+                serde_json::Value::from(u64::MAX);
+            assert!(matches!(
+                ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+                Err(ProgramFactDocumentError::Validation(
+                    ProgramFactValidationError::StagePayloadInvariant {
+                        stage: invalid_stage,
+                    }
+                )) if invalid_stage == stage
+            ));
+        }
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        value["program"]["rtti"]["receipts"][0]["conservation"]["attempted"] =
+            serde_json::Value::from(u64::MAX);
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant {
+                    stage: ProgramRecoveryStage::Rtti,
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn fact_document_rejects_derived_payloads_rebound_from_their_sources() {
+        let bytes = full_x86_fixture(true);
+        let program =
+            RecoveredProgram::recover_all(&image(&bytes), ProgramRecoveryLimits::default())
+                .unwrap();
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let spans = value["program"]["executable_bytes"]["spans"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!spans.is_empty());
+        spans[0]["segment"] = serde_json::Value::String("__REBOUND".to_owned());
+        assert_stage_payload_invariant(value, ProgramRecoveryStage::ExecutableBytes);
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let nodes = value["program"]["direct_calls"]["nodes"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!nodes.is_empty());
+        nodes[0]["identity"] = serde_json::json!({
+            "kind": "anonymous",
+            "id": "rebound-direct-call-node"
+        });
+        assert_stage_payload_invariant(value, ProgramRecoveryStage::DirectCalls);
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        value["program"]["transfers"]["function_entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::Value::from(u64::MAX));
+        assert_stage_payload_invariant(value, ProgramRecoveryStage::Transfers);
+
+        let mut value = serde_json::to_value(program.to_fact_document()).unwrap();
+        let calls = value["program"]["indirect_calls"]["calls"]
+            .as_array_mut()
+            .unwrap();
+        assert!(!calls.is_empty());
+        calls[0]["block"] = serde_json::Value::from(u64::MAX);
+        assert_stage_payload_invariant(value, ProgramRecoveryStage::IndirectCalls);
+    }
+
+    fn assert_stage_payload_invariant(
+        value: serde_json::Value,
+        expected_stage: ProgramRecoveryStage,
+    ) {
+        assert!(matches!(
+            ProgramFactDocument::load_json(&serde_json::to_vec(&value).unwrap()),
+            Err(ProgramFactDocumentError::Validation(
+                ProgramFactValidationError::StagePayloadInvariant { stage }
+            )) if stage == expected_stage
+        ));
+    }
+
+    #[test]
+    fn refine_and_deepen_are_identity_bound_immutable_transitions() {
+        let bytes = x86_direct_call_candidate_fixture();
+        let macho = image(&bytes);
+        let limits = ProgramRecoveryLimits::default();
+        let prior = RecoveredProgram::recover(
+            &macho,
+            ProgramRecoveryRequest::new(
+                [ProgramRecoveryStage::Strings, ProgramRecoveryStage::Symbols],
+                limits,
+            ),
+        )
+        .unwrap();
+
+        let empty = RecoveryGuide::new(prior.image().clone());
+        let refined = RecoveredProgram::refine(&macho, &prior, &empty).unwrap();
+        assert_eq!(refined.request(), prior.request());
+        assert_eq!(refined.strings(), prior.strings());
+        assert_eq!(refined.guide(), Some(&empty));
+        assert!(refined.guide_application().is_some());
+        refined.to_fact_document().validate().unwrap();
+
+        let deepened = prior
+            .deepen(&macho, [ProgramRecoveryStage::Functions], None)
+            .unwrap();
+        assert!(
+            deepened
+                .request()
+                .requested()
+                .contains(&ProgramRecoveryStage::Strings)
+        );
+        assert!(
+            deepened
+                .request()
+                .requested()
+                .contains(&ProgramRecoveryStage::Functions)
+        );
+        assert_ne!(
+            deepened.stage_status(ProgramRecoveryStage::Functions),
+            ProgramStageStatus::Absent
+        );
+        assert_eq!(
+            deepened.stage_status(ProgramRecoveryStage::Strings),
+            prior.stage_status(ProgramRecoveryStage::Strings)
+        );
+        let cold_deepened = RecoveredProgram::recover(&macho, deepened.request().clone()).unwrap();
+        assert_eq!(
+            deepened, cold_deepened,
+            "stage reuse must be exactly equivalent to cold deepening"
+        );
+
+        let dirty = dependent_stage_closure(
+            [ProgramRecoveryStage::Functions],
+            &ProgramRecoveryRequest::all(limits).resolved(),
+        );
+        assert!(dirty.contains(&ProgramRecoveryStage::Functions));
+        assert!(dirty.contains(&ProgramRecoveryStage::ControlFlow));
+        assert!(dirty.contains(&ProgramRecoveryStage::Semantics));
+        assert!(!dirty.contains(&ProgramRecoveryStage::Pointers));
+        assert!(!dirty.contains(&ProgramRecoveryStage::Strings));
+
+        let mut changed_limits = limits;
+        changed_limits.strings.max_strings = 1;
+        assert!(!stage_limits_equal(
+            ProgramRecoveryStage::Strings,
+            limits,
+            changed_limits
+        ));
+        assert!(stage_limits_equal(
+            ProgramRecoveryStage::Symbols,
+            limits,
+            changed_limits
+        ));
+        let limited = prior.deepen(&macho, [], Some(changed_limits)).unwrap();
+        let cold_limited = RecoveredProgram::recover(&macho, limited.request().clone()).unwrap();
+        assert_eq!(
+            limited, cold_limited,
+            "a granular limit override must preserve cold-recovery equivalence"
+        );
+
+        let functions_only = RecoveredProgram::recover(
+            &macho,
+            ProgramRecoveryRequest::new([ProgramRecoveryStage::Functions], limits),
+        )
+        .unwrap();
+        let symbol_enriched = functions_only
+            .deepen(&macho, [ProgramRecoveryStage::Symbols], None)
+            .unwrap();
+        let cold_symbol_enriched =
+            RecoveredProgram::recover(&macho, symbol_enriched.request().clone()).unwrap();
+        assert_eq!(
+            symbol_enriched, cold_symbol_enriched,
+            "adding optional symbol evidence must invalidate its function consumers"
+        );
+
+        let mut changed_bytes = bytes;
+        changed_bytes[0x100] ^= 1;
+        let changed = image(&changed_bytes);
+        assert_eq!(
+            RecoveredProgram::refine(&changed, &prior, &empty),
+            Err(ProgramRecoveryError::ProgramImageMismatch)
+        );
+        assert_eq!(
+            prior.deepen(&changed, [ProgramRecoveryStage::Functions], None),
+            Err(ProgramRecoveryError::ProgramImageMismatch)
+        );
+    }
+
     fn add_three_function_starts(bytes: &mut Vec<u8>) {
         let command_offset = 32 + 72 + 80 + 24;
         let data_offset = bytes.len();
@@ -5104,6 +7572,167 @@ mod tests {
         assert!(view.control_flow.is_some());
         assert!(view.direct_call_node.is_some());
         assert!(view.thunk.is_some());
+    }
+
+    #[test]
+    fn exact_reference_ownership_is_guided_durable_and_string_use_scoped() {
+        let bytes = x86_string_reference_fixture();
+        let macho = image(&bytes);
+        let base = RecoveredProgram::recover_all(&macho, ProgramRecoveryLimits::default()).unwrap();
+        assert!(base.functions().unwrap().by_entry(FINAL).is_some());
+        let reference_subject = base
+            .xrefs()
+            .unwrap()
+            .all_refs()
+            .iter()
+            .find_map(|reference| {
+                let subject = cross_reference_subject(reference);
+                matches!(
+                    &subject,
+                    ProgramSubjectKey::CrossReference {
+                        source: MAIN,
+                        target: RecoveryReferenceTargetKey::Internal { address },
+                        reference_kind,
+                    } if *address == 0x1_0000_0120
+                        && *reference_kind == RecoveryReferenceKind::Data
+                )
+                .then_some(subject)
+            })
+            .expect("fixture retains the exact string reference");
+        let ProgramSubjectKey::CrossReference {
+            source: invalid_source,
+            target: invalid_target,
+            reference_kind: invalid_kind,
+        } = reference_subject.clone()
+        else {
+            unreachable!()
+        };
+        let invalid = RecoveryGuide::builder(base.image().clone())
+            .assign_reference_owner(invalid_source, invalid_target, invalid_kind, FINAL)
+            .build();
+        let error = RecoveredProgram::recover_with_guide(&macho, base.request().clone(), &invalid)
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ProgramRecoveryError::GuideValidationFailed { validation }
+                if validation.decisions[0].reason
+                    == "recovery_guide.reference_owner_not_candidate"
+        ));
+        let ranges = vec![
+            RecoveryAddressRange::new(MAIN, MAIN + 8).unwrap(),
+            RecoveryAddressRange::new(FINAL, FINAL + 1).unwrap(),
+        ];
+        let overlap_guide = RecoveryGuide::builder(base.image().clone())
+            .function_ranges(FINAL, ranges.clone())
+            .unwrap()
+            .build();
+        let ambiguous =
+            RecoveredProgram::recover_with_guide(&macho, base.request().clone(), &overlap_guide)
+                .unwrap();
+        let question = ambiguous
+            .questions()
+            .iter()
+            .find(|question| {
+                question.kind == RecoveryQuestionKind::ReferenceOwnership
+                    && question.subject == reference_subject
+            })
+            .expect("an exact ambiguous reference use emits an ownership question");
+        assert!(question.choices.contains(&RecoveryChoice::ReferenceOwner {
+            function_entry: MAIN,
+        }));
+        assert!(question.choices.contains(&RecoveryChoice::ReferenceOwner {
+            function_entry: FINAL,
+        }));
+
+        let ProgramSubjectKey::CrossReference {
+            source,
+            target,
+            reference_kind,
+        } = reference_subject.clone()
+        else {
+            unreachable!()
+        };
+        let guide = RecoveryGuide::builder(base.image().clone())
+            .function_ranges(FINAL, ranges)
+            .unwrap()
+            .assign_reference_owner(source, target, reference_kind, FINAL)
+            .build();
+        let guided = RecoveredProgram::refine(&macho, &base, &guide).unwrap();
+        let cold_guided = RecoveredProgram::recover_guided_from_base_with_reuse(
+            &macho,
+            base.request().clone(),
+            &guide,
+            &base,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            guided, cold_guided,
+            "selective refine must be exactly equivalent to a cold guided rebuild"
+        );
+        assert!(!guided.questions().iter().any(|question| {
+            question.kind == RecoveryQuestionKind::ReferenceOwnership
+                && question.subject == reference_subject
+        }));
+        let reference = guided
+            .xrefs()
+            .unwrap()
+            .all_refs()
+            .iter()
+            .find(|reference| cross_reference_subject(reference) == reference_subject)
+            .unwrap();
+        let owner = guided.reference_owner(reference).unwrap();
+        assert_eq!(owner.owner.function.entry, FINAL);
+        assert_eq!(owner.authority, ProgramFactAuthority::Guided);
+        assert!(guided.reference_view(reference).target_string.is_some());
+
+        let ownership_subject = guided.guided_reference_ownerships()[0].subject();
+        assert_eq!(
+            guided.subject_authority(&ownership_subject),
+            Some(ProgramFactAuthority::Guided)
+        );
+        let application = guided.guide_application().unwrap();
+        assert!(application.delta.records.iter().any(|record| {
+            record.subject == ownership_subject
+                && record.kind == RecoveryDeltaKind::Added
+                && record.derivations.iter().any(|derivation| {
+                    derivation.kind == RecoveryDecisionDerivationKind::DirectSubject
+                })
+        }));
+
+        let json = guided.to_fact_document().to_json_pretty().unwrap();
+        let loaded =
+            RecoveredProgram::from_document(ProgramFactDocument::load_json(&json).unwrap())
+                .unwrap();
+        let loaded_reference = loaded
+            .xrefs()
+            .unwrap()
+            .all_refs()
+            .iter()
+            .find(|reference| cross_reference_subject(reference) == reference_subject)
+            .unwrap();
+        assert_eq!(
+            loaded
+                .reference_owner(loaded_reference)
+                .unwrap()
+                .owner
+                .function
+                .entry,
+            FINAL
+        );
+        assert!(
+            loaded
+                .reference_view(loaded_reference)
+                .target_string
+                .is_some()
+        );
+
+        let mut invalid_document = guided.to_fact_document();
+        invalid_document.program.guided_reference_ownerships[0].function_entry = u64::MAX;
+        assert_eq!(
+            invalid_document.validate(),
+            Err(ProgramFactValidationError::GuidedReferenceOwnershipMismatch)
+        );
     }
 
     #[test]
@@ -5695,6 +8324,217 @@ mod tests {
     }
 
     #[test]
+    fn precise_edge_and_direct_call_suppressions_cold_rebuild_every_consumer() {
+        let bytes = full_x86_fixture(true);
+        let macho = image(&bytes);
+        let limits = ProgramRecoveryLimits::default();
+        let base = RecoveredProgram::recover_all(&macho, limits).unwrap();
+
+        let (caller, instruction_address, target_address) = base
+            .control_flow()
+            .unwrap()
+            .functions()
+            .iter()
+            .find_map(|graph| {
+                graph.calls.iter().find_map(|call| match &call.target {
+                    crate::analysis::control_flow::ControlFlowCallTarget::Direct {
+                        address,
+                        ..
+                    } => Some((graph.function_entry, call.instruction_address, *address)),
+                    crate::analysis::control_flow::ControlFlowCallTarget::Indirect { .. } => None,
+                })
+            })
+            .expect("fixture has a direct callsite");
+        let edge_graph = base
+            .control_flow()
+            .unwrap()
+            .functions()
+            .iter()
+            .find(|graph| !graph.edges.is_empty())
+            .expect("fixture has a retained CFG edge");
+        let edge = &edge_graph.edges[0];
+        let edge_source = edge_graph.blocks[edge.from as usize].start;
+        let edge_target = edge_graph.blocks[edge.to as usize].start;
+
+        let edge_guide = RecoveryGuide::builder(base.image().clone())
+            .suppress_control_flow_edge(
+                edge_graph.function_entry,
+                edge_source,
+                edge_target,
+                edge.kind,
+            )
+            .build();
+        let edge_guided =
+            RecoveredProgram::recover_all_with_guide(&macho, limits, &edge_guide).unwrap();
+        let guided_edge_graph = edge_guided
+            .control_flow()
+            .unwrap()
+            .by_entry(edge_graph.function_entry)
+            .unwrap();
+        assert!(
+            guided_edge_graph
+                .guided_edge_suppressions
+                .iter()
+                .any(|item| {
+                    item.source == edge_source
+                        && item.target == edge_target
+                        && item.edge_kind == edge.kind
+                })
+        );
+        assert!(!guided_edge_graph.edges.iter().any(|item| {
+            guided_edge_graph.blocks[item.from as usize].start == edge_source
+                && guided_edge_graph.blocks[item.to as usize].start == edge_target
+                && item.kind == edge.kind
+        }));
+
+        let direct_guide = RecoveryGuide::builder(base.image().clone())
+            .suppress_direct_call(caller, instruction_address, target_address)
+            .build();
+        let validation = base.validate_guide_for_image(&macho, &direct_guide);
+        assert!(validation.decisions.iter().all(|decision| {
+            decision.applicability == RecoveryDecisionApplicability::Applicable
+        }));
+        let guided =
+            RecoveredProgram::recover_all_with_guide(&macho, limits, &direct_guide).unwrap();
+        let guided_call_graph = guided.control_flow().unwrap().by_entry(caller).unwrap();
+        assert!(
+            guided_call_graph
+                .guided_direct_call_suppressions
+                .iter()
+                .any(|item| {
+                    item.instruction_address == instruction_address
+                        && item.target_address == target_address
+                })
+        );
+        assert!(!guided_call_graph.calls.iter().any(|call| {
+            call.instruction_address == instruction_address
+                && matches!(
+                    &call.target,
+                    crate::analysis::control_flow::ControlFlowCallTarget::Direct {
+                        address,
+                        ..
+                    } if *address == target_address
+                )
+        }));
+        assert!(
+            guided
+                .functions()
+                .unwrap()
+                .functions()
+                .iter()
+                .all(|function| {
+                    function.evidence.iter().all(|evidence| {
+                        !(evidence.source == FunctionEvidenceSource::DirectCall
+                            && evidence.source_location == Some(instruction_address)
+                            && evidence.entry == target_address)
+                    })
+                })
+        );
+        assert!(!guided.xrefs().unwrap().all_refs().iter().any(|reference| {
+            reference.source.0 == instruction_address
+                && reference.target
+                    == crate::analysis::xref::refs::XrefTarget::Internal {
+                        va: crate::core::model::addr::Va(target_address),
+                    }
+                && reference.kind == crate::analysis::xref::refs::XrefKind::DirectBranch
+        }));
+        assert!(
+            guided
+                .direct_calls()
+                .unwrap()
+                .edges()
+                .iter()
+                .all(|call_edge| {
+                    call_edge.callsites.iter().all(|callsite| {
+                        call_edge.caller != caller
+                            || callsite.instruction_address != instruction_address
+                    })
+                })
+        );
+
+        let edge_application = edge_guided.guide_application().unwrap();
+        assert_eq!(
+            edge_application.decisions[0].status,
+            RecoveryDecisionApplicationStatus::Applied
+        );
+        let edge_subject = ProgramSubjectKey::ControlFlowEdge {
+            function_entry: edge_graph.function_entry,
+            source: edge_source,
+            target: edge_target,
+            edge_kind: edge.kind,
+        };
+        assert!(edge_application.delta.records.iter().any(|record| {
+            record.kind == RecoveryDeltaKind::Removed
+                && record.subject == edge_subject
+                && !record.derivations.is_empty()
+        }));
+        let application = guided.guide_application().unwrap();
+        assert_eq!(
+            application.decisions[0].status,
+            RecoveryDecisionApplicationStatus::Applied
+        );
+        let call_subject = ProgramSubjectKey::DirectCallsite {
+            caller,
+            instruction_address,
+            target_address,
+        };
+        assert!(application.delta.records.iter().any(|record| {
+            record.kind == RecoveryDeltaKind::Removed
+                && record.subject == call_subject
+                && !record.derivations.is_empty()
+        }));
+
+        let document = guided.to_fact_document();
+        let loaded = ProgramFactDocument::load_json(&document.to_json_pretty().unwrap()).unwrap();
+        assert_eq!(RecoveredProgram::from_document(loaded).unwrap(), guided);
+        assert_eq!(
+            RecoveredProgram::refine(&macho, &guided, &direct_guide).unwrap(),
+            guided
+        );
+    }
+
+    #[test]
+    fn suppression_validation_rejects_stale_and_aggregate_coordinates() {
+        let bytes = full_x86_fixture(true);
+        let macho = image(&bytes);
+        let base = RecoveredProgram::recover_all(&macho, ProgramRecoveryLimits::default()).unwrap();
+        let stale = RecoveryGuide::builder(base.image().clone())
+            .suppress_direct_call(MAIN, u64::MAX - 1, u64::MAX)
+            .build();
+        assert_eq!(
+            base.validate_guide_for_image(&macho, &stale).decisions[0].applicability,
+            RecoveryDecisionApplicability::Stale
+        );
+
+        let mut aggregate = RecoveryGuide::new(base.image().clone());
+        aggregate.decisions.push(RecoveryDecision {
+            point: crate::analysis::recovery::RecoveryPointKey {
+                image: base.image().clone(),
+                subject: ProgramSubjectKey::DirectCall {
+                    caller: MAIN,
+                    callee: THUNK,
+                },
+                kind: RecoveryQuestionKind::DirectCall,
+            },
+            choice: RecoveryChoice::SuppressDirectCall,
+            expected_signals: Vec::new(),
+        });
+        let validation = base.validate_guide_for_image(&macho, &aggregate);
+        assert_eq!(
+            validation.decisions[0].applicability,
+            RecoveryDecisionApplicability::Unsupported
+        );
+        assert!(matches!(
+            RecoveredProgram::recover_all_with_guide(
+                &macho,
+                ProgramRecoveryLimits::default(),
+                &aggregate,
+            ),
+            Err(ProgramRecoveryError::GuideValidationFailed { .. })
+        ));
+    }
+
+    #[test]
     fn accepting_a_function_candidate_cold_rebuilds_downstream_layers() {
         let bytes = x86_direct_call_candidate_fixture();
         let macho = image(&bytes);
@@ -5706,6 +8546,19 @@ mod tests {
         let guided = RecoveredProgram::recover_all_with_guide(&macho, limits, &guide).unwrap();
         let replay = RecoveredProgram::recover_all_with_guide(&macho, limits, &guide).unwrap();
         assert_eq!(guided, replay, "guided cold rebuild is deterministic");
+        let document = guided.to_fact_document();
+        let loaded = ProgramFactDocument::load_json(&document.to_json_pretty().unwrap()).unwrap();
+        assert_eq!(RecoveredProgram::from_document(loaded).unwrap(), guided);
+        assert_eq!(
+            RecoveredProgram::refine(&macho, &guided, &guide).unwrap(),
+            guided,
+            "a complete guide can be reapplied to an already-guided prior"
+        );
+        let empty = RecoveryGuide::new(base.image().clone());
+        let cleared = RecoveredProgram::refine(&macho, &guided, &empty).unwrap();
+        assert!(cleared.functions().unwrap().by_entry(candidate).is_none());
+        assert_eq!(cleared.guide(), Some(&empty));
+        assert!(cleared.guide_application().is_some());
         assert_eq!(guided.guide(), Some(&guide));
         assert_eq!(
             guided.delta_from(&base).unwrap(),
@@ -5757,6 +8610,19 @@ mod tests {
         }));
         let function = guided.functions().unwrap().by_entry(candidate).unwrap();
         assert_eq!(function.authority, FunctionRecoveryAuthority::CallerGuided);
+        assert_eq!(
+            guided.subject_authority(&ProgramSubjectKey::Function { entry: candidate }),
+            Some(ProgramFactAuthority::Guided)
+        );
+        assert_eq!(
+            guided.subject_authority(&ProgramSubjectKey::Function { entry: MAIN }),
+            Some(ProgramFactAuthority::Independent)
+        );
+        assert_eq!(
+            guided.subject_authority(&ProgramSubjectKey::Function { entry: u64::MAX }),
+            None,
+            "an absent subject must not masquerade as independently established"
+        );
         assert!(function.evidence.iter().any(|evidence| {
             evidence.source == FunctionEvidenceSource::CallerDecision
                 && evidence.detail == "recovery_guide_accept_function_entry"
@@ -5991,7 +8857,7 @@ mod tests {
         };
         assert!(base.xrefs().unwrap().all_refs().iter().any(|reference| {
             reference.source.0 == 0x1_0000_010c
-                && reference.kind == XrefKind::Data
+                && reference.kind == crate::analysis::xref::XrefKind::Data
                 && reference.target.internal_address().map(|va| va.0) == Some(0x1_0000_0130)
         }));
 
@@ -6043,7 +8909,7 @@ mod tests {
                             address: 0x1_0000_0130
                         },
                         reference_kind,
-                    } if reference_kind == "data"
+                    } if *reference_kind == RecoveryReferenceKind::Data
                 )
                 && record.derivations.iter().any(|derivation| {
                     derivation.decision_index == 0

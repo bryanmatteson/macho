@@ -55,6 +55,8 @@ pub mod executable_bytes;
 pub mod functions;
 /// Offline, bounded, evidence-accountable header hypothesis exchange.
 pub mod header_infer;
+/// Domain-neutral ranked hypotheses and operator selection policy.
+pub mod hypothesis;
 /// Process-free parsing, validation, and rendering for recovered headers.
 pub mod header_syntax;
 /// The image module.
@@ -105,6 +107,38 @@ pub use analyzer::{
     DomainReportKey, DomainState, SliceIdentity, SliceSnapshot, SnapshotDocument,
     UnsupportedReason, domain_reports,
 };
+pub use control_flow::{
+    ControlFlowEdgeKind, GuidedControlFlowEdgeSuppression, GuidedDirectCallSuppression,
+};
+pub use hypothesis::{
+    DecisionAuthority, EvidenceAuthority, HypothesisCandidate, HypothesisConsequence,
+    HypothesisContractError, HypothesisLedger, HypothesisOverride, HypothesisSelectionPolicy,
+    HypothesisSelectionReceipt, HypothesisSubject, RecoveryHypothesis, SelectionPolicyMode,
+};
 pub use planner::{
     AnalysisLimits, AnalysisPlan, AuditPlan, AuditRuleSpec, ContainerPlan, DiffPlan,
+};
+pub use program::{
+    DisassemblyFacts, PROGRAM_COMPLETENESS_SCHEMA_VERSION, PROGRAM_FACT_IR_SCHEMA_VERSION,
+    PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION, ProgramAddressView, ProgramAnnotations,
+    ProgramCompletenessValidationError, ProgramExaminedUniverse, ProgramFactAuthority,
+    ProgramFactDocument, ProgramFactDocumentError, ProgramFactValidationError, ProgramFacts,
+    ProgramFunctionView, ProgramRecoveryCompleteness, ProgramRecoveryError, ProgramRecoveryLimits,
+    ProgramRecoveryLimitsFile, ProgramRecoveryRequest, ProgramRecoveryStage, ProgramRecoveryStatus,
+    ProgramReferenceAnnotations, ProgramReferenceBinding, ProgramReferenceOwner,
+    ProgramReferenceView, ProgramStageContract, ProgramStageReceipt, ProgramStageStatus,
+    RecoveredProgram, RecoveredProgramBody, RecoveryPreview, ResolvedDirectCallEdge,
+};
+pub use recovery::{
+    FunctionRelationshipChoice, GuidedReferenceOwnership, ProgramCoverage, ProgramCoverageDelta,
+    ProgramCoverageDimension, ProgramCoverageUnit, ProgramImageIdentity, ProgramSubjectKey,
+    RECOVERY_CONTRACT_MAJOR, RECOVERY_CONTRACT_MINOR, RecoveryAddressRange, RecoveryChoice,
+    RecoveryContractSchema, RecoveryDecision, RecoveryDecisionApplicability,
+    RecoveryDecisionApplication, RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation,
+    RecoveryDecisionDerivationKind, RecoveryDecisionValidation, RecoveryDelta, RecoveryDeltaError,
+    RecoveryDeltaKind, RecoveryDeltaRecord, RecoveryDeltaSummary, RecoveryEffectEstimate,
+    RecoveryGuide, RecoveryGuideApplicability, RecoveryGuideApplication, RecoveryGuideBuildError,
+    RecoveryGuideBuilder, RecoveryGuideValidation, RecoveryLayer, RecoveryPointKey,
+    RecoveryQuestion, RecoveryQuestionKind, RecoveryReferenceKind, RecoveryReferenceTargetKey,
+    RecoverySignal, RecoverySignalKey, RecoverySignalKind,
 };

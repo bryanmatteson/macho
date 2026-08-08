@@ -9,6 +9,7 @@ pub use validate::RecoveryValidationError;
 use serde::{Deserialize, Serialize};
 
 use super::*;
+use crate::analysis::hypothesis::{HypothesisLedger, HypothesisSelectionPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -420,6 +421,8 @@ pub struct ResolvedCollectorSpec {
 pub struct HeaderProjectionSpec {
     pub target_entity_ids: NonEmpty<EntityId>,
     pub language: RecoveryLanguage,
+    /// Operator policy governing hypothesis selection for this projection.
+    pub selection_policy: HypothesisSelectionPolicy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -493,8 +496,14 @@ pub struct LinkageEncoding {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntityOwner {
-    pub kind: Option<HeaderOwnerKind>,
     pub path: Vec<Identifier>,
+    /// Scope kinds parallel to `path`. `None` preserves an ABI-known name
+    /// component whose namespace-vs-record kind is not encoded.
+    pub scope_kinds: Vec<Option<HeaderOwnerKind>>,
+    /// Access of each scope within its parent, parallel to `path`.
+    pub scope_access: Vec<Option<Access>>,
+    /// Access within the terminal record when proven by source evidence.
+    pub member_access: Option<Access>,
     pub entity_id: Option<EntityId>,
 }
 
@@ -833,9 +842,11 @@ pub struct CollectorExecution {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderGap {
+    pub id: RecoveryGapId,
     pub entity_id: EntityId,
     pub field: RecoveryField,
     pub reason: HeaderIneligibilityReason,
+    pub declaration_template: Option<HeaderDecl>,
     pub diagnostic_ids: Vec<DiagnosticId>,
 }
 
@@ -845,6 +856,9 @@ pub struct HeaderProjection {
     pub language: RecoveryLanguage,
     pub declarations: Vec<HeaderDecl>,
     pub unresolved: Vec<HeaderGap>,
+    /// Ranked blockers and complete receipts for assumptions used by this
+    /// projection. These records never become recovered facts.
+    pub assumption_ledger: HypothesisLedger,
     pub diagnostics: Vec<RecoveryDiagnostic>,
     pub source: String,
     pub validation: HeaderValidationReport,

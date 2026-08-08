@@ -151,7 +151,8 @@ pub struct DependencyIndexCompleteness {
 }
 
 /// Dependencies and runtime boundary for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DependencyIndex {
     image: FunctionImageIdentity,
     limits: DependencyRecoveryLimits,
@@ -256,7 +257,7 @@ impl DependencyIndex {
             DependencyIndexStatus::Partial
         };
         let retained = dependencies.len() as u64;
-        Ok(Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits,
             install_name,
@@ -269,12 +270,18 @@ impl DependencyIndex {
                 retained,
                 continuation_ordinal,
             },
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        Ok(index)
     }
 
     /// Exact image identity.
     pub fn image(&self) -> &FunctionImageIdentity {
         &self.image
+    }
+    /// Exact recovery limits.
+    pub const fn limits(&self) -> DependencyRecoveryLimits {
+        self.limits
     }
     /// Image install name, when declared.
     pub fn install_name(&self) -> Option<&str> {
@@ -291,6 +298,58 @@ impl DependencyIndex {
     /// Completeness receipt.
     pub fn completeness(&self) -> &DependencyIndexCompleteness {
         &self.completeness
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.dependencies.len() > self.limits.max_dependencies
+            || self
+                .dependencies
+                .iter()
+                .enumerate()
+                .any(|(index, dependency)| {
+                    dependency.ordinal != index as u64 + 1 || dependency.install_name.is_empty()
+                })
+            || self.frontiers.windows(2).any(|pair| {
+                (pair[0].kind, pair[0].reason.as_str()) >= (pair[1].kind, pair[1].reason.as_str())
+            })
+            || self
+                .frontiers
+                .iter()
+                .any(|frontier| frontier.reason.is_empty())
+            || self
+                .completeness
+                .reasons
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        let receipt = &self.completeness;
+        let retained = self.dependencies.len() as u64;
+        let continuation = (receipt.observed > retained).then_some(retained + 1);
+        let has_record_budget = receipt
+            .reasons
+            .iter()
+            .any(|reason| reason == "dependency.record_budget");
+        let has_open_world = receipt
+            .reasons
+            .iter()
+            .any(|reason| reason == "dependency.runtime_open_world");
+        let expected_status = if continuation.is_some() {
+            DependencyIndexStatus::Truncated
+        } else if self.frontiers.is_empty() {
+            DependencyIndexStatus::Complete
+        } else {
+            DependencyIndexStatus::Partial
+        };
+        receipt.retained == retained
+            && receipt.observed >= retained
+            && receipt.continuation_ordinal == continuation
+            && has_record_budget == continuation.is_some()
+            && has_open_world == !self.frontiers.is_empty()
+            && receipt.reasons.len() == usize::from(has_record_budget) + usize::from(has_open_world)
+            && receipt.status == expected_status
     }
 }
 

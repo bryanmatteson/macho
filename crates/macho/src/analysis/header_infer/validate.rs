@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::analysis::header_syntax::{TranslationUnit, ValidationLimits};
 use crate::analysis::report::{
-    HeaderDecl, HeaderProjection, HeaderValidationReport, HypothesisReportVersion, RecoveryGapId,
-    Severity,
+    HeaderDecl, HeaderOwnerKind, HeaderOwnerRef, HeaderProjection, HeaderValidationReport,
+    HypothesisReportVersion, NonEmpty, RecoveryGapId, Severity,
 };
 
 use crate::analysis::header_infer::artifact::{
@@ -140,6 +140,7 @@ pub fn validate_response(
 
     let mut lowered = Vec::new();
     let mut lowered_indexes = Vec::new();
+    let mut lowered_declarations = Vec::new();
     let mut results = Vec::with_capacity(response.hypotheses.len());
     for hypothesis in &response.hypotheses {
         let mut result = HypothesisResult {
@@ -150,12 +151,48 @@ pub fn validate_response(
             support: hypothesis.support.clone(),
             diagnostics: Vec::new(),
         };
-        if let HypothesisOperation::ProposeDeclarationFragment { fragment } = &hypothesis.operation
-        {
-            match syntax::declaration(fragment) {
-                Ok(declaration) => {
+        let mut grouped_syntax = None;
+        let declaration = match &hypothesis.operation {
+            HypothesisOperation::ProposeDeclarationFragment { fragment } => Some(fragment.clone()),
+            HypothesisOperation::ProposeGrouping { owner } => {
+                let template = bundle
+                    .target_for_gap(&hypothesis.gap_id)
+                    .and_then(|target| target.projection_template.as_ref());
+                match template {
+                    Some(template) => match apply_grouping(template, owner) {
+                        Ok(declaration) => {
+                            grouped_syntax = Some(syntax::declaration_in_owner(template, owner));
+                            Some(declaration)
+                        }
+                        Err(error) => {
+                            result.disposition = HypothesisDisposition::Unresolved;
+                            result.diagnostics.push(diagnostic(
+                                HypothesisDiagnosticCode::UnsupportedHeaderFragment,
+                                error.to_string(),
+                                &hypothesis.id,
+                            ));
+                            None
+                        }
+                    },
+                    None => {
+                        result.disposition = HypothesisDisposition::Unresolved;
+                        result.diagnostics.push(diagnostic(
+                            HypothesisDiagnosticCode::UnsupportedHeaderFragment,
+                            "grouping target has no Macho-derived declaration template".into(),
+                            &hypothesis.id,
+                        ));
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        if let Some(wire_declaration) = declaration {
+            match grouped_syntax.unwrap_or_else(|| syntax::declaration(&wire_declaration)) {
+                Ok(syntax_declaration) => {
                     lowered_indexes.push(results.len());
-                    lowered.push(declaration);
+                    lowered.push(syntax_declaration);
+                    lowered_declarations.push((results.len(), wire_declaration));
                 }
                 Err(error) => {
                     result.disposition = HypothesisDisposition::Rejected;
@@ -210,22 +247,12 @@ pub fn validate_response(
         bundle.limits().max_rendered_header_bytes,
     )?;
 
-    let accepted_declarations = response
-        .hypotheses
-        .iter()
-        .zip(&results)
-        .filter_map(|(hypothesis, result)| {
-            if result.disposition != HypothesisDisposition::Accepted {
-                return None;
-            }
-            match &hypothesis.operation {
-                HypothesisOperation::ProposeDeclarationFragment { fragment } => {
-                    Some(fragment.clone())
-                }
-                _ => None,
-            }
+    let accepted_declarations = lowered_declarations
+        .into_iter()
+        .filter_map(|(index, declaration)| {
+            (results[index].disposition == HypothesisDisposition::Accepted).then_some(declaration)
         })
-        .collect::<Vec<HeaderDecl>>();
+        .collect::<Vec<_>>();
     let mut unresolved_gap_ids = response.unresolved_gap_ids.clone();
     unresolved_gap_ids.extend(
         results
@@ -244,6 +271,7 @@ pub fn validate_response(
         // reversible to its field, so the hypothesis report keeps the exact
         // IDs in `unresolved_gap_ids` instead of fabricating a HeaderGap field.
         unresolved: Vec::new(),
+        assumption_ledger: Default::default(),
         diagnostics: Vec::new(),
         source: format!("/* hypothesis-assisted; see sidecar for authority */\n{source}"),
         validation: wire_validation.clone(),
@@ -258,6 +286,41 @@ pub fn validate_response(
         validation: wire_validation,
         projected_header,
     })
+}
+
+fn apply_grouping(
+    template: &HeaderDecl,
+    owner: &HeaderOwnerRef,
+) -> Result<HeaderDecl, ArtifactError> {
+    validate_grouping_owner(owner)?;
+    let mut declaration = template.clone();
+    match &mut declaration {
+        HeaderDecl::Function {
+            owner: declaration_owner,
+            ..
+        }
+        | HeaderDecl::Variable {
+            owner: declaration_owner,
+            ..
+        } => *declaration_owner = Some(owner.clone()),
+        HeaderDecl::Record { path, .. }
+        | HeaderDecl::Forward { path, .. }
+        | HeaderDecl::Alias { path, .. } => {
+            let mut qualified = owner.path.as_slice().to_vec();
+            qualified.extend(path.as_slice().iter().cloned());
+            *path = NonEmpty::new(qualified)
+                .map_err(|_| ArtifactError::Invalid("grouped declaration path is empty".into()))?;
+        }
+        HeaderDecl::ObjcInterface { .. }
+        | HeaderDecl::ObjcCategory { .. }
+        | HeaderDecl::ObjcProtocol { .. }
+        | HeaderDecl::ObjcForward { .. } => {
+            return Err(ArtifactError::Invalid(
+                "C++ grouping cannot lower an Objective-C declaration".into(),
+            ));
+        }
+    }
+    Ok(declaration)
 }
 
 fn validate_operation(
@@ -293,6 +356,13 @@ fn validate_operation(
         }
         HypothesisOperation::ProposeCanonicalName { .. } => {}
         HypothesisOperation::ProposeGrouping { owner } => {
+            validate_grouping_owner(owner)?;
+            if owner.terminal_kind() == HeaderOwnerKind::Namespace && owner.entity_id.is_some() {
+                return Err(ArtifactError::Invalid(format!(
+                    "hypothesis {} namespace grouping cannot name an owner entity",
+                    hypothesis.id
+                )));
+            }
             if owner.entity_id.as_ref().is_some_and(|entity_id| {
                 !bundle
                     .targets()
@@ -327,6 +397,59 @@ fn validate_operation(
         }
     }
     Ok(())
+}
+
+fn validate_grouping_owner(owner: &HeaderOwnerRef) -> Result<(), ArtifactError> {
+    use crate::analysis::report::Access;
+
+    if !owner.has_exact_scopes() {
+        return Err(ArtifactError::Invalid(
+            "grouping owner must provide one exact kind and access slot per path component".into(),
+        ));
+    }
+    let kinds = owner.scope_kinds.as_slice();
+    let access = owner.scope_access.as_slice();
+    if access[0].is_some() {
+        return Err(ArtifactError::Invalid(
+            "the outermost owner scope cannot have member access".into(),
+        ));
+    }
+    for index in 1..kinds.len() {
+        match kinds[index - 1] {
+            HeaderOwnerKind::Namespace if access[index].is_some() => {
+                return Err(ArtifactError::Invalid(
+                    "a namespace-owned scope cannot have member access".into(),
+                ));
+            }
+            HeaderOwnerKind::Record | HeaderOwnerKind::Class
+                if !matches!(
+                    access[index],
+                    Some(Access::Public | Access::Protected | Access::Private)
+                ) =>
+            {
+                return Err(ArtifactError::Invalid(
+                    "a record-owned scope requires exact member access".into(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    match owner.terminal_kind() {
+        HeaderOwnerKind::Namespace if owner.member_access.is_some() => Err(ArtifactError::Invalid(
+            "namespace grouping cannot carry member access".into(),
+        )),
+        HeaderOwnerKind::Record | HeaderOwnerKind::Class
+            if !matches!(
+                owner.member_access,
+                Some(Access::Public | Access::Protected | Access::Private)
+            ) =>
+        {
+            Err(ArtifactError::Invalid(
+                "record grouping requires exact declaration access".into(),
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn diagnostic(

@@ -392,7 +392,9 @@ fn enrich_itanium(slice: &mut SliceRecovery) {
                         ReferenceKind::Rvalue
                     }
                 }),
-            noexcept: Some(decl.signature.noexcept),
+            // A demangled name can prove an encoded `noexcept`, but its absence does not prove
+            // `noexcept(false)`: ordinary function-name mangling omits the exception specification.
+            noexcept: decl.signature.noexcept.then_some(true),
         };
         reconcile_fact(
             &mut entity.signature.qualifiers,
@@ -411,11 +413,16 @@ fn enrich_itanium(slice: &mut SliceRecovery) {
                 Fact::Known { value, .. } => value.entity_id.clone(),
                 Fact::Conflicted { .. } | Fact::Unavailable { .. } => None,
             };
+            let owner_depth = path.as_slice().len();
             reconcile_fact(
                 &mut entity.owner,
                 EntityOwner {
-                    kind: Some(HeaderOwnerKind::Class),
+                    scope_kinds: (0..owner_depth)
+                        .map(|index| (index + 1 == owner_depth).then_some(HeaderOwnerKind::Class))
+                        .collect(),
                     path: path.into_vec(),
+                    scope_access: vec![None; owner_depth],
+                    member_access: None,
                     entity_id: owner_entity_id,
                 },
                 EvidenceStrength::Correlated,

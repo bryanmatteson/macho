@@ -44,6 +44,34 @@ fn render_decl(
 ) -> Result<(), RenderError> {
     let prefix = "    ".repeat(indent);
     match declaration {
+        Decl::AccessSection {
+            access,
+            declarations,
+        } => {
+            if language != Language::Cpp || indent == 0 {
+                return Err(RenderError::LanguageMismatch {
+                    language,
+                    construct: "record access section",
+                });
+            }
+            writeln!(output, "{prefix}{}:", render_access(*access)).unwrap();
+            for declaration in declarations {
+                render_decl(declaration, language, indent + 1, output)?;
+            }
+        }
+        Decl::Namespace { path, declarations } => {
+            if language != Language::Cpp {
+                return Err(RenderError::LanguageMismatch {
+                    language,
+                    construct: "namespace",
+                });
+            }
+            writeln!(output, "{prefix}namespace {} {{", render_path(path)).unwrap();
+            for declaration in declarations {
+                render_decl(declaration, language, indent + 1, output)?;
+            }
+            writeln!(output, "{prefix}}}").unwrap();
+        }
         Decl::Function {
             name,
             signature,
@@ -612,6 +640,34 @@ mod tests {
         TreeSitterHeaderParser
             .parse(Language::C, &rendered)
             .unwrap();
+    }
+
+    #[test]
+    fn rendered_cpp_namespace_reparses_with_ownership() {
+        let source = "namespace sample { class Widget; int run(int value); }";
+        let unit = TreeSitterHeaderParser.parse(Language::Cpp, source).unwrap();
+        let rendered = render(&unit).unwrap();
+        assert!(rendered.contains("namespace sample {"), "{rendered}");
+        let reparsed = TreeSitterHeaderParser
+            .parse(Language::Cpp, &rendered)
+            .unwrap();
+        assert!(matches!(
+            reparsed.declarations.as_slice(),
+            [Decl::Namespace { .. }]
+        ));
+    }
+
+    #[test]
+    fn rendered_cpp_record_preserves_member_access() {
+        let source = "class Widget { public: int run(int value) const; protected: int reset(); };";
+        let unit = TreeSitterHeaderParser.parse(Language::Cpp, source).unwrap();
+        let rendered = render(&unit).unwrap();
+        assert!(rendered.contains("public:"), "{rendered}");
+        assert!(rendered.contains("protected:"), "{rendered}");
+        let reparsed = TreeSitterHeaderParser
+            .parse(Language::Cpp, &rendered)
+            .unwrap();
+        assert_eq!(unit.declarations, reparsed.declarations);
     }
 
     #[test]

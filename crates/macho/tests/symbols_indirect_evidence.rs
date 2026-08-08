@@ -66,9 +66,13 @@ fn complete_inventory_retains_symbols_and_every_special_entry() {
     assert_eq!(rows[0].address.0, BASE + 0x200);
     assert_eq!(rows[0].file_offset.0, 0x200);
     assert_eq!(rows[0].size, 8);
-    assert!(
-        matches!(&rows[0].target, IndirectSymbolTarget::Symbol { index: 0, name } if name == "_imp")
-    );
+    let IndirectSymbolTarget::Symbol(symbol) = &rows[0].target else {
+        panic!()
+    };
+    assert_eq!(symbol.index, 0);
+    assert_eq!(symbol.name, "_imp");
+    assert!(symbol.is_undefined());
+    assert_eq!(symbol.library_ordinal(), 0);
     assert_eq!(rows[1].target, IndirectSymbolTarget::Local);
     assert_eq!(rows[2].target, IndirectSymbolTarget::Absolute);
     assert_eq!(rows[3].target, IndirectSymbolTarget::LocalAbsolute);

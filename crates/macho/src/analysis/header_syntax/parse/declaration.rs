@@ -153,7 +153,10 @@ pub(super) fn lower_record(text: &str, language: Language) -> Result<Decl, Parse
                         access,
                     })
                 }
-                other => members.push(other),
+                other => members.push(Decl::AccessSection {
+                    access,
+                    declarations: vec![other],
+                }),
             }
         }
     }

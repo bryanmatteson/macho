@@ -341,11 +341,13 @@ fn decode_region(
                     instruction_record(
                         slice,
                         plan,
-                        cursor,
-                        bytes,
-                        decoded.text,
-                        &instruction,
-                        decoded.recovery,
+                        InstructionRecordInput {
+                            va: cursor,
+                            bytes,
+                            text: decoded.text,
+                            instruction: &instruction,
+                            recovery: decoded.recovery,
+                        },
                         metadata,
                     )?,
                 )?;
@@ -534,16 +536,27 @@ fn decode_for_display_at(
     disassembler.decode_one(&tail[..window_len], va)
 }
 
+struct InstructionRecordInput<'a> {
+    va: u64,
+    bytes: &'a [u8],
+    text: String,
+    instruction: &'a Insn,
+    recovery: Option<crate::insn::InstructionRecovery>,
+}
+
 fn instruction_record(
     slice: &SelectedSlice<'_, '_>,
     plan: &RegionPlan,
-    va: u64,
-    bytes: &[u8],
-    text: String,
-    instruction: &Insn,
-    recovery: Option<crate::insn::InstructionRecovery>,
+    input: InstructionRecordInput<'_>,
     metadata: &Metadata,
 ) -> Result<DisassemblyRecord, DisassemblyError> {
+    let InstructionRecordInput {
+        va,
+        bytes,
+        text,
+        instruction,
+        recovery,
+    } = input;
     let thin_file_offset = thin_offset(plan, va)?;
     let container_file_offset = slice
         .container_offset

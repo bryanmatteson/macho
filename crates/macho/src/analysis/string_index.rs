@@ -108,12 +108,12 @@ pub struct StringIndexCompleteness {
 }
 
 /// Deterministic string inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StringIndex {
     image: FunctionImageIdentity,
     limits: StringRecoveryLimits,
     strings: Vec<RecoveredString>,
-    #[serde(skip)]
     by_reference: Vec<usize>,
     completeness: StringIndexCompleteness,
 }
@@ -307,6 +307,79 @@ impl StringIndex {
                 .saturating_add(1);
             (address < end).then_some(value)
         })
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        let strings_are_sorted = self
+            .strings
+            .windows(2)
+            .all(|pair| pair[0].address <= pair[1].address);
+        let mut expected_by_reference = (0..self.strings.len()).collect::<Vec<_>>();
+        expected_by_reference.sort_by_key(|index| {
+            let value = &self.strings[*index];
+            (value.object_address.unwrap_or(value.address), value.address)
+        });
+        let strings_are_well_formed = self.strings.iter().all(|value| {
+            value.value.len() <= self.limits.max_string_bytes
+                && value
+                    .address
+                    .checked_add(value.value.len() as u64)
+                    .is_some()
+                && value
+                    .file_offset
+                    .checked_add(value.value.len() as u64)
+                    .is_some_and(|end| end <= self.image.byte_len)
+                && value.object_address.is_some() == value.object_file_offset.is_some()
+                && value
+                    .object_file_offset
+                    .is_none_or(|offset| offset < self.image.byte_len)
+        });
+        let has_reason = |expected: &str| {
+            self.completeness
+                .reasons
+                .iter()
+                .any(|reason| reason == expected)
+        };
+        let reasons_are_known = self.completeness.reasons.iter().all(|reason| {
+            matches!(
+                reason.as_str(),
+                "strings.scan_budget"
+                    | "strings.retention_budget"
+                    | "strings.unreadable_region"
+                    | "strings.cfstring_malformed"
+                    | "strings.unterminated_region"
+            )
+        });
+        let reasons_are_unique = self
+            .completeness
+            .reasons
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            == self.completeness.reasons.len();
+        let expected_status =
+            if has_reason("strings.scan_budget") || self.completeness.omitted_strings != 0 {
+                StringIndexStatus::Truncated
+            } else if has_reason("strings.unreadable_region")
+                || has_reason("strings.cfstring_malformed")
+                || has_reason("strings.unterminated_region")
+            {
+                StringIndexStatus::Partial
+            } else {
+                StringIndexStatus::Complete
+            };
+        self.limits.validate().is_ok()
+            && self.strings.len() <= self.limits.max_strings
+            && self.completeness.scanned_bytes <= self.limits.max_scanned_bytes as u64
+            && self.completeness.observed_strings
+                >= (self.strings.len() as u64).saturating_add(self.completeness.omitted_strings)
+            && strings_are_sorted
+            && strings_are_well_formed
+            && self.by_reference == expected_by_reference
+            && reasons_are_known
+            && reasons_are_unique
+            && has_reason("strings.retention_budget") == (self.completeness.omitted_strings != 0)
+            && self.completeness.status == expected_status
     }
 
     /// Return the exact typed file offset for a retained string.
@@ -521,6 +594,7 @@ mod tests {
             },
         )
         .unwrap();
+        assert!(index.durable_invariants_hold());
         assert_eq!(index.status(), StringIndexStatus::Truncated);
         assert!(index.completeness().scanned_bytes <= 8);
         assert!(
@@ -543,6 +617,7 @@ mod tests {
         bytes[0x130..0x135].copy_from_slice(b"hello");
 
         let index = StringIndex::recover(&image(&bytes), StringRecoveryLimits::default()).unwrap();
+        assert!(index.durable_invariants_hold());
         let value = index
             .referenced_at(0x1_0000_0100)
             .expect("CFString object is referenceable");
@@ -564,6 +639,7 @@ mod tests {
         bytes[0xa8..0xac].copy_from_slice(&2_u32.to_le_bytes());
         bytes[0x100..0x140].fill(b'a');
         let index = StringIndex::recover(&image(&bytes), StringRecoveryLimits::default()).unwrap();
+        assert!(index.durable_invariants_hold());
         assert_eq!(index.status(), StringIndexStatus::Partial);
         assert!(
             index

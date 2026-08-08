@@ -2,49 +2,134 @@ use crate::analysis::report::{Presence, RecoveryLanguage};
 use crate::header_syntax as syntax;
 
 use super::{EntityKind, entity_address, entity_kind, entity_name, entity_presence};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProjectionBlocker {
+    pub field: crate::analysis::report::RecoveryField,
+    pub reason: crate::analysis::report::HeaderIneligibilityReason,
+}
+
+type ProjectionResult =
+    Result<(crate::analysis::report::HeaderDecl, syntax::Decl), ProjectionBlocker>;
+
+fn blocked(
+    field: crate::analysis::report::RecoveryField,
+    reason: crate::analysis::report::HeaderIneligibilityReason,
+) -> ProjectionBlocker {
+    ProjectionBlocker { field, reason }
+}
+
 pub(super) fn project_entity(
     entity: &crate::analysis::report::RecoveredEntity,
     language: RecoveryLanguage,
-) -> Option<(crate::analysis::report::HeaderDecl, syntax::Decl)> {
+) -> ProjectionResult {
+    project_entity_with_owner(entity, language, None)
+}
+
+pub(super) fn project_entity_with_owner(
+    entity: &crate::analysis::report::RecoveredEntity,
+    language: RecoveryLanguage,
+    owner_override: Option<&crate::analysis::report::HeaderOwnerRef>,
+) -> ProjectionResult {
     use crate::analysis::report::{
-        CallingConvention, Fact, HeaderDecl, HeaderFunctionQualifiers, HeaderLinkage,
-        HeaderParameter, HeaderType, ParameterList, ParameterState, ReferenceKind, StorageClass,
-        TypeEvidence,
+        CallingConvention, Fact, HeaderDecl, HeaderFunctionQualifiers, HeaderIneligibilityReason,
+        HeaderLinkage, HeaderParameter, HeaderType, ParameterList, ParameterState, RecoveryField,
+        ReferenceKind, StorageClass, TypeEvidence,
     };
 
     if entity_presence(entity) != Presence::Defined {
-        return None;
+        return Err(blocked(
+            RecoveryField::Presence,
+            HeaderIneligibilityReason::UnavailableRequiredFact,
+        ));
     }
     match entity_kind(entity) {
         Some(EntityKind::Data | EntityKind::Tls) => {
-            return project_variable(entity, language);
+            return project_variable(entity, language, owner_override);
         }
-        Some(EntityKind::Type) => return project_type(entity, language),
+        Some(EntityKind::Type) => return project_type(entity, language, owner_override),
         Some(EntityKind::Function | EntityKind::Method) => {}
-        _ => return None,
-    }
-    let name = match language {
-        RecoveryLanguage::CAbi => {
-            crate::analysis::report::Identifier::new(entity_name(entity)).ok()?
+        _ => {
+            return Err(blocked(
+                RecoveryField::Role,
+                HeaderIneligibilityReason::UnsupportedType,
+            ));
         }
+    }
+    let (name, owner) = match language {
+        RecoveryLanguage::CAbi => (
+            crate::analysis::report::Identifier::new(entity_name(entity)).map_err(|_| {
+                blocked(
+                    RecoveryField::DisplayName,
+                    HeaderIneligibilityReason::InvalidLinkage,
+                )
+            })?,
+            None,
+        ),
         RecoveryLanguage::Cpp => {
             let raw = match &entity.linkage {
                 Fact::Known { value, .. } => &value.raw,
-                _ => return None,
+                Fact::Conflicted { .. } => {
+                    return Err(blocked(
+                        RecoveryField::Linkage,
+                        HeaderIneligibilityReason::ConflictedRequiredFact,
+                    ));
+                }
+                Fact::Unavailable { .. } => {
+                    return Err(blocked(
+                        RecoveryField::Linkage,
+                        HeaderIneligibilityReason::UnavailableRequiredFact,
+                    ));
+                }
             };
             let record = crate::analysis::reconstruct::cpp::symbol::parse_symbol(
                 raw,
                 entity_address(entity),
                 None,
-            )?;
+            )
+            .ok_or_else(|| {
+                blocked(
+                    RecoveryField::Linkage,
+                    HeaderIneligibilityReason::InvalidLinkage,
+                )
+            })?;
             let crate::analysis::reconstruct::cpp::CppSymbolKind::Function { decl } = record.kind
             else {
-                return None;
+                return Err(blocked(
+                    RecoveryField::Role,
+                    HeaderIneligibilityReason::UnsupportedType,
+                ));
             };
-            if decl.name.components.len() != 1 || decl.is_constructor || decl.is_destructor {
-                return None;
+            if decl.is_constructor || decl.is_destructor {
+                return Err(blocked(
+                    RecoveryField::Role,
+                    HeaderIneligibilityReason::IncompleteTemplateContext,
+                ));
             }
-            crate::analysis::report::Identifier::new(decl.name.leaf()?.to_owned()).ok()?
+            let name =
+                crate::analysis::report::Identifier::new(decl.name.leaf().ok_or_else(|| {
+                    blocked(
+                        RecoveryField::DisplayName,
+                        HeaderIneligibilityReason::InvalidLinkage,
+                    )
+                })?)
+                .map_err(|_| {
+                    blocked(
+                        RecoveryField::DisplayName,
+                        HeaderIneligibilityReason::IncompleteTemplateContext,
+                    )
+                })?;
+            let needs_owner = decl.name.components.len() != 1
+                || matches!(entity_kind(entity), Some(EntityKind::Method));
+            let owner = if needs_owner {
+                Some(resolve_owner(entity, owner_override)?)
+            } else {
+                None
+            };
+            if let Some(owner) = owner.as_ref() {
+                validate_projectable_owner(owner)?;
+            }
+            (name, owner)
         }
     };
     let return_type = match &entity.signature.return_type {
@@ -53,7 +138,18 @@ pub(super) fn project_entity(
             strength,
             ..
         } if *strength != crate::analysis::report::EvidenceStrength::Inferred => ty.clone(),
-        _ => return None,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::ReturnType,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        _ => {
+            return Err(blocked(
+                RecoveryField::ReturnType,
+                HeaderIneligibilityReason::UnavailableRequiredFact,
+            ));
+        }
     };
     let recovered_parameters = match &entity.signature.parameters {
         Fact::Known {
@@ -61,7 +157,18 @@ pub(super) fn project_entity(
             strength,
             ..
         } if *strength != crate::analysis::report::EvidenceStrength::Inferred => value,
-        _ => return None,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::Parameters,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        _ => {
+            return Err(blocked(
+                RecoveryField::Parameters,
+                HeaderIneligibilityReason::UnavailableRequiredFact,
+            ));
+        }
     };
     let mut parameters = Vec::new();
     for (index, parameter) in recovered_parameters.iter().enumerate() {
@@ -71,7 +178,18 @@ pub(super) fn project_entity(
                 strength,
                 ..
             } if *strength != crate::analysis::report::EvidenceStrength::Inferred => ty.clone(),
-            _ => return None,
+            Fact::Conflicted { .. } => {
+                return Err(blocked(
+                    RecoveryField::Parameters,
+                    HeaderIneligibilityReason::ConflictedRequiredFact,
+                ));
+            }
+            _ => {
+                return Err(blocked(
+                    RecoveryField::Parameters,
+                    HeaderIneligibilityReason::UnsupportedType,
+                ));
+            }
         };
         let raw_name = match &parameter.source_name {
             Fact::Known { value, .. } => value.clone(),
@@ -79,14 +197,30 @@ pub(super) fn project_entity(
         };
         let name = crate::analysis::report::Identifier::new(raw_name)
             .or_else(|_| crate::analysis::report::Identifier::new(format!("arg{index}")))
-            .ok()?;
+            .map_err(|_| {
+                blocked(
+                    RecoveryField::Parameters,
+                    HeaderIneligibilityReason::UnsupportedType,
+                )
+            })?;
         parameters.push(HeaderParameter { name, ty });
     }
     let variadic = match &entity.signature.variadic {
         Fact::Known {
             value, strength, ..
         } if *strength != crate::analysis::report::EvidenceStrength::Inferred => *value,
-        _ => return None,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::Variadic,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        _ => {
+            return Err(blocked(
+                RecoveryField::Variadic,
+                HeaderIneligibilityReason::UnavailableRequiredFact,
+            ));
+        }
     };
     let calling_convention = match &entity.signature.calling_convention {
         Fact::Known {
@@ -96,24 +230,59 @@ pub(super) fn project_entity(
         {
             *value
         }
-        _ => return None,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::CallingConvention,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        _ => {
+            return Err(blocked(
+                RecoveryField::CallingConvention,
+                HeaderIneligibilityReason::UnavailableRequiredFact,
+            ));
+        }
     };
     if !matches!(calling_convention, CallingConvention::C) {
-        return None;
+        return Err(blocked(
+            RecoveryField::CallingConvention,
+            HeaderIneligibilityReason::UnsupportedCallingConvention,
+        ));
     }
     let qualifiers = match language {
         RecoveryLanguage::CAbi => HeaderFunctionQualifiers::default(),
         RecoveryLanguage::Cpp => match &entity.signature.qualifiers {
             Fact::Known { value, .. } => HeaderFunctionQualifiers {
-                is_const: value.is_const?,
-                is_volatile: value.is_volatile?,
+                is_const: value.is_const.ok_or_else(|| {
+                    blocked(
+                        RecoveryField::Qualifiers,
+                        HeaderIneligibilityReason::UnavailableRequiredFact,
+                    )
+                })?,
+                is_volatile: value.is_volatile.ok_or_else(|| {
+                    blocked(
+                        RecoveryField::Qualifiers,
+                        HeaderIneligibilityReason::UnavailableRequiredFact,
+                    )
+                })?,
                 reference: value.reference.map(|value| match value {
                     ReferenceKind::Lvalue => ReferenceKind::Lvalue,
                     ReferenceKind::Rvalue => ReferenceKind::Rvalue,
                 }),
                 noexcept: value.noexcept,
             },
-            _ => return None,
+            Fact::Conflicted { .. } => {
+                return Err(blocked(
+                    RecoveryField::Qualifiers,
+                    HeaderIneligibilityReason::ConflictedRequiredFact,
+                ));
+            }
+            _ => {
+                return Err(blocked(
+                    RecoveryField::Qualifiers,
+                    HeaderIneligibilityReason::UnavailableRequiredFact,
+                ));
+            }
         },
     };
     let signature = HeaderType::Function {
@@ -124,8 +293,18 @@ pub(super) fn project_entity(
         calling_convention,
         qualifiers,
     };
-    let syntax_signature = syntax_type(&signature)?;
-    let syntax_name = syntax::Identifier::new(name.as_str())?;
+    let syntax_signature = syntax_type(&signature).ok_or_else(|| {
+        blocked(
+            RecoveryField::ReturnType,
+            HeaderIneligibilityReason::IncompleteTemplateContext,
+        )
+    })?;
+    let syntax_name = syntax::Identifier::new(name.as_str()).ok_or_else(|| {
+        blocked(
+            RecoveryField::DisplayName,
+            HeaderIneligibilityReason::InvalidLinkage,
+        )
+    })?;
     let linkage = match language {
         RecoveryLanguage::CAbi => HeaderLinkage::C,
         RecoveryLanguage::Cpp => HeaderLinkage::Cpp,
@@ -134,46 +313,86 @@ pub(super) fn project_entity(
         RecoveryLanguage::CAbi => syntax::Linkage::C,
         RecoveryLanguage::Cpp => syntax::Linkage::Cpp,
     };
-    Some((
+    let syntax_declaration = syntax::Decl::Function {
+        name: syntax_name,
+        signature: syntax_signature,
+        storage: syntax::StorageClass::None,
+        linkage: syntax_linkage,
+    };
+    Ok((
         HeaderDecl::Function {
             id: entity.id.clone(),
-            owner: None,
+            owner: owner.clone(),
             name,
             signature,
             storage: StorageClass::None,
             linkage,
         },
-        syntax::Decl::Function {
-            name: syntax_name,
-            signature: syntax_signature,
-            storage: syntax::StorageClass::None,
-            linkage: syntax_linkage,
-        },
+        wrap_owner(owner.as_ref(), syntax_declaration)?,
     ))
 }
 
 fn project_variable(
     entity: &crate::analysis::report::RecoveredEntity,
     language: RecoveryLanguage,
-) -> Option<(crate::analysis::report::HeaderDecl, syntax::Decl)> {
+    owner_override: Option<&crate::analysis::report::HeaderOwnerRef>,
+) -> ProjectionResult {
     use crate::analysis::report::{
-        EvidenceStrength, Fact, HeaderDecl, HeaderLinkage, StorageClass, TypeEvidence,
+        EvidenceStrength, Fact, HeaderDecl, HeaderIneligibilityReason, HeaderLinkage,
+        RecoveryField, StorageClass, TypeEvidence,
     };
 
-    let name = crate::analysis::report::Identifier::new(entity_name(entity)).ok()?;
+    let raw_name = entity_name(entity);
+    let qualified = raw_name.contains("::");
+    let owner = if qualified {
+        Some(resolve_owner(entity, owner_override)?)
+    } else {
+        None
+    };
+    if let Some(owner) = owner.as_ref() {
+        validate_projectable_owner(owner)?;
+    }
+    let terminal_name = raw_name.rsplit("::").next().unwrap_or(raw_name.as_str());
+    let name = crate::analysis::report::Identifier::new(terminal_name).map_err(|_| {
+        blocked(
+            RecoveryField::DisplayName,
+            HeaderIneligibilityReason::IncompleteTemplateContext,
+        )
+    })?;
     let ty = match &entity.value_type {
         Fact::Known {
             value: TypeEvidence::Source { ty },
             strength,
             ..
         } if *strength != EvidenceStrength::Inferred => ty.clone(),
-        _ => return None,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::ValueType,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        _ => {
+            return Err(blocked(
+                RecoveryField::ValueType,
+                HeaderIneligibilityReason::UnavailableRequiredFact,
+            ));
+        }
     };
-    let kind = entity_kind(entity)?;
+    let kind = entity_kind(entity).ok_or_else(|| {
+        blocked(
+            RecoveryField::Role,
+            HeaderIneligibilityReason::UnavailableRequiredFact,
+        )
+    })?;
     let storage = match kind {
         EntityKind::Data => StorageClass::Extern,
         EntityKind::Tls => StorageClass::ThreadLocal,
-        _ => return None,
+        _ => {
+            return Err(blocked(
+                RecoveryField::Role,
+                HeaderIneligibilityReason::UnsupportedType,
+            ));
+        }
     };
     let syntax_storage = match storage {
         StorageClass::Extern => syntax::StorageClass::Extern,
@@ -189,48 +408,92 @@ fn project_variable(
         RecoveryLanguage::CAbi => syntax::Linkage::C,
         RecoveryLanguage::Cpp => syntax::Linkage::Cpp,
     };
-    Some((
+    let syntax_declaration = syntax::Decl::Variable {
+        name: syntax::Identifier::new(name.as_str()).ok_or_else(|| {
+            blocked(
+                RecoveryField::DisplayName,
+                HeaderIneligibilityReason::InvalidLinkage,
+            )
+        })?,
+        ty: syntax_type(&ty).ok_or_else(|| {
+            blocked(
+                RecoveryField::ValueType,
+                HeaderIneligibilityReason::IncompleteTemplateContext,
+            )
+        })?,
+        storage: syntax_storage,
+        linkage: syntax_linkage,
+    };
+    Ok((
         HeaderDecl::Variable {
             id: entity.id.clone(),
-            owner: None,
+            owner: owner.clone(),
             name: name.clone(),
             ty: ty.clone(),
             storage,
             linkage,
         },
-        syntax::Decl::Variable {
-            name: syntax::Identifier::new(name.as_str())?,
-            ty: syntax_type(&ty)?,
-            storage: syntax_storage,
-            linkage: syntax_linkage,
-        },
+        wrap_owner(owner.as_ref(), syntax_declaration)?,
     ))
 }
 
 fn project_type(
     entity: &crate::analysis::report::RecoveredEntity,
     language: RecoveryLanguage,
-) -> Option<(crate::analysis::report::HeaderDecl, syntax::Decl)> {
-    use crate::analysis::report::{Fact, HeaderDecl, LayoutCompleteness, RecordKind};
+    owner_override: Option<&crate::analysis::report::HeaderOwnerRef>,
+) -> ProjectionResult {
+    use crate::analysis::report::{
+        Fact, HeaderDecl, HeaderIneligibilityReason, LayoutCompleteness, RecordKind, RecoveryField,
+    };
 
     if language != RecoveryLanguage::Cpp {
-        return None;
+        return Err(blocked(
+            RecoveryField::Role,
+            HeaderIneligibilityReason::UnsupportedType,
+        ));
     }
-    let path = entity_name(entity)
-        .split("::")
-        .map(|component| crate::analysis::report::Identifier::new(component.to_owned()).ok())
-        .collect::<Option<Vec<_>>>()?;
-    if path.len() != 1 {
-        return None;
+    let raw_name = entity_name(entity);
+    let qualified = raw_name.contains("::");
+    let owner = if qualified {
+        Some(resolve_owner(entity, owner_override)?)
+    } else {
+        None
+    };
+    if let Some(owner) = owner.as_ref() {
+        validate_projectable_owner(owner)?;
     }
-    let wire_path = crate::analysis::report::NonEmpty::new(path).ok()?;
-    let syntax_path = syntax::IdentifierPath::new(
-        wire_path
-            .as_slice()
-            .iter()
-            .map(|component| syntax::Identifier::new(component.as_str()))
-            .collect::<Option<Vec<_>>>()?,
-    )?;
+    let terminal_name = raw_name.rsplit("::").next().unwrap_or(raw_name.as_str());
+    let terminal = crate::analysis::report::Identifier::new(terminal_name).map_err(|_| {
+        blocked(
+            RecoveryField::DisplayName,
+            HeaderIneligibilityReason::IncompleteTemplateContext,
+        )
+    })?;
+    let mut path = owner
+        .as_ref()
+        .map(|owner| owner.path.as_slice().to_vec())
+        .unwrap_or_default();
+    path.push(terminal.clone());
+    let wire_path = crate::analysis::report::NonEmpty::new(path).map_err(|_| {
+        blocked(
+            RecoveryField::DisplayName,
+            HeaderIneligibilityReason::UnsupportedType,
+        )
+    })?;
+    let syntax_path = syntax::IdentifierPath::new(vec![
+        syntax::Identifier::new(terminal.as_str()).ok_or_else(|| {
+            blocked(
+                RecoveryField::DisplayName,
+                HeaderIneligibilityReason::UnsupportedType,
+            )
+        })?,
+    ])
+    .ok_or_else(|| {
+        blocked(
+            RecoveryField::DisplayName,
+            HeaderIneligibilityReason::UnsupportedType,
+        )
+    })?;
     let complete = matches!(
         entity.layout.completeness,
         Fact::Known {
@@ -240,16 +503,41 @@ fn project_type(
     );
     if complete {
         let wire_fields = match &entity.layout.fields {
-            Fact::Known { value, .. } => {
-                value.iter().map(wire_field).collect::<Option<Vec<_>>>()?
+            Fact::Known { value, .. } => value
+                .iter()
+                .map(wire_field)
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                blocked(
+                    RecoveryField::LayoutFields,
+                    HeaderIneligibilityReason::UnsupportedType,
+                )
+            })?,
+            _ => {
+                return Err(blocked(
+                    RecoveryField::LayoutFields,
+                    HeaderIneligibilityReason::IncompleteLayout,
+                ));
             }
-            _ => return None,
         };
         let syntax_fields = wire_fields
             .iter()
             .map(syntax_field)
-            .collect::<Option<Vec<_>>>()?;
-        Some((
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                blocked(
+                    RecoveryField::LayoutFields,
+                    HeaderIneligibilityReason::UnsupportedType,
+                )
+            })?;
+        let syntax_declaration = syntax::Decl::Record {
+            kind: syntax::RecordKind::Class,
+            path: syntax_path,
+            bases: Vec::new(),
+            fields: syntax_fields,
+            members: Vec::new(),
+        };
+        Ok((
             HeaderDecl::Record {
                 id: entity.id.clone(),
                 record_kind: RecordKind::Class,
@@ -259,27 +547,207 @@ fn project_type(
                 fields: wire_fields,
                 members: Vec::new(),
             },
-            syntax::Decl::Record {
-                kind: syntax::RecordKind::Class,
-                path: syntax_path,
-                bases: Vec::new(),
-                fields: syntax_fields,
-                members: Vec::new(),
-            },
+            wrap_owner(owner.as_ref(), syntax_declaration)?,
         ))
     } else {
-        Some((
+        let syntax_declaration = syntax::Decl::Forward {
+            kind: syntax::RecordKind::Class,
+            path: syntax_path,
+        };
+        Ok((
             HeaderDecl::Forward {
                 id: entity.id.clone(),
                 record_kind: RecordKind::Class,
                 path: wire_path,
             },
-            syntax::Decl::Forward {
-                kind: syntax::RecordKind::Class,
-                path: syntax_path,
-            },
+            wrap_owner(owner.as_ref(), syntax_declaration)?,
         ))
     }
+}
+
+fn resolve_owner(
+    entity: &crate::analysis::report::RecoveredEntity,
+    owner_override: Option<&crate::analysis::report::HeaderOwnerRef>,
+) -> Result<crate::analysis::report::HeaderOwnerRef, ProjectionBlocker> {
+    owner_override
+        .cloned()
+        .map_or_else(|| proven_owner(entity), Ok)
+}
+
+fn proven_owner(
+    entity: &crate::analysis::report::RecoveredEntity,
+) -> Result<crate::analysis::report::HeaderOwnerRef, ProjectionBlocker> {
+    use crate::analysis::report::{
+        Fact, HeaderIneligibilityReason, HeaderOwnerRef, NonEmpty, RecoveryField,
+    };
+
+    let owner = match &entity.owner {
+        Fact::Known { value, .. } => value,
+        Fact::Conflicted { .. } => {
+            return Err(blocked(
+                RecoveryField::Owner,
+                HeaderIneligibilityReason::ConflictedRequiredFact,
+            ));
+        }
+        Fact::Unavailable { .. } => {
+            return Err(blocked(
+                RecoveryField::Owner,
+                HeaderIneligibilityReason::UnprovenOwner,
+            ));
+        }
+    };
+    let path = NonEmpty::new(owner.path.clone()).map_err(|_| {
+        blocked(
+            RecoveryField::Owner,
+            HeaderIneligibilityReason::UnprovenOwner,
+        )
+    })?;
+    let scope_kinds = owner
+        .scope_kinds
+        .iter()
+        .copied()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|scope_kinds| NonEmpty::new(scope_kinds).ok())
+        .filter(|scope_kinds| scope_kinds.as_slice().len() == path.as_slice().len())
+        .ok_or_else(|| {
+            blocked(
+                RecoveryField::Owner,
+                HeaderIneligibilityReason::UnprovenOwner,
+            )
+        })?;
+    let scope_access = NonEmpty::new(owner.scope_access.clone())
+        .ok()
+        .filter(|scope_access| scope_access.as_slice().len() == path.as_slice().len())
+        .ok_or_else(|| {
+            blocked(
+                RecoveryField::Owner,
+                HeaderIneligibilityReason::UnprovenOwner,
+            )
+        })?;
+    Ok(HeaderOwnerRef {
+        path,
+        scope_kinds,
+        scope_access,
+        member_access: owner.member_access,
+        entity_id: owner.entity_id.clone(),
+    })
+}
+
+fn validate_projectable_owner(
+    owner: &crate::analysis::report::HeaderOwnerRef,
+) -> Result<(), ProjectionBlocker> {
+    use crate::analysis::report::{
+        Access, HeaderIneligibilityReason, HeaderOwnerKind, RecoveryField,
+    };
+
+    if !owner.has_exact_scopes() {
+        return Err(blocked(
+            RecoveryField::Owner,
+            HeaderIneligibilityReason::UnprovenOwner,
+        ));
+    }
+    let kinds = owner.scope_kinds.as_slice();
+    let access = owner.scope_access.as_slice();
+    if access[0].is_some()
+        || (1..kinds.len()).any(|index| match kinds[index - 1] {
+            HeaderOwnerKind::Namespace => access[index].is_some(),
+            HeaderOwnerKind::Record | HeaderOwnerKind::Class => !matches!(
+                access[index],
+                Some(Access::Public | Access::Protected | Access::Private)
+            ),
+        })
+    {
+        return Err(blocked(
+            RecoveryField::Owner,
+            HeaderIneligibilityReason::IncompleteTemplateContext,
+        ));
+    }
+    match owner.terminal_kind() {
+        HeaderOwnerKind::Namespace if owner.member_access.is_none() => Ok(()),
+        HeaderOwnerKind::Record | HeaderOwnerKind::Class
+            if matches!(
+                owner.member_access,
+                Some(Access::Public | Access::Protected | Access::Private)
+            ) =>
+        {
+            Ok(())
+        }
+        _ => Err(blocked(
+            RecoveryField::Owner,
+            HeaderIneligibilityReason::IncompleteTemplateContext,
+        )),
+    }
+}
+
+fn wrap_owner(
+    owner: Option<&crate::analysis::report::HeaderOwnerRef>,
+    mut declaration: syntax::Decl,
+) -> Result<syntax::Decl, ProjectionBlocker> {
+    use crate::analysis::report::{
+        Access, HeaderIneligibilityReason, HeaderOwnerKind, RecoveryField,
+    };
+
+    let Some(owner) = owner else {
+        return Ok(declaration);
+    };
+    validate_projectable_owner(owner)?;
+    let components = owner.path.as_slice();
+    let kinds = owner.scope_kinds.as_slice();
+    let scope_access = owner.scope_access.as_slice();
+    for index in (0..components.len()).rev() {
+        let identifier = syntax::Identifier::new(components[index].as_str()).ok_or_else(|| {
+            blocked(
+                RecoveryField::Owner,
+                HeaderIneligibilityReason::UnsupportedType,
+            )
+        })?;
+        let path = syntax::IdentifierPath::new(vec![identifier]).expect("one owner component");
+        declaration = match kinds[index] {
+            HeaderOwnerKind::Namespace => syntax::Decl::Namespace {
+                path,
+                declarations: vec![declaration],
+            },
+            HeaderOwnerKind::Record | HeaderOwnerKind::Class => {
+                let access = if index + 1 == components.len() {
+                    owner.member_access
+                } else {
+                    scope_access[index + 1]
+                }
+                .ok_or_else(|| {
+                    blocked(
+                        RecoveryField::Owner,
+                        HeaderIneligibilityReason::IncompleteTemplateContext,
+                    )
+                })?;
+                let access = match access {
+                    Access::Public => syntax::Access::Public,
+                    Access::Protected => syntax::Access::Protected,
+                    Access::Private => syntax::Access::Private,
+                    Access::Unspecified => {
+                        return Err(blocked(
+                            RecoveryField::Owner,
+                            HeaderIneligibilityReason::IncompleteTemplateContext,
+                        ));
+                    }
+                };
+                syntax::Decl::Record {
+                    kind: if kinds[index] == HeaderOwnerKind::Class {
+                        syntax::RecordKind::Class
+                    } else {
+                        syntax::RecordKind::Struct
+                    },
+                    path,
+                    bases: Vec::new(),
+                    fields: Vec::new(),
+                    members: vec![syntax::Decl::AccessSection {
+                        access,
+                        declarations: vec![declaration],
+                    }],
+                }
+            }
+        };
+    }
+    Ok(declaration)
 }
 
 fn wire_field(

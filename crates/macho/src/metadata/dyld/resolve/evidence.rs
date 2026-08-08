@@ -195,6 +195,13 @@ pub struct PointerResolver<'image, 'data> {
     has_dyld_metadata: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PointerInventorySelection {
+    All,
+    LegacyBinds,
+    LegacyRebases,
+}
+
 impl<'image, 'data> PointerResolver<'image, 'data> {
     /// Build the complete pointer-evidence map for one selected image.
     pub fn new(image: &'image MachoFile<'data>) -> Result<Self> {
@@ -237,6 +244,32 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
 
     /// Return every dyld-managed pointer as a bounded, deterministic inventory.
     pub fn inventory(&self, limit: u64) -> Result<PointerInventory> {
+        self.inventory_matching(limit, PointerInventorySelection::All)
+    }
+
+    /// Return legacy-bound pointer fields as a bounded, deterministic inventory.
+    ///
+    /// Pure legacy rebases do not consume this limit. Bind fields retain every
+    /// compatible regular, weak, and lazy occurrence in
+    /// [`DyldPointer::legacy_bind_occurrences`].
+    pub fn legacy_bind_inventory(&self, limit: u64) -> Result<PointerInventory> {
+        self.inventory_matching(limit, PointerInventorySelection::LegacyBinds)
+    }
+
+    /// Return legacy-rebased pointer fields as a bounded, deterministic inventory.
+    ///
+    /// Bind-only fields do not consume this limit. A field covered by both a
+    /// legacy bind and rebase is projected as the rebase occurrence with the
+    /// target read from its stored pointer bytes.
+    pub fn legacy_rebase_inventory(&self, limit: u64) -> Result<PointerInventory> {
+        self.inventory_matching(limit, PointerInventorySelection::LegacyRebases)
+    }
+
+    fn inventory_matching(
+        &self,
+        limit: u64,
+        selection: PointerInventorySelection,
+    ) -> Result<PointerInventory> {
         if limit == 0 {
             return Err(Error::format("pointer inventory limit must be positive"));
         }
@@ -244,18 +277,33 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
             return Ok(PointerInventory::Absent);
         }
         let width = if self.image.is_64bit() { 8 } else { 4 };
-        let available = u64::try_from(self.fixups.len()).unwrap_or(u64::MAX);
-        let mut pointers = Vec::with_capacity(
+        let available = u64::try_from(
             self.fixups
-                .len()
+                .values()
+                .filter(|evidence| selection.matches(evidence))
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        let mut pointers = Vec::with_capacity(
+            usize::try_from(available)
+                .unwrap_or(usize::MAX)
                 .min(usize::try_from(limit).unwrap_or(usize::MAX)),
         );
         let mut continuation = None;
         for (&offset, evidence) in &self.fixups {
+            if !selection.matches(evidence) {
+                continue;
+            }
             let file_offset = ThinFileOffset(offset);
             let source_va = self.image.address_map().thin_offset_to_va(file_offset)?;
-            let target = match (&evidence.encoding, &evidence.target) {
-                (PointerEncoding::LegacyRebase, InventoryPointerTarget::Address(_)) => {
+            let project_as_legacy_rebase = selection == PointerInventorySelection::LegacyRebases;
+            let target = match (
+                project_as_legacy_rebase,
+                &evidence.encoding,
+                &evidence.target,
+            ) {
+                (true, _, _)
+                | (false, PointerEncoding::LegacyRebase, InventoryPointerTarget::Address(_)) => {
                     inventory_direct_target(self.image, file_offset, width)?
                 }
                 _ => evidence.target.clone(),
@@ -264,10 +312,22 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
                 file_offset,
                 source_va,
                 width,
-                encoding: evidence.encoding,
-                chained_pointer_format: evidence.chained_pointer_format,
-                authentication: evidence.authentication,
-                legacy_bind_occurrences: evidence.legacy_bind_occurrences.clone(),
+                encoding: if project_as_legacy_rebase {
+                    PointerEncoding::LegacyRebase
+                } else {
+                    evidence.encoding
+                },
+                chained_pointer_format: (!project_as_legacy_rebase)
+                    .then_some(evidence.chained_pointer_format)
+                    .flatten(),
+                authentication: (!project_as_legacy_rebase)
+                    .then_some(evidence.authentication)
+                    .flatten(),
+                legacy_bind_occurrences: if project_as_legacy_rebase {
+                    Vec::new()
+                } else {
+                    evidence.legacy_bind_occurrences.clone()
+                },
                 legacy_rebase: evidence.legacy_rebase_type.is_some(),
                 target,
             };
@@ -332,6 +392,16 @@ impl<'image, 'data> PointerResolver<'image, 'data> {
             encoding: PointerEncoding::Direct,
             authentication: None,
         })
+    }
+}
+
+impl PointerInventorySelection {
+    fn matches(self, evidence: &FixupEvidence) -> bool {
+        match self {
+            Self::All => true,
+            Self::LegacyBinds => evidence.encoding == PointerEncoding::LegacyBind,
+            Self::LegacyRebases => evidence.legacy_rebase_type.is_some(),
+        }
     }
 }
 

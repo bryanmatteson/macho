@@ -13,6 +13,7 @@ pub(super) enum Redeclaration {
 
 pub(super) fn declaration_identity(language: Language, declaration: &Decl) -> Option<String> {
     match declaration {
+        Decl::AccessSection { .. } | Decl::Namespace { .. } => None,
         Decl::Function {
             name, signature, ..
         } if language == Language::Cpp => {

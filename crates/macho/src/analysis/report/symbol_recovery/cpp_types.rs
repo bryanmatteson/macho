@@ -52,14 +52,62 @@ pub(super) fn materialize_cpp_types(
             .push(anchor.entity_index);
     }
 
+    let mut members_by_class = BTreeMap::<String, Vec<usize>>::new();
+    for (index, entity) in entities.iter().enumerate() {
+        let raw = match &entity.linkage {
+            Fact::Known { value, .. } => value.raw.as_str(),
+            _ => continue,
+        };
+        let Some(record) = crate::analysis::reconstruct::cpp::symbol::parse_symbol(raw, None, None)
+        else {
+            continue;
+        };
+        let crate::analysis::reconstruct::cpp::CppSymbolKind::Function { decl } = record.kind
+        else {
+            continue;
+        };
+        let Some(parent) = decl.name.parent() else {
+            continue;
+        };
+        members_by_class
+            .entry(parent.as_string())
+            .or_default()
+            .push(index);
+    }
+
     for (class_name, mut source_indices) in groups {
         source_indices.sort_unstable();
         source_indices.dedup();
         let type_id = id::<EntityId>(&format!("entity|Cpp|type|{class_name}"));
         let type_entity = build_cpp_type_entity(&type_id, &class_name, &source_indices, entities);
 
-        for source_index in source_indices {
+        // A constructor/destructor/RTTI anchor proves that this exact qualified
+        // type exists. Correlate every demangled member whose parent path is
+        // exactly that type; do not infer namespace-vs-record kinds for any
+        // preceding ABI-only components.
+        let mut owner_indices = members_by_class
+            .remove(&class_name)
+            .unwrap_or_default()
+            .into_iter()
+            .chain(source_indices.iter().copied())
+            .collect::<Vec<_>>();
+        owner_indices.sort_unstable();
+        owner_indices.dedup();
+
+        for source_index in owner_indices {
             let entity = &mut entities[source_index];
+            let is_function_member = match &entity.linkage {
+                Fact::Known { value, .. } => {
+                    crate::analysis::reconstruct::cpp::symbol::parse_symbol(&value.raw, None, None)
+                        .is_some_and(|record| {
+                            matches!(
+                                record.kind,
+                                crate::analysis::reconstruct::cpp::CppSymbolKind::Function { .. }
+                            )
+                        })
+                }
+                _ => false,
+            };
             let evidence_id = entity
                 .evidence
                 .first()
@@ -70,35 +118,94 @@ pub(super) fn materialize_cpp_types(
                 | Fact::Conflicted { id, .. }
                 | Fact::Unavailable { id, .. } => id.clone(),
             };
-            let path = class_name
+            let path: Vec<Identifier> = class_name
                 .split("::")
                 .filter_map(|part| Identifier::new(part.to_owned()).ok())
-                .collect();
+                .collect::<Vec<_>>();
+            let owner_depth = path.len();
             entity.owner = Fact::Known {
                 id: fact_id,
                 value: EntityOwner {
-                    kind: Some(HeaderOwnerKind::Class),
+                    scope_kinds: (0..owner_depth)
+                        .map(|index| (index + 1 == owner_depth).then_some(HeaderOwnerKind::Class))
+                        .collect(),
                     path,
+                    scope_access: vec![None; owner_depth],
+                    member_access: None,
                     entity_id: Some(type_id.clone()),
                 },
                 strength: EvidenceStrength::Correlated,
-                evidence_ids: NonEmpty::new(vec![evidence_id]).expect("one owner evidence ID"),
+                evidence_ids: NonEmpty::new(vec![evidence_id.clone()])
+                    .expect("one owner evidence ID"),
             };
+            if is_function_member {
+                refine_cpp_member_role(&mut entity.role, &evidence_id);
+                entity.gaps.retain(|gap| gap.field != RecoveryField::Role);
+            }
             entity.gaps.retain(|gap| gap.field != RecoveryField::Owner);
-            for observation_id in entity.observation_ids.as_slice() {
-                if let Some(SymbolObservation {
-                    disposition: ObservationDisposition::Included { entity_ids },
-                    ..
-                }) = observations
-                    .iter_mut()
-                    .find(|observation| observation.id == *observation_id)
-                    && !entity_ids.as_slice().contains(&type_id)
-                {
-                    entity_ids.push(type_id.clone());
-                }
+        }
+        // The synthetic type entity is derived only from the positive
+        // constructor/destructor/RTTI anchors retained by `type_entity`.
+        // Other members may reference it as their owner, but their symbol
+        // observations did not independently materialize the type entity and
+        // therefore must not claim it in their included-entity disposition.
+        for observation_id in type_entity.observation_ids.as_slice() {
+            if let Some(SymbolObservation {
+                disposition: ObservationDisposition::Included { entity_ids },
+                ..
+            }) = observations
+                .iter_mut()
+                .find(|observation| observation.id == *observation_id)
+                && !entity_ids.as_slice().contains(&type_id)
+            {
+                entity_ids.push(type_id.clone());
             }
         }
         entities.push(type_entity);
+    }
+}
+
+fn refine_cpp_member_role(role: &mut Fact<EntityRole>, evidence_id: &EvidenceId) {
+    match role {
+        Fact::Known {
+            value,
+            strength,
+            evidence_ids,
+            ..
+        } if matches!(value, EntityRole::Function | EntityRole::CppMethod) => {
+            *value = EntityRole::CppMethod;
+            *strength = EvidenceStrength::Correlated;
+            if !evidence_ids.as_slice().contains(evidence_id) {
+                evidence_ids.push(evidence_id.clone());
+            }
+        }
+        Fact::Conflicted { id, candidates }
+            if candidates.as_slice().iter().all(|candidate| {
+                matches!(
+                    candidate.value,
+                    EntityRole::Function | EntityRole::CppMethod
+                )
+            }) =>
+        {
+            let mut evidence_ids = Vec::new();
+            for candidate in candidates.as_slice() {
+                for candidate_id in candidate.evidence_ids.as_slice() {
+                    if !evidence_ids.contains(candidate_id) {
+                        evidence_ids.push(candidate_id.clone());
+                    }
+                }
+            }
+            if !evidence_ids.contains(evidence_id) {
+                evidence_ids.push(evidence_id.clone());
+            }
+            *role = Fact::Known {
+                id: id.clone(),
+                value: EntityRole::CppMethod,
+                strength: EvidenceStrength::Correlated,
+                evidence_ids: NonEmpty::new(evidence_ids).expect("member role has evidence"),
+            };
+        }
+        Fact::Known { .. } | Fact::Conflicted { .. } | Fact::Unavailable { .. } => {}
     }
 }
 

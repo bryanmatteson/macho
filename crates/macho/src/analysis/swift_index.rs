@@ -106,7 +106,8 @@ pub struct SwiftIndexCompleteness {
 }
 
 /// Deterministic strict Swift ABI inventory for one exact image.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SwiftIndex {
     image: FunctionImageIdentity,
     limits: SwiftRecoveryLimits,
@@ -122,13 +123,36 @@ impl SwiftIndex {
     ) -> Result<Self, SwiftRecoveryError> {
         let limits = limits.validate()?;
         let batch = decode_swift_strict(macho, &limits.evidence());
+        Ok(Self::from_batch(macho, limits, batch))
+    }
+
+    /// Recover from the selected-image evidence session used by program recovery.
+    pub fn recover_with_evidence(
+        evidence: &crate::evidence::SelectedImageEvidence<'_, '_>,
+        limits: SwiftRecoveryLimits,
+    ) -> Result<Self, SwiftRecoveryError> {
+        let limits = limits.validate()?;
+        Ok(Self::from_batch(
+            evidence.image(),
+            limits,
+            evidence.swift(&limits.evidence()),
+        ))
+    }
+
+    fn from_batch(
+        macho: &MachoFile<'_>,
+        limits: SwiftRecoveryLimits,
+        batch: SwiftDecodeBatchV1,
+    ) -> Self {
         let completeness = batch_completeness(&batch);
-        Ok(Self {
+        let index = Self {
             image: FunctionImageIdentity::from_macho(macho),
             limits,
             batch,
             completeness,
-        })
+        };
+        debug_assert!(index.durable_invariants_hold());
+        index
     }
 
     /// Exact selected-image identity.
@@ -177,6 +201,77 @@ impl SwiftIndex {
             .records
             .iter()
             .find(|record| record.descriptor_va == address)
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.batch.validate().is_err()
+            || self.completeness != batch_completeness(&self.batch)
+            || self.batch.records.len() as u64 > self.limits.max_nominal_descriptors
+            || self.batch.conformances.len() as u64 > self.limits.max_conformances
+            || self.batch.protocol_requirements.len() as u64 > self.limits.max_protocol_requirements
+            || (self.batch.class_vtable_entries.len() as u64)
+                .checked_add(self.batch.class_overrides.len() as u64)
+                .is_none_or(|count| count > self.limits.max_dispatch_slots)
+        {
+            return false;
+        }
+
+        let records_are_canonical = self
+            .batch
+            .records
+            .windows(2)
+            .all(|pair| pair[0].descriptor_va < pair[1].descriptor_va);
+        let conformances_are_canonical = self
+            .batch
+            .conformances
+            .windows(2)
+            .all(|pair| pair[0].descriptor_va < pair[1].descriptor_va);
+        let associated_types_are_canonical = self
+            .batch
+            .associated_types
+            .windows(2)
+            .all(|pair| pair[0].descriptor_va < pair[1].descriptor_va);
+        let requirements_are_canonical = self.batch.protocol_requirements.windows(2).all(|pair| {
+            (pair[0].protocol_descriptor_va, pair[0].requirement_index)
+                < (pair[1].protocol_descriptor_va, pair[1].requirement_index)
+        });
+        let vtables_are_canonical = self.batch.class_vtable_entries.windows(2).all(|pair| {
+            (pair[0].class_descriptor_va, pair[0].slot_index)
+                < (pair[1].class_descriptor_va, pair[1].slot_index)
+        });
+        let overrides_are_canonical = self.batch.class_overrides.windows(2).all(|pair| {
+            (pair[0].class_descriptor_va, pair[0].override_index)
+                < (pair[1].class_descriptor_va, pair[1].override_index)
+        });
+        let nested_ordinals_are_canonical =
+            self.batch.records.iter().all(|record| {
+                record
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .all(|(ordinal, field)| usize::try_from(field.ordinal) == Ok(ordinal))
+            }) && self.batch.conformances.iter().all(|conformance| {
+                conformance.conditional_requirements.iter().enumerate().all(
+                    |(ordinal, requirement)| {
+                        usize::try_from(requirement.requirement_index) == Ok(ordinal)
+                    },
+                )
+            });
+        let reasons_are_canonical = self
+            .completeness
+            .reasons
+            .windows(2)
+            .all(|pair| pair[0] < pair[1]);
+
+        records_are_canonical
+            && conformances_are_canonical
+            && associated_types_are_canonical
+            && requirements_are_canonical
+            && vtables_are_canonical
+            && overrides_are_canonical
+            && nested_ordinals_are_canonical
+            && reasons_are_canonical
     }
 }
 

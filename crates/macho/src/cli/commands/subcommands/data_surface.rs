@@ -183,6 +183,8 @@ pub enum XrefKindArg {
     ChainedBind,
     /// Chained-fixup rebase references.
     ChainedRebase,
+    /// Legacy dyld-info rebase references.
+    LegacyRebase,
     /// Legacy dyld-info bind references.
     LegacyBind,
     /// Relocation-backed references.
@@ -200,6 +202,7 @@ impl XrefKindArg {
             (Self::Stub, XrefKind::Stub)
                 | (Self::ChainedBind, XrefKind::ChainedBind)
                 | (Self::ChainedRebase, XrefKind::ChainedRebase)
+                | (Self::LegacyRebase, XrefKind::LegacyRebase)
                 | (Self::LegacyBind, XrefKind::LegacyBind)
                 | (Self::Relocation, XrefKind::Relocation)
                 | (Self::Branch, XrefKind::DirectBranch)
@@ -606,6 +609,7 @@ fn format_kind(kind: XrefKind) -> &'static str {
         XrefKind::Stub => "stub",
         XrefKind::ChainedBind => "chained-bind",
         XrefKind::ChainedRebase => "chained-rebase",
+        XrefKind::LegacyRebase => "legacy-rebase",
         XrefKind::LegacyBind => "legacy-bind",
         XrefKind::Relocation => "relocation",
         XrefKind::DirectBranch => "branch",

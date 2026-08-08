@@ -378,7 +378,7 @@ pub struct StrictRttiBatch {
 }
 
 impl StrictRttiBatch {
-    fn validate(&self, limits: StrictRttiLimits) -> Result<()> {
+    pub(crate) fn validate(&self, limits: StrictRttiLimits) -> Result<()> {
         limits.validate()?;
         self.conservation.validate()?;
         if self.observations.iter().enumerate().any(|(index, value)| {

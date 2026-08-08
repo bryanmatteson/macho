@@ -230,8 +230,15 @@ pub(super) fn validate_slice(
         validate_header(
             header,
             language,
+            &slice
+                .resolved_plan
+                .projection
+                .as_ref()
+                .expect("checked projection")
+                .selection_policy,
             &entities,
             &diagnostics,
+            &gaps,
             &slice.resolved_plan.selected_entity_ids,
         )?;
     } else if slice.resolved_plan.projection.is_some() {
@@ -253,6 +260,29 @@ fn validate_entity_references(
     entities: &BTreeSet<String>,
 ) -> Result<(), RecoveryValidationError> {
     let require_owner = |owner: &EntityOwner| {
+        if owner.path.len() != owner.scope_kinds.len()
+            || owner.path.len() != owner.scope_access.len()
+            || owner.path.is_empty() != owner.scope_kinds.is_empty()
+            || owner.scope_access.first().is_some_and(Option::is_some)
+            || (1..owner.scope_kinds.len()).any(|index| {
+                owner.scope_kinds[index - 1] == Some(HeaderOwnerKind::Namespace)
+                    && owner.scope_access[index].is_some()
+            })
+        {
+            return Err(RecoveryValidationError::Conservation {
+                id: format!("owner_scope_path|{}", entity.id),
+            });
+        }
+        if owner
+            .scope_kinds
+            .last()
+            .is_some_and(|kind| *kind == Some(HeaderOwnerKind::Namespace))
+            && owner.member_access.is_some()
+        {
+            return Err(RecoveryValidationError::Conservation {
+                id: format!("namespace_member_access|{}", entity.id),
+            });
+        }
         if let Some(entity_id) = &owner.entity_id {
             require(entities, entity_id.as_str(), "entity")?;
         }
@@ -493,8 +523,10 @@ fn validate_diagnostics(
 fn validate_header(
     header: &HeaderProjection,
     language: RecoveryLanguage,
+    selection_policy: &crate::analysis::hypothesis::HypothesisSelectionPolicy,
     entities: &BTreeSet<String>,
     slice_diagnostics: &BTreeSet<String>,
+    recovery_gaps: &BTreeSet<String>,
     targets: &[EntityId],
 ) -> Result<(), RecoveryValidationError> {
     if header.language != language
@@ -503,6 +535,10 @@ fn validate_header(
     {
         return Err(RecoveryValidationError::HeaderProjection);
     }
+    header
+        .assumption_ledger
+        .validate(selection_policy)
+        .map_err(|_| RecoveryValidationError::HeaderProjection)?;
     let header_diagnostics = unique_ids(
         "header diagnostic",
         header
@@ -510,9 +546,27 @@ fn validate_header(
             .iter()
             .map(|diagnostic| diagnostic.id.as_str()),
     )?;
+    let mut gap_ids = recovery_gaps.clone();
     let mut unresolved_entities = BTreeSet::new();
     for gap in &header.unresolved {
+        if !gap_ids.insert(gap.id.as_str().to_owned()) {
+            return Err(RecoveryValidationError::DuplicateId {
+                kind: "recovery gap",
+                id: gap.id.to_string(),
+            });
+        }
         require(entities, gap.entity_id.as_str(), "entity")?;
+        if let Some(template) = &gap.declaration_template {
+            if gap.reason != HeaderIneligibilityReason::UnprovenOwner {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+            validate_declaration_entity(template, entities)?;
+            let mut template_entities = BTreeSet::new();
+            collect_declaration_entities(template, &mut template_entities)?;
+            if template_entities.len() != 1 || !template_entities.contains(gap.entity_id.as_str()) {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+        }
         unresolved_entities.insert(gap.entity_id.as_str().to_owned());
         for id in &gap.diagnostic_ids {
             if !header_diagnostics.contains(id.as_str()) && !slice_diagnostics.contains(id.as_str())
@@ -568,7 +622,7 @@ fn collect_declaration_entities(
     }
     if let HeaderDecl::Record { members, .. } = declaration {
         for member in members {
-            collect_declaration_entities(member, output)?;
+            collect_declaration_entities(&member.declaration, output)?;
         }
     }
     Ok(())
@@ -578,6 +632,15 @@ fn validate_declaration_entity(
     declaration: &HeaderDecl,
     entities: &BTreeSet<String>,
 ) -> Result<(), RecoveryValidationError> {
+    if let HeaderDecl::Function {
+        owner: Some(owner), ..
+    }
+    | HeaderDecl::Variable {
+        owner: Some(owner), ..
+    } = declaration
+    {
+        validate_header_owner(owner, entities)?;
+    }
     match declaration {
         HeaderDecl::Function { id, .. }
         | HeaderDecl::Variable { id, .. }
@@ -593,8 +656,53 @@ fn validate_declaration_entity(
     }
     if let HeaderDecl::Record { members, .. } = declaration {
         for member in members {
-            validate_declaration_entity(member, entities)?;
+            validate_declaration_entity(&member.declaration, entities)?;
         }
+    }
+    Ok(())
+}
+
+fn validate_header_owner(
+    owner: &HeaderOwnerRef,
+    entities: &BTreeSet<String>,
+) -> Result<(), RecoveryValidationError> {
+    if !owner.has_exact_scopes() || owner.scope_access.as_slice()[0].is_some() {
+        return Err(RecoveryValidationError::HeaderProjection);
+    }
+    let kinds = owner.scope_kinds.as_slice();
+    let access = owner.scope_access.as_slice();
+    for index in 1..kinds.len() {
+        match kinds[index - 1] {
+            HeaderOwnerKind::Namespace if access[index].is_some() => {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+            HeaderOwnerKind::Record | HeaderOwnerKind::Class
+                if !matches!(
+                    access[index],
+                    Some(Access::Public | Access::Protected | Access::Private)
+                ) =>
+            {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+            _ => {}
+        }
+    }
+    match owner.terminal_kind() {
+        HeaderOwnerKind::Namespace if owner.member_access.is_some() => {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+        HeaderOwnerKind::Record | HeaderOwnerKind::Class
+            if !matches!(
+                owner.member_access,
+                Some(Access::Public | Access::Protected | Access::Private)
+            ) =>
+        {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+        _ => {}
+    }
+    if let Some(entity_id) = &owner.entity_id {
+        require(entities, entity_id.as_str(), "entity")?;
     }
     Ok(())
 }
@@ -731,8 +839,10 @@ mod tests {
         entity.owner = Fact::Known {
             id: fact_id,
             value: EntityOwner {
-                kind: Some(HeaderOwnerKind::Class),
                 path: Vec::new(),
+                scope_kinds: Vec::new(),
+                scope_access: Vec::new(),
+                member_access: None,
                 entity_id: Some(EntityId::new(sha256_hex(b"missing owner")).unwrap()),
             },
             strength: EvidenceStrength::Correlated,

@@ -257,7 +257,8 @@ pub struct DirectCallGraphCompleteness {
 }
 
 /// Deterministic direct call graph tied to exact function and CFG indexes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DirectCallGraph {
     image: FunctionImageIdentity,
     limits: DirectCallGraphLimits,
@@ -541,7 +542,7 @@ impl DirectCallGraph {
         };
         let external_callsite_count = external_callsites.len() as u64;
 
-        Ok(Self {
+        let graph = Self {
             image: functions.image().clone(),
             limits,
             nodes,
@@ -561,7 +562,9 @@ impl DirectCallGraph {
                 non_direct_callsite_count,
                 omitted_unresolved_callsite_count: omitted_unresolved_callsites,
             },
-        })
+        };
+        debug_assert!(graph.durable_invariants_hold());
+        Ok(graph)
     }
 
     /// Exact image identity shared by both source indexes.
@@ -620,6 +623,187 @@ impl DirectCallGraph {
     /// Iterate retained incoming edges for one callee.
     pub fn incoming(&self, callee: u64) -> impl Iterator<Item = &DirectCallEdge> {
         self.edges.iter().filter(move |edge| edge.callee == callee)
+    }
+
+    pub(crate) fn durable_invariants_hold(&self) -> bool {
+        if self.limits.validate().is_err()
+            || self.nodes.len() > self.limits.max_nodes
+            || self.edges.len() > self.limits.max_edges
+            || self.unresolved_callsites.len() > self.limits.max_unresolved_callsites
+            || self
+                .nodes
+                .windows(2)
+                .any(|pair| pair[0].entry >= pair[1].entry)
+            || self
+                .edges
+                .windows(2)
+                .any(|pair| (pair[0].caller, pair[0].callee) >= (pair[1].caller, pair[1].callee))
+            || self.external_callsites.windows(2).any(|pair| {
+                (pair[0].caller, pair[0].instruction_address)
+                    >= (pair[1].caller, pair[1].instruction_address)
+            })
+            || self.unresolved_callsites.windows(2).any(|pair| {
+                (pair[0].caller, pair[0].instruction_address)
+                    >= (pair[1].caller, pair[1].instruction_address)
+            })
+            || self
+                .completeness
+                .reasons
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return false;
+        }
+        let entries = self
+            .nodes
+            .iter()
+            .map(|node| node.entry)
+            .collect::<BTreeSet<_>>();
+        let mut incoming = BTreeMap::<u64, u64>::new();
+        let mut outgoing = BTreeMap::<u64, u64>::new();
+        let mut retained = 0_u64;
+        let mut omitted_on_edges = 0_u64;
+        for edge in &self.edges {
+            if !entries.contains(&edge.caller)
+                || !entries.contains(&edge.callee)
+                || edge.callsites.len() > self.limits.max_callsites_per_edge
+                || edge
+                    .callsites
+                    .windows(2)
+                    .any(|pair| pair[0].instruction_address >= pair[1].instruction_address)
+                || edge.observed_callsite_count
+                    != edge.callsites.len() as u64 + edge.omitted_callsite_count
+            {
+                return false;
+            }
+            *outgoing.entry(edge.caller).or_default() += 1;
+            *incoming.entry(edge.callee).or_default() += 1;
+            retained = retained.saturating_add(edge.callsites.len() as u64);
+            omitted_on_edges = omitted_on_edges.saturating_add(edge.omitted_callsite_count);
+        }
+        if self.nodes.iter().any(|node| {
+            node.reasons.windows(2).any(|pair| pair[0] >= pair[1])
+                || node.incoming_edge_count != incoming.get(&node.entry).copied().unwrap_or(0)
+                || node.outgoing_edge_count != outgoing.get(&node.entry).copied().unwrap_or(0)
+        }) || self
+            .external_callsites
+            .iter()
+            .any(|call| !entries.contains(&call.caller))
+            || self.unresolved_callsites.iter().any(|call| {
+                !entries.contains(&call.caller) || !unresolved_target_is_canonical(&call.target)
+            })
+        {
+            return false;
+        }
+        let receipt = &self.completeness;
+        let omitted = receipt.omitted_direct_callsite_count;
+        let truncated = receipt.omitted_node_count != 0
+            || omitted != 0
+            || receipt.omitted_unresolved_callsite_count != 0
+            || self
+                .nodes
+                .iter()
+                .any(|node| node.status == DirectCallNodeStatus::Truncated)
+            || receipt
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("truncated") || reason.contains("budget"));
+        let partial = self.nodes.iter().any(|node| {
+            matches!(
+                node.status,
+                DirectCallNodeStatus::Partial | DirectCallNodeStatus::Unavailable
+            )
+        }) || receipt
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("partial") || reason.contains("incomplete"));
+        let expected_status = if truncated {
+            DirectCallGraphStatus::Truncated
+        } else if partial {
+            DirectCallGraphStatus::Partial
+        } else {
+            DirectCallGraphStatus::Complete
+        };
+        receipt.source_function_count == self.nodes.len() as u64 + receipt.omitted_node_count
+            && receipt.examined_callsite_count <= self.limits.max_examined_callsites as u64
+            && receipt.retained_direct_callsite_count == retained
+            && omitted >= omitted_on_edges
+            && receipt.unresolved_callsite_count
+                == self.unresolved_callsites.len() as u64
+                    + receipt.omitted_unresolved_callsite_count
+            && receipt.external_callsite_count == self.external_callsites.len() as u64
+            && receipt.non_direct_callsite_count <= receipt.unresolved_callsite_count
+            && receipt.status == expected_status
+    }
+
+    pub(crate) fn source_invariants_hold(
+        &self,
+        functions: &FunctionIndex,
+        control_flow: &ControlFlowIndex,
+    ) -> bool {
+        self.image == *functions.image()
+            && self.image == *control_flow.image()
+            && self
+                .nodes
+                .iter()
+                .zip(functions.functions())
+                .all(|(node, function)| {
+                    node.entry == function.entry
+                        && node.identity == function.identity
+                        && node.entry_confidence == function.entry_confidence
+                })
+            && self.nodes.len() == functions.functions().len().min(self.limits.max_nodes)
+            && self.edges.iter().all(|edge| {
+                edge.callsites.iter().all(|site| {
+                    control_flow.by_entry(edge.caller).is_some_and(|graph| {
+                        graph.calls.iter().any(|call| {
+                            call.block == site.block
+                                && call.instruction_address == site.instruction_address
+                                && matches!(
+                                    &call.target,
+                                    ControlFlowCallTarget::Direct {
+                                        possible_functions,
+                                        ..
+                                    } if possible_functions
+                                        .iter()
+                                        .any(|target| target.entry == edge.callee)
+                                )
+                        })
+                    })
+                })
+            })
+            && self.external_callsites.iter().all(|site| {
+                control_flow.by_entry(site.caller).is_some_and(|graph| {
+                    graph.calls.iter().any(|call| {
+                        call.block == site.block
+                            && call.instruction_address == site.instruction_address
+                            && matches!(
+                                &call.target,
+                                ControlFlowCallTarget::Direct { address, .. }
+                                    if *address == site.stub_address
+                            )
+                    })
+                })
+            })
+            && self.unresolved_callsites.iter().all(|site| {
+                control_flow.by_entry(site.caller).is_some_and(|graph| {
+                    graph.calls.iter().any(|call| {
+                        call.block == site.block
+                            && call.instruction_address == site.instruction_address
+                    })
+                })
+            })
+    }
+}
+
+fn unresolved_target_is_canonical(target: &UnresolvedCallTarget) -> bool {
+    match target {
+        UnresolvedCallTarget::Direct {
+            possible_functions, ..
+        } => possible_functions
+            .windows(2)
+            .all(|pair| pair[0].entry < pair[1].entry),
+        UnresolvedCallTarget::Indirect { .. } => true,
     }
 }
 
