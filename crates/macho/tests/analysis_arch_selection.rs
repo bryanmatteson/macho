@@ -297,7 +297,7 @@ fn family_subset_provenance_lists_only_the_resolved_exact_architectures() {
         );
         let output: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("valid recovery JSON");
-        assert_eq!(output["data"]["schema_version"], 3);
+        assert_eq!(output["data"]["schema_version"], 1);
         assert_eq!(output["data"]["request"]["architectures"], expected);
         assert_eq!(output["data"]["slices"].as_array().map(Vec::len), Some(2));
     }

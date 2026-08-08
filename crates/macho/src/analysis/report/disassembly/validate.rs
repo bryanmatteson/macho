@@ -13,7 +13,7 @@ fn invalid(message: impl Into<String>) -> DisassemblyReportValidationError {
 
 pub(super) fn validate(report: &DisassemblyReport) -> Result<(), DisassemblyReportValidationError> {
     if report.schema_version != DisassemblySchemaVersion::CURRENT {
-        return Err(invalid("schema_version must be 2"));
+        return Err(invalid("schema_version must be 1"));
     }
     if report.container.slice_count as usize != report.slices.len() {
         return Err(invalid("container slice_count does not match slices"));
@@ -309,7 +309,7 @@ fn validate_region(
                     | "analysis.disassembly.selection.partial_instruction"
             )
         {
-            return Err(invalid("gap code is not defined by schema version 2"));
+            return Err(invalid("gap code is not defined by schema version 1"));
         }
         if record.va() != expected_va {
             return Err(invalid("region records are not contiguous"));

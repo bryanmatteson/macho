@@ -59,7 +59,7 @@ pub const PARTIAL_INSTRUCTION_CODE: &str = "analysis.disassembly.selection.parti
 pub const COUNT_UNSATISFIED_CODE: &str = "analysis.disassembly.count.unsatisfied";
 /// Invalid request construction or cross-field combination.
 pub const REQUEST_INVALID_CODE: &str = "analysis.disassembly.request.invalid";
-/// Internally or externally inconsistent schema-version-2 report.
+/// Internally or externally inconsistent schema-version-1 report.
 pub const REPORT_INVALID_CODE: &str = "analysis.disassembly.report.invalid";
 /// Failure writing streamed disassembly output through a sink.
 pub const OUTPUT_FAILED_CODE: &str = "analysis.disassembly.output.failed";

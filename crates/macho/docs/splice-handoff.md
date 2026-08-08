@@ -1,7 +1,7 @@
 # Splice Handoff
 
 This is the consumer contract for lowering Macho recovery into Splice. The
-pre-release baseline is Program Fact IR schema `1` and recovery contract `1.0`.
+pre-release baseline is Program Fact IR schema `1` and recovery contract schema `1`.
 There are no earlier public wire versions to migrate.
 
 ## Architecture boundary
@@ -180,13 +180,15 @@ let guide = RecoveryGuide::builder(prior.image().clone())
     .suppress_direct_call(caller, instruction_address, decoded_target)
     .build();
 
-let next = RecoveredProgram::refine(image, &prior, &guide)?;
+let transition = RecoveredProgram::refine_with_reuse_receipt(image, &prior, &guide)?;
+let (next, reuse) = transition.into_parts();
 let delta = next.delta_from(&prior)?;
 let application = next
     .guide_application()
     .expect("refine always records a guide application receipt");
 
 persist_and_lower(next.to_fact_document(), application, delta)?;
+record_operational_reuse(reuse)?;
 ```
 
 Use `RecoveryGuideBuilder::answer_question` when replay must bind to a
@@ -225,26 +227,39 @@ guide.
 which is true for refine. Preserve the delta and application derivations when
 Splice explains why product facts changed.
 
-Use `prior.deepen(image, extra_stages, limits)` to union additional requested
-stages or replace the complete nested limit set. Deepen retains a valid guide
-and reuses exact unaffected stages, but its request changes. Consequently,
-`delta_from` intentionally returns `RequestMismatch` across a deepening
-transition; lower the deepened state as a new fact-universe revision and
-compare product revisions with Splice's own request-aware logic.
+Use `prior.deepen_with_reuse_receipt(image, extra_stages, limits)` to union
+additional requested stages or replace the complete nested limit set while
+retaining the operational receipt. `deepen` remains the convenience spelling
+when that receipt is not needed. Deepen retains a valid guide and reuses exact
+unaffected stages, but its request changes. Consequently, `delta_from`
+intentionally returns `RequestMismatch` across a deepening transition; lower
+the deepened state as a new fact-universe revision and compare product
+revisions with Splice's own request-aware logic.
 
 Refine/deepen cache reuse remains equivalent to a cold rebuild. An unguided
 dirty ControlFlow stage may additionally reuse a prior `FunctionControlFlow`
 record when the selected image, ControlFlow limits, complete recovered
 Function record, pointer and exception inputs, non-returning fixed-point set,
-and incoming global decoded-byte budget are exact matches. A changed Function
-record invalidates its own entry; a changed fixed-point set or shifted global
-budget prevents reuse of every affected graph. Guided recovery currently
-cold-rebuilds CFG because normalized function-local guide inputs are not yet a
-separate durable cache key.
+and incoming global decoded-byte budget are exact matches. Guided transitions
+add a normalized function-local key containing overlapping byte roles, the
+function's exact edge/call suppressions, and the complete instruction-role set.
+Instruction roles are conservative because a suppressed jump table leaves no
+retained table from which to derive a narrower dependency. A changed Function
+record or local guide key invalidates that entry; a changed fixed-point set or
+shifted global budget prevents reuse of every affected graph.
 
-This cache is an implementation receipt only. It does not appear in Fact IR,
-change completeness, or alter the ordered graph. Warm output must remain equal
-to a cold recovery under the same request.
+`ProgramRecoveryReuseReceipt` is a versioned operational receipt. Its disjoint
+`reused_stages` and `rebuilt_stages` sets partition the new state's executed
+stages. When ControlFlow is present, `ControlFlowReuseReceipt` reports final,
+reused, and rebuilt function-graph counts; a rebuilt ControlFlow stage can
+therefore prove selective reuse within that stage. Persist this receipt beside
+Splice transition telemetry if useful, never as graph truth.
+
+The reuse receipt does not appear in Fact IR, change completeness or
+authority, or alter the ordered graph. Warm output must remain equal to a cold
+recovery under the same request. `refine` and `deepen` discard only this
+operational receipt and otherwise execute the same transition paths as their
+`*_with_reuse_receipt` forms.
 
 ## Failure handling
 
@@ -262,7 +277,7 @@ Macho error:
   retained facts together with its explicit status, coverage, and frontiers.
 
 Because this is pre-release, Splice should require exactly Fact IR schema `1`
-and recovery contract `1.0`. Breaking contract work before the first public
+and recovery contract schema `1`. Breaking contract work before the first public
 release replaces that baseline in place; it must not invent compatibility with
 intermediate development artifacts. Coordinate the Macho and Splice pins when
 the baseline changes.

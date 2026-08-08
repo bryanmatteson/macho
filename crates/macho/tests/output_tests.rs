@@ -147,7 +147,7 @@ fn explicit_color_styles_human_info_only() {
         serde_json::from_slice(&machine.stdout).expect("valid JSON envelope");
     assert_eq!(envelope["command"], "info");
     assert_eq!(envelope["ok"], true);
-    assert_eq!(envelope["data"]["schema_version"], 3);
+    assert_eq!(envelope["data"]["schema_version"], 1);
 }
 
 #[test]

@@ -209,6 +209,7 @@ pub(crate) fn declaration_in_owner(
         ));
     }
     let mut declaration = declaration(value)?;
+    let mut support_forwards = local_support_forwards(value, owner)?;
     let components = owner.path.as_slice();
     let kinds = owner.scope_kinds.as_slice();
     let scope_access = owner.scope_access.as_slice();
@@ -224,10 +225,13 @@ pub(crate) fn declaration_in_owner(
                         "namespace ownership cannot carry member access".into(),
                     ));
                 }
-                syntax::Decl::Namespace {
-                    path,
-                    declarations: vec![declaration],
-                }
+                let mut declarations = if index + 1 == components.len() {
+                    std::mem::take(&mut support_forwards)
+                } else {
+                    Vec::new()
+                };
+                declarations.push(declaration);
+                syntax::Decl::Namespace { path, declarations }
             }
             wire::HeaderOwnerKind::Record | wire::HeaderOwnerKind::Class => {
                 let access = if index + 1 == components.len() {
@@ -250,6 +254,12 @@ pub(crate) fn declaration_in_owner(
                         ));
                     }
                 };
+                let mut declarations = if index + 1 == components.len() {
+                    std::mem::take(&mut support_forwards)
+                } else {
+                    Vec::new()
+                };
+                declarations.push(declaration);
                 syntax::Decl::Record {
                     kind: if kinds[index] == wire::HeaderOwnerKind::Class {
                         syntax::RecordKind::Class
@@ -261,13 +271,106 @@ pub(crate) fn declaration_in_owner(
                     fields: Vec::new(),
                     members: vec![syntax::Decl::AccessSection {
                         access,
-                        declarations: vec![declaration],
+                        declarations,
                     }],
                 }
             }
         };
     }
     Ok(declaration)
+}
+
+fn local_support_forwards(
+    declaration: &wire::HeaderDecl,
+    owner: &wire::HeaderOwnerRef,
+) -> Result<Vec<syntax::Decl>, ArtifactError> {
+    let mut types = Vec::new();
+    match declaration {
+        wire::HeaderDecl::Function { signature, .. } => collect_named_types(signature, &mut types),
+        wire::HeaderDecl::Variable { ty, .. } => collect_named_types(ty, &mut types),
+        wire::HeaderDecl::Record { bases, fields, .. } => {
+            for base in bases {
+                collect_named_types(&base.ty, &mut types);
+            }
+            for field in fields {
+                collect_named_types(&field.ty, &mut types);
+            }
+        }
+        wire::HeaderDecl::Alias { target, .. } => collect_named_types(target, &mut types),
+        wire::HeaderDecl::Forward { .. }
+        | wire::HeaderDecl::ObjcInterface { .. }
+        | wire::HeaderDecl::ObjcCategory { .. }
+        | wire::HeaderDecl::ObjcProtocol { .. }
+        | wire::HeaderDecl::ObjcForward { .. } => {}
+    }
+    let owner_path = owner.path.as_slice();
+    let mut forwards = Vec::new();
+    for (tag, path, has_template_arguments) in types {
+        if has_template_arguments
+            || path.as_slice().len() != owner_path.len() + 1
+            || path.as_slice()[..owner_path.len()] != *owner_path
+        {
+            continue;
+        }
+        let kind = match tag {
+            wire::NamedTypeTag::Struct => syntax::RecordKind::Struct,
+            wire::NamedTypeTag::Union => syntax::RecordKind::Union,
+            wire::NamedTypeTag::Enum => syntax::RecordKind::Enum,
+            wire::NamedTypeTag::Class => syntax::RecordKind::Class,
+            wire::NamedTypeTag::Typedef | wire::NamedTypeTag::Protocol => continue,
+        };
+        let terminal = syntax::IdentifierPath::new(vec![identifier(
+            path.as_slice().last().expect("named path is non-empty"),
+        )?])
+        .expect("one support-forward component");
+        let forward = syntax::Decl::Forward {
+            kind,
+            path: terminal,
+        };
+        if !forwards.contains(&forward) {
+            forwards.push(forward);
+        }
+    }
+    Ok(forwards)
+}
+
+fn collect_named_types<'value>(
+    ty: &'value wire::HeaderType,
+    output: &mut Vec<(
+        wire::NamedTypeTag,
+        &'value wire::NonEmpty<wire::Identifier>,
+        bool,
+    )>,
+) {
+    match ty {
+        wire::HeaderType::Named {
+            tag,
+            path,
+            template_arguments,
+        } => {
+            output.push((*tag, path, !template_arguments.is_empty()));
+            for argument in template_arguments {
+                if let wire::HeaderTemplateArgument::Type { value } = argument {
+                    collect_named_types(value, output);
+                }
+            }
+        }
+        wire::HeaderType::Pointer { pointee, .. } => collect_named_types(pointee, output),
+        wire::HeaderType::Reference { target, .. } => collect_named_types(target, output),
+        wire::HeaderType::Array { element, .. } => collect_named_types(element, output),
+        wire::HeaderType::Function {
+            return_type,
+            parameters,
+            ..
+        } => {
+            collect_named_types(return_type, output);
+            for parameter in parameters {
+                collect_named_types(&parameter.ty, output);
+            }
+        }
+        wire::HeaderType::ObjcBlock { signature } => collect_named_types(signature, output),
+        wire::HeaderType::Builtin { .. } | wire::HeaderType::ObjcObject { .. } => {}
+    }
 }
 
 /// Canonically coalesce repeated namespace/record owner shells emitted while
@@ -360,9 +463,13 @@ fn merge_owner_declaration(declarations: &mut Vec<syntax::Decl>, declaration: sy
             }
         }
         Decl::Forward { kind, path }
-            if declarations.iter().any(
-                |item| matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path),
-            ) => {}
+            if declarations.iter().any(|item| {
+                matches!(item,
+                    Decl::Record { kind: candidate_kind, path: candidate_path, .. }
+                    | Decl::Forward { kind: candidate_kind, path: candidate_path }
+                    if candidate_kind == &kind && candidate_path == &path
+                )
+            }) => {}
         other => declarations.push(other),
     }
 }
@@ -648,5 +755,84 @@ fn objc_property(value: wire::ObjCPropertyAttribute) -> syntax::ObjectiveCProper
         W::Nonatomic => S::Nonatomic,
         W::Dynamic => S::Dynamic,
         W::Class => S::Class,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis::header_syntax::HeaderParser as _;
+
+    fn wire_identifier(value: &str) -> wire::Identifier {
+        wire::Identifier::new(value.to_owned()).unwrap()
+    }
+
+    #[test]
+    fn owner_lowering_declares_exact_nested_parameter_types_locally() {
+        let owner = wire::HeaderOwnerRef {
+            path: wire::NonEmpty::new(vec![wire_identifier("N"), wire_identifier("Container")])
+                .unwrap(),
+            scope_kinds: wire::NonEmpty::new(vec![
+                wire::HeaderOwnerKind::Namespace,
+                wire::HeaderOwnerKind::Class,
+            ])
+            .unwrap(),
+            scope_access: wire::NonEmpty::new(vec![None, None]).unwrap(),
+            member_access: Some(wire::Access::Public),
+            entity_id: None,
+        };
+        let declaration = wire::HeaderDecl::Function {
+            id: wire::EntityId::new("1".repeat(64)).unwrap(),
+            owner: Some(owner),
+            name: wire_identifier("consume"),
+            signature: wire::HeaderType::Function {
+                return_type: Box::new(wire::HeaderType::Builtin {
+                    name: wire::BuiltinType::Void,
+                }),
+                parameters: vec![wire::HeaderParameter {
+                    name: wire_identifier("value"),
+                    ty: wire::HeaderType::Reference {
+                        target: Box::new(wire::HeaderType::Named {
+                            tag: wire::NamedTypeTag::Class,
+                            path: wire::NonEmpty::new(vec![
+                                wire_identifier("N"),
+                                wire_identifier("Container"),
+                                wire_identifier("Nested"),
+                            ])
+                            .unwrap(),
+                            template_arguments: Vec::new(),
+                        }),
+                        reference: wire::ReferenceKind::Lvalue,
+                    },
+                }],
+                parameter_state: wire::ParameterState::Known,
+                variadic: false,
+                calling_convention: wire::CallingConvention::C,
+                qualifiers: wire::HeaderFunctionQualifiers::default(),
+            },
+            storage: wire::StorageClass::None,
+            linkage: wire::HeaderLinkage::Cpp,
+        };
+
+        let declarations = merge_owner_declarations(vec![
+            projected_declaration(&declaration).expect("wire declaration lowers"),
+        ]);
+        let source = crate::analysis::header_syntax::render(&syntax::TranslationUnit {
+            language: syntax::Language::Cpp,
+            declarations: declarations.clone(),
+            declaration_spans: Vec::new(),
+        })
+        .unwrap();
+        assert!(source.contains("class Nested;"), "{source}");
+        let reparsed = crate::analysis::header_syntax::TreeSitterHeaderParser
+            .parse(syntax::Language::Cpp, &source)
+            .unwrap();
+        assert_eq!(reparsed.declarations, declarations);
+        let validation = crate::analysis::header_syntax::validate(
+            &reparsed,
+            crate::analysis::header_syntax::ValidationLimits::default(),
+        )
+        .unwrap();
+        assert!(validation.semantic_valid, "{:?}", validation.diagnostics);
     }
 }

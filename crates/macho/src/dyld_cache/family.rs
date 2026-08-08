@@ -13,6 +13,11 @@ impl DyldCache {
         &self.mappings
     }
 
+    /// Thread-protected ranges declared by the cache member.
+    pub fn tpro_mappings(&self) -> &[CacheTproMapping] {
+        &self.tpro_mappings
+    }
+
     /// Architecture string extracted from the magic field.
     pub fn arch(&self) -> &str {
         &self.header.arch
@@ -21,6 +26,16 @@ impl DyldCache {
     /// Required sibling-cache declarations in deterministic header order.
     pub fn subcaches(&self) -> &[SubCacheEntry] {
         &self.subcaches
+    }
+
+    /// Validated embedded local-symbol metadata, when this member owns it.
+    pub fn local_symbols(&self) -> Option<&CacheLocalSymbolsInfo> {
+        self.local_symbols.as_ref()
+    }
+
+    /// Whether the header requires a separate `.symbols` family member.
+    pub fn requires_symbols_member(&self) -> bool {
+        self.header.symbol_file_uuid != [0; 16]
     }
 
     /// Convert a virtual address to a file offset using the mapping table.
@@ -56,6 +71,7 @@ pub struct CacheFamilyMember<'data> {
 /// Role of one file in a validated dyld cache family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum CacheFamilyMemberKind {
     /// Primary cache containing the image index and family declarations.
     Primary,
@@ -272,6 +288,13 @@ impl<'data> DyldCacheFamily<'data> {
                     arch
                 )));
             }
+            validate_member_encoding(&members[0].cache, &cache, &declaration.file_suffix)?;
+            if !cache.subcaches.is_empty() || cache.requires_symbols_member() {
+                return Err(Error::format(format!(
+                    "cache family member {:?} recursively declares family members",
+                    declaration.file_suffix
+                )));
+            }
             let actual_base = cache
                 .mappings
                 .iter()
@@ -318,6 +341,12 @@ impl<'data> DyldCacheFamily<'data> {
                     cache.arch(),
                     arch
                 )));
+            }
+            validate_member_encoding(&members[0].cache, &cache, ".symbols")?;
+            if !cache.subcaches.is_empty() || cache.requires_symbols_member() {
+                return Err(Error::format(
+                    "cache family member \".symbols\" recursively declares family members",
+                ));
             }
             if cache.local_symbols.is_none() {
                 return Err(Error::format(
@@ -577,6 +606,40 @@ fn validate_family_mappings(members: &[CacheFamilyMember<'_>]) -> Result<()> {
             }
             mappings.push((mapping.address, end));
         }
+        for (index, tpro) in member.cache.tpro_mappings.iter().enumerate() {
+            let end = tpro
+                .address
+                .checked_add(tpro.size)
+                .ok_or_else(|| Error::address("validated TPRO mapping extent overflows"))?;
+            let contained = member.cache.mappings.iter().any(|mapping| {
+                mapping
+                    .address
+                    .checked_add(mapping.size)
+                    .is_some_and(|mapping_end| {
+                        tpro.address >= mapping.address && end <= mapping_end
+                    })
+            });
+            if !contained {
+                return Err(Error::format(format!(
+                    "cache family member {:?} TPRO mapping[{index}] is not contained in one of its VM mappings",
+                    member.name
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_member_encoding(primary: &DyldCache, member: &DyldCache, name: &str) -> Result<()> {
+    if member.header.format_version != primary.header.format_version {
+        return Err(Error::format(format!(
+            "cache family member {name:?} format generation differs from the primary"
+        )));
+    }
+    if member.header.byte_order != primary.header.byte_order {
+        return Err(Error::format(format!(
+            "cache family member {name:?} byte order differs from the primary"
+        )));
     }
     Ok(())
 }

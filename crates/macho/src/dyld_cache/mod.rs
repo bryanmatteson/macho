@@ -23,7 +23,20 @@ mod rewrite;
 pub use family::*;
 pub use parse::*;
 
-fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
+/// Byte order used by numeric fields in a dyld shared-cache member.
+///
+/// Historical PowerPC `dyld_v0` caches use big-endian fields. Intel, ARM,
+/// and every published `dyld_v1` cache use little-endian fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DyldCacheByteOrder {
+    /// Least-significant byte first.
+    Little,
+    /// Most-significant byte first.
+    Big,
+}
+
+fn read_u32(data: &[u8], offset: usize, byte_order: DyldCacheByteOrder) -> Result<u32> {
     let end = offset
         .checked_add(4)
         .ok_or_else(|| Error::bounds(offset as u64, 4, data.len() as u64))?;
@@ -33,10 +46,13 @@ fn read_u32_le(data: &[u8], offset: usize) -> Result<u32> {
     let bytes: [u8; 4] = data[offset..end]
         .try_into()
         .expect("slice length guaranteed by bounds check");
-    Ok(u32::from_le_bytes(bytes))
+    Ok(match byte_order {
+        DyldCacheByteOrder::Little => u32::from_le_bytes(bytes),
+        DyldCacheByteOrder::Big => u32::from_be_bytes(bytes),
+    })
 }
 
-fn read_u64_le(data: &[u8], offset: usize) -> Result<u64> {
+fn read_u64(data: &[u8], offset: usize, byte_order: DyldCacheByteOrder) -> Result<u64> {
     let end = offset
         .checked_add(8)
         .ok_or_else(|| Error::bounds(offset as u64, 8, data.len() as u64))?;
@@ -46,7 +62,10 @@ fn read_u64_le(data: &[u8], offset: usize) -> Result<u64> {
     let bytes: [u8; 8] = data[offset..end]
         .try_into()
         .expect("slice length guaranteed by bounds check");
-    Ok(u64::from_le_bytes(bytes))
+    Ok(match byte_order {
+        DyldCacheByteOrder::Little => u64::from_le_bytes(bytes),
+        DyldCacheByteOrder::Big => u64::from_be_bytes(bytes),
+    })
 }
 
 fn read_uuid(data: &[u8], offset: usize) -> Result<[u8; 16]> {

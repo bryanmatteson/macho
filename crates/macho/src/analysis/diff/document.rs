@@ -1,4 +1,4 @@
-//! Schema-v3 document comparison.
+//! Schema-v1 document comparison.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +11,7 @@ use crate::analysis::{
 
 use super::*;
 
-/// Compare only the selected schema-v3 domains.
+/// Compare only the selected schema-v1 domains.
 pub fn diff_documents(
     old: &SnapshotDocument,
     new: &SnapshotDocument,
@@ -372,7 +372,7 @@ mod tests {
             .collect::<BTreeMap<_, _>>();
         domains.insert(domain, state);
         SnapshotDocument {
-            schema_version: 3,
+            schema_version: crate::analysis::SNAPSHOT_SCHEMA_VERSION,
             container: ContainerIdentity {
                 format: "thin".to_owned(),
                 slice_count: 1,

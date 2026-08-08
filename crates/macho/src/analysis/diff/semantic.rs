@@ -30,7 +30,7 @@ fn diff_objc_payload(
         }
         _ => {
             // Retain the detailed comparator for legacy in-memory payloads.
-            // Schema-v3 documents validate the canonical report before here.
+            // Schema-v1 documents validate the canonical report before here.
             diff_objc(
                 &serde_json::from_value(old.clone())?,
                 &serde_json::from_value(new.clone())?,

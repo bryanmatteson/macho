@@ -1,4 +1,4 @@
-//! Closed typed access to schema-v3 domain reports.
+//! Closed typed access to schema-v1 domain reports.
 
 use std::marker::PhantomData;
 
@@ -137,7 +137,7 @@ impl SliceSnapshot {
     }
 }
 
-/// Closed keys for every schema-v3 analysis domain.
+/// Closed keys for every schema-v1 analysis domain.
 ///
 /// Typical callers pass one of these constants to [`SliceSnapshot::report`].
 pub mod domain_reports {

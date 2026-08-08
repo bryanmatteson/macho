@@ -1035,7 +1035,7 @@ fn report_deserialization_rejects_unknown_fields_and_bad_version() {
 
     let report = disassemble(&container, &DisassemblyRequest::default()).unwrap();
     let mut value = serde_json::to_value(report).unwrap();
-    value["schema_version"] = serde_json::json!(1);
+    value["schema_version"] = serde_json::json!(0);
     assert!(
         serde_json::from_value::<crate::analysis::report::disassembly::DisassemblyReport>(value)
             .is_err()

@@ -9,7 +9,7 @@ mod support;
 use support::{run_cli, temp_file_path, write_macho_fixture};
 
 #[test]
-fn v3_diff_preserves_detailed_header_comparison() {
+fn v1_diff_preserves_detailed_header_comparison() {
     let old_bytes = macho_test_support::thin64_arm64(2);
     let new_bytes = macho_test_support::thin64_arm64(6);
     let old_container = macho::parse(&old_bytes).expect("parse old");
@@ -137,7 +137,7 @@ fn cli_diff_accepts_the_json_envelope_emitted_by_cli_snapshot() {
     let envelope: serde_json::Value =
         serde_json::from_slice(&snapshot.stdout).expect("snapshot envelope");
     assert_eq!(envelope["command"], "snapshot");
-    assert_eq!(envelope["data"]["schema_version"], 3);
+    assert_eq!(envelope["data"]["schema_version"], 1);
 
     let snapshot_path = temp_file_path("diff-cli-snapshot-envelope");
     std::fs::write(&snapshot_path, &snapshot.stdout).expect("write snapshot envelope");

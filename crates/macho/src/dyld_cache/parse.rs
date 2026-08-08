@@ -1,10 +1,10 @@
 use super::*;
 
-const DYLD_CACHE_MAGIC_PREFIX: &[u8] = b"dyld_v1";
 const DYLD_CACHE_MAGIC_FAMILY_PREFIX: &[u8] = b"dyld_v";
 const HEADER_MIN_SIZE: usize = 32;
 const MAX_APPLE_CACHE_HEADER_SIZE: usize = 1024;
 pub(super) const MAPPING_INFO_SIZE: usize = 32;
+pub(super) const MAPPING_AND_SLIDE_INFO_SIZE: usize = 56;
 pub(super) const IMAGE_INFO_SIZE: usize = 32;
 pub(super) const IMAGE_TEXT_INFO_SIZE: usize = 32;
 
@@ -16,21 +16,38 @@ const MODERN_HEADER_MIN: usize = IMAGES_TEXT_COUNT_OFF + 8;
 const UUID_OFF: usize = 0x58;
 const LOCAL_SYMBOLS_OFFSET_OFF: usize = 0x48;
 const LOCAL_SYMBOLS_SIZE_OFF: usize = 0x50;
+const MAPPING_WITH_SLIDE_OFFSET_OFF: usize = 0x138;
+const MAPPING_WITH_SLIDE_COUNT_OFF: usize = 0x13c;
 const SUBCACHE_ARRAY_OFFSET_OFF: usize = 0x188;
 const SUBCACHE_ARRAY_COUNT_OFF: usize = 0x18c;
 const SYMBOL_FILE_UUID_OFF: usize = 0x190;
 const CACHE_SUBTYPE_OFF: usize = 0x1c8;
 const IMAGES_OFFSET_OFF: usize = 0x1c0;
 const IMAGES_COUNT_OFF: usize = 0x1c4;
+const TPRO_MAPPINGS_OFFSET_OFF: usize = 0x200;
+const TPRO_MAPPINGS_COUNT_OFF: usize = 0x204;
+const TPRO_MAPPING_INFO_SIZE: usize = 16;
 const SUBCACHE_ENTRY_V1_SIZE: usize = 24;
 const SUBCACHE_ENTRY_V2_SIZE: usize = 56;
 const LOCAL_SYMBOLS_INFO_SIZE: usize = 24;
 const LOCAL_SYMBOLS_ENTRY_V1_SIZE: usize = 12;
 const LOCAL_SYMBOLS_ENTRY_V2_SIZE: usize = 16;
 
+/// Published dyld shared-cache magic generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum DyldCacheFormatVersion {
+    /// Historical monolithic caches, including big-endian PowerPC families.
+    V0,
+    /// Current cache format, including monolithic and split-cache families.
+    V1,
+}
+
 /// Struct generation selected using Apple's header-field presence rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DyldCacheHeaderGeneration {
     /// Header predates the subcache array.
     Legacy,
@@ -51,6 +68,8 @@ pub struct DyldCache {
     pub header: DyldCacheHeader,
     /// The mappings field.
     pub mappings: Vec<CacheMapping>,
+    /// Thread-protected ranges declared by current cache headers.
+    pub tpro_mappings: Vec<CacheTproMapping>,
     /// The images field.
     pub images: Vec<CacheImage>,
     /// Subcache files required by this cache, in header order.
@@ -64,6 +83,10 @@ pub struct DyldCache {
 pub struct DyldCacheHeader {
     /// The magic field.
     pub magic: String,
+    /// Published magic generation.
+    pub format_version: DyldCacheFormatVersion,
+    /// Numeric byte order selected from the exact magic architecture.
+    pub byte_order: DyldCacheByteOrder,
     /// The arch field.
     pub arch: String,
     /// The mapping_offset field.
@@ -127,6 +150,21 @@ pub struct CacheMapping {
     pub max_prot: u32,
     /// The init_prot field.
     pub init_prot: u32,
+    /// File offset of slide metadata for this mapping, when declared.
+    pub slide_info_file_offset: Option<u64>,
+    /// Byte length of slide metadata for this mapping, when declared.
+    pub slide_info_file_size: Option<u64>,
+    /// Raw `DYLD_CACHE_MAPPING_*` flags from the extended mapping table.
+    pub flags: Option<u64>,
+}
+
+/// One thread-protected cache range from `dyld_cache_tpro_mapping_info`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CacheTproMapping {
+    /// Unslid virtual address of the protected range.
+    pub address: u64,
+    /// Byte length of the protected range.
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,36 +195,23 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
         return Err(Error::format("file too small for dyld cache header"));
     }
 
-    // Validate magic: first 7 bytes must be "dyld_v1"
-    if &data[..7] != DYLD_CACHE_MAGIC_PREFIX {
-        if data.starts_with(DYLD_CACHE_MAGIC_FAMILY_PREFIX) {
-            return Err(Error::unsupported(
-                "dyld cache magic declares an unsupported future format generation",
-            ));
-        }
-        return Err(Error::format("not a dyld shared cache (bad magic)"));
-    }
-
-    // The full 16-byte magic encodes the architecture, e.g. "dyld_v1  x86_64\0"
+    // The full 16-byte magic encodes both the published layout generation and
+    // architecture, for example `dyld_v0     ppc` or `dyld_v1  x86_64`.
     let magic_bytes = &data[..16];
     let magic = std::str::from_utf8(magic_bytes)
-        .unwrap_or("")
+        .map_err(|_| Error::format("dyld cache magic is not UTF-8"))?
         .trim_end_matches('\0')
         .to_string();
+    let (format_version, arch) = parse_magic(&magic)?;
+    let byte_order = byte_order_for_arch(&arch)?;
 
-    let arch = magic
-        .strip_prefix("dyld_v1")
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    let mapping_offset = read_u32_le(data, 16)?;
-    let mapping_count = read_u32_le(data, 20)?;
-    let images_offset_old = read_u32_le(data, 24)?;
-    let images_count_old = read_u32_le(data, 28)?;
+    let mapping_offset = read_u32(data, 16, byte_order)?;
+    let mapping_count = read_u32(data, 20, byte_order)?;
+    let images_offset_old = read_u32(data, 24, byte_order)?;
+    let images_count_old = read_u32(data, 28, byte_order)?;
 
     let header_size = mapping_offset as usize;
-    if header_size < HEADER_MIN_SIZE || header_size % 8 != 0 {
+    if header_size < HEADER_MIN_SIZE || !header_size.is_multiple_of(8) {
         return Err(Error::format(format!(
             "dyld cache mapping offset {header_size:#x} is not a valid aligned header extent"
         )));
@@ -216,8 +241,8 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
     let (local_symbols_offset, local_symbols_size) =
         if field_present(header_size, LOCAL_SYMBOLS_SIZE_OFF, 8) {
             (
-                read_u64_le(data, LOCAL_SYMBOLS_OFFSET_OFF)?,
-                read_u64_le(data, LOCAL_SYMBOLS_SIZE_OFF)?,
+                read_u64(data, LOCAL_SYMBOLS_OFFSET_OFF, byte_order)?,
+                read_u64(data, LOCAL_SYMBOLS_SIZE_OFF, byte_order)?,
             )
         } else {
             (0, 0)
@@ -230,6 +255,8 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
 
     let header = DyldCacheHeader {
         magic,
+        format_version,
+        byte_order,
         arch,
         mapping_offset,
         mapping_count,
@@ -240,28 +267,44 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
         generation,
     };
 
-    // Parse mappings
-    let mappings = parse_mappings(data, mapping_offset as usize, mapping_count as usize)?;
+    let mappings = parse_mappings_for_header(
+        data,
+        header_size,
+        mapping_offset as usize,
+        mapping_count as usize,
+        byte_order,
+    )?;
+    let tpro_mappings = parse_tpro_mappings(data, header_size, byte_order)?;
 
-    // Parse images: current caches use the later images array, intermediate
-    // caches use imagesText, and legacy caches use the original fields.
-    let images = if images_count_old > 0 && images_offset_old > 0 {
-        parse_images_old(data, images_offset_old as usize, images_count_old as usize)?
-    } else if mapping_offset as usize > IMAGES_COUNT_OFF {
-        let images_offset = read_u32_le(data, IMAGES_OFFSET_OFF)?;
-        let images_count = read_u32_le(data, IMAGES_COUNT_OFF)?;
-        if images_count > 0 && images_offset > 0 {
-            parse_images_old(data, images_offset as usize, images_count as usize)?
-        } else {
-            parse_images_text_if_present(data)?
-        }
-    } else if data.len() >= MODERN_HEADER_MIN {
-        parse_images_text_if_present(data)?
+    // Apple's reader selects the relocated image array from the header-layout
+    // boundary, never from whether the obsolete fields happen to be nonzero.
+    // `imagesText` remains a useful auxiliary index for layouts whose selected
+    // image array is genuinely empty.
+    let (images_offset, images_count, image_array_name) = if header_size >= IMAGES_COUNT_OFF {
+        (
+            read_u32(data, IMAGES_OFFSET_OFF, byte_order)?,
+            read_u32(data, IMAGES_COUNT_OFF, byte_order)?,
+            "current image",
+        )
     } else {
-        Vec::new()
+        (images_offset_old, images_count_old, "legacy image")
+    };
+    let images = if images_offset == 0 && images_count == 0 {
+        parse_images_text_if_present(data, header_size, byte_order)?
+    } else if images_offset == 0 || images_count == 0 {
+        return Err(Error::format(format!(
+            "dyld cache {image_array_name} offset and count must both be zero or nonzero"
+        )));
+    } else {
+        parse_images_old(
+            data,
+            images_offset as usize,
+            images_count as usize,
+            byte_order,
+        )?
     };
 
-    let subcaches = parse_subcaches(data, generation)?;
+    let subcaches = parse_subcaches(data, generation, byte_order)?;
     if symbol_file_uuid != [0; 16]
         && subcaches
             .iter()
@@ -275,27 +318,43 @@ pub fn parse_dyld_cache(data: &[u8]) -> Result<DyldCache> {
         data,
         local_symbols_offset,
         local_symbols_size,
-        generation,
+        header_size >= SYMBOL_FILE_UUID_OFF,
         &header.arch,
+        byte_order,
     )?;
+    if symbol_file_uuid != [0; 16] && local_symbols.is_some() {
+        return Err(Error::format(
+            "dyld cache declares both embedded and separate local-symbol stores",
+        ));
+    }
 
     Ok(DyldCache {
         header,
         mappings,
+        tpro_mappings,
         images,
         subcaches,
         local_symbols,
     })
 }
 
-fn parse_images_text_if_present(data: &[u8]) -> Result<Vec<CacheImage>> {
-    if data.len() < MODERN_HEADER_MIN {
+fn parse_images_text_if_present(
+    data: &[u8],
+    header_size: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheImage>> {
+    if header_size < MODERN_HEADER_MIN {
         return Ok(Vec::new());
     }
-    let images_text_offset = read_u64_le(data, IMAGES_TEXT_OFFSET_OFF)?;
-    let images_text_count = read_u64_le(data, IMAGES_TEXT_COUNT_OFF)?;
-    if images_text_count == 0 || images_text_offset == 0 {
+    let images_text_offset = read_u64(data, IMAGES_TEXT_OFFSET_OFF, byte_order)?;
+    let images_text_count = read_u64(data, IMAGES_TEXT_COUNT_OFF, byte_order)?;
+    if images_text_count == 0 && images_text_offset == 0 {
         return Ok(Vec::new());
+    }
+    if images_text_count == 0 || images_text_offset == 0 {
+        return Err(Error::format(
+            "dyld cache imagesText offset and count must both be zero or nonzero",
+        ));
     }
     let off = usize::try_from(images_text_offset).map_err(|_| {
         Error::format(format!(
@@ -307,18 +366,19 @@ fn parse_images_text_if_present(data: &[u8]) -> Result<Vec<CacheImage>> {
             "dyld cache imagesText count {images_text_count} exceeds addressable memory"
         ))
     })?;
-    parse_images_text(data, off, cnt)
+    parse_images_text(data, off, cnt, byte_order)
 }
 
 fn parse_subcaches(
     data: &[u8],
     generation: DyldCacheHeaderGeneration,
+    byte_order: DyldCacheByteOrder,
 ) -> Result<Vec<SubCacheEntry>> {
     if generation == DyldCacheHeaderGeneration::Legacy {
         return Ok(Vec::new());
     }
-    let offset = read_u32_le(data, SUBCACHE_ARRAY_OFFSET_OFF)? as usize;
-    let count = read_u32_le(data, SUBCACHE_ARRAY_COUNT_OFF)? as usize;
+    let offset = read_u32(data, SUBCACHE_ARRAY_OFFSET_OFF, byte_order)? as usize;
+    let count = read_u32(data, SUBCACHE_ARRAY_COUNT_OFF, byte_order)? as usize;
     if count == 0 {
         return Ok(Vec::new());
     }
@@ -346,7 +406,10 @@ fn parse_subcaches(
             )
             .ok_or_else(|| Error::format(format!("subcache[{index}] offset overflows")))?;
         let uuid = read_uuid(data, entry_offset)?;
-        let cache_vm_offset = read_u64_le(data, entry_offset + 16)?;
+        if uuid == [0; 16] {
+            return Err(Error::format(format!("subcache[{index}] has a zero UUID")));
+        }
+        let cache_vm_offset = read_u64(data, entry_offset + 16, byte_order)?;
         let file_suffix = if has_suffix {
             read_fixed_c_string(data, entry_offset + 24, 32, "subcache suffix")?
         } else {
@@ -381,8 +444,9 @@ fn parse_local_symbols(
     data: &[u8],
     file_offset: u64,
     file_size: u64,
-    generation: DyldCacheHeaderGeneration,
+    uses_64_bit_dylib_offsets: bool,
     arch: &str,
+    byte_order: DyldCacheByteOrder,
 ) -> Result<Option<CacheLocalSymbolsInfo>> {
     if file_offset == 0 && file_size == 0 {
         return Ok(None);
@@ -403,12 +467,12 @@ fn parse_local_symbols(
         ));
     }
     let chunk = &data[start..start + size];
-    let nlist_offset = read_u32_le(chunk, 0)?;
-    let nlist_count = read_u32_le(chunk, 4)?;
-    let strings_offset = read_u32_le(chunk, 8)?;
-    let strings_size = read_u32_le(chunk, 12)?;
-    let entries_offset = read_u32_le(chunk, 16)?;
-    let entries_count = read_u32_le(chunk, 20)?;
+    let nlist_offset = read_u32(chunk, 0, byte_order)?;
+    let nlist_count = read_u32(chunk, 4, byte_order)?;
+    let strings_offset = read_u32(chunk, 8, byte_order)?;
+    let strings_size = read_u32(chunk, 12, byte_order)?;
+    let entries_offset = read_u32(chunk, 16, byte_order)?;
+    let entries_count = read_u32(chunk, 20, byte_order)?;
     let nlist_stride = nlist_stride_for_arch(arch)?;
     let nlist_range = table_range(
         chunk,
@@ -424,7 +488,7 @@ fn parse_local_symbols(
         1,
         "local string",
     )?;
-    let entry_stride = if generation == DyldCacheHeaderGeneration::SubcacheV2 {
+    let entry_stride = if uses_64_bit_dylib_offsets {
         LOCAL_SYMBOLS_ENTRY_V2_SIZE
     } else {
         LOCAL_SYMBOLS_ENTRY_V1_SIZE
@@ -471,7 +535,7 @@ fn parse_local_symbols(
     let strings = &chunk[strings_range.clone()];
     for index in 0..nlist_count as usize {
         let offset = nlist_range.start + index * nlist_stride;
-        let string_index = read_u32_le(chunk, offset)? as usize;
+        let string_index = read_u32(chunk, offset, byte_order)? as usize;
         if string_index >= strings.len() {
             return Err(Error::format(format!(
                 "local nlist[{index}] string index {string_index:#x} exceeds string pool size {:#x}",
@@ -490,12 +554,12 @@ fn parse_local_symbols(
     for index in 0..entries_count as usize {
         let offset = entries_offset as usize + index * entry_stride;
         let (dylib_offset, nlist_start_offset) = if entry_stride == LOCAL_SYMBOLS_ENTRY_V2_SIZE {
-            (read_u64_le(chunk, offset)?, offset + 8)
+            (read_u64(chunk, offset, byte_order)?, offset + 8)
         } else {
-            (u64::from(read_u32_le(chunk, offset)?), offset + 4)
+            (u64::from(read_u32(chunk, offset, byte_order)?), offset + 4)
         };
-        let nlist_start_index = read_u32_le(chunk, nlist_start_offset)?;
-        let entry_nlist_count = read_u32_le(chunk, nlist_start_offset + 4)?;
+        let nlist_start_index = read_u32(chunk, nlist_start_offset, byte_order)?;
+        let entry_nlist_count = read_u32(chunk, nlist_start_offset + 4, byte_order)?;
         let end = nlist_start_index
             .checked_add(entry_nlist_count)
             .ok_or_else(|| Error::format(format!("local-symbol entry[{index}] range overflows")))?;
@@ -558,11 +622,36 @@ fn ranges_overlap(left: &Range<usize>, right: &Range<usize>) -> bool {
 
 fn nlist_stride_for_arch(arch: &str) -> Result<usize> {
     match arch {
-        "x86_64" | "x86_64h" | "arm64" | "arm64e" | "arm64_32" => Ok(16),
+        "x86_64" | "x86_64h" | "arm64" | "arm64e" | "arm64_32" | "ppc64" => Ok(16),
         "i386" | "armv5" | "armv6" | "armv7" | "armv7f" | "armv7s" | "armv7k" => Ok(12),
+        "ppc" => Ok(12),
         _ => Err(Error::unsupported(format!(
             "dyld cache architecture {arch:?} has no known local-symbol nlist layout"
         ))),
+    }
+}
+
+fn parse_magic(magic: &str) -> Result<(DyldCacheFormatVersion, String)> {
+    let (version, suffix) = if let Some(suffix) = magic.strip_prefix("dyld_v0") {
+        (DyldCacheFormatVersion::V0, suffix)
+    } else if let Some(suffix) = magic.strip_prefix("dyld_v1") {
+        (DyldCacheFormatVersion::V1, suffix)
+    } else if magic.as_bytes().starts_with(DYLD_CACHE_MAGIC_FAMILY_PREFIX) {
+        return Err(Error::unsupported(
+            "dyld cache magic declares an unsupported format generation",
+        ));
+    } else {
+        return Err(Error::format("not a dyld shared cache (bad magic)"));
+    };
+    let arch = suffix.trim().to_owned();
+    nlist_stride_for_arch(&arch)?;
+    Ok((version, arch))
+}
+
+fn byte_order_for_arch(arch: &str) -> Result<DyldCacheByteOrder> {
+    match arch {
+        "ppc" | "ppc64" => Ok(DyldCacheByteOrder::Big),
+        _ => nlist_stride_for_arch(arch).map(|_| DyldCacheByteOrder::Little),
     }
 }
 
@@ -572,7 +661,84 @@ fn field_present(header_size: usize, offset: usize, size: usize) -> bool {
         .is_some_and(|end| header_size >= end)
 }
 
-fn parse_mappings(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheMapping>> {
+fn parse_mappings_for_header(
+    data: &[u8],
+    header_size: usize,
+    offset: usize,
+    count: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheMapping>> {
+    let legacy = parse_mappings(data, offset, count, byte_order)?;
+    if !field_present(header_size, MAPPING_WITH_SLIDE_COUNT_OFF, 4) {
+        return Ok(legacy);
+    }
+    let extended_offset = read_u32(data, MAPPING_WITH_SLIDE_OFFSET_OFF, byte_order)? as usize;
+    let extended_count = read_u32(data, MAPPING_WITH_SLIDE_COUNT_OFF, byte_order)? as usize;
+    if extended_offset == 0 && extended_count == 0 {
+        return Ok(legacy);
+    }
+    if extended_offset == 0 || extended_count != count {
+        return Err(Error::format(format!(
+            "extended mapping table must contain {count} records at a nonzero offset"
+        )));
+    }
+    validate_table_extent(
+        data,
+        extended_offset,
+        extended_count,
+        MAPPING_AND_SLIDE_INFO_SIZE,
+        "extended mapping",
+    )?;
+    let mut extended = Vec::with_capacity(extended_count);
+    for (index, legacy_mapping) in legacy.iter().enumerate() {
+        let record = extended_offset + index * MAPPING_AND_SLIDE_INFO_SIZE;
+        let slide_info_file_offset = read_u64(data, record + 24, byte_order)?;
+        let slide_info_file_size = read_u64(data, record + 32, byte_order)?;
+        if (slide_info_file_offset == 0) != (slide_info_file_size == 0) {
+            return Err(Error::format(format!(
+                "extended mapping[{index}] slide-info offset and size must both be zero or nonzero"
+            )));
+        }
+        if slide_info_file_size != 0 {
+            validate_file_range(
+                data,
+                slide_info_file_offset,
+                slide_info_file_size,
+                &format!("extended mapping[{index}] slide info"),
+            )?;
+        }
+        let mapping = CacheMapping {
+            address: read_u64(data, record, byte_order)?,
+            size: read_u64(data, record + 8, byte_order)?,
+            file_offset: read_u64(data, record + 16, byte_order)?,
+            slide_info_file_offset: (slide_info_file_size != 0).then_some(slide_info_file_offset),
+            slide_info_file_size: (slide_info_file_size != 0).then_some(slide_info_file_size),
+            flags: Some(read_u64(data, record + 40, byte_order)?),
+            max_prot: read_u32(data, record + 48, byte_order)?,
+            init_prot: read_u32(data, record + 52, byte_order)?,
+        };
+        validate_mapping(data, index, &mapping, &extended)?;
+        if mapping.address != legacy_mapping.address
+            || mapping.size != legacy_mapping.size
+            || mapping.file_offset != legacy_mapping.file_offset
+            || mapping.max_prot != legacy_mapping.max_prot
+            || mapping.init_prot != legacy_mapping.init_prot
+        {
+            return Err(Error::format(format!(
+                "extended mapping[{index}] disagrees with the legacy mapping table"
+            )));
+        }
+        extended.push(mapping);
+    }
+    Ok(extended)
+}
+
+fn parse_mappings(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheMapping>> {
     validate_table_extent(data, offset, count, MAPPING_INFO_SIZE, "mapping")?;
     let mut mappings = Vec::with_capacity(count);
     for i in 0..count {
@@ -590,35 +756,101 @@ fn parse_mappings(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheM
             ));
         }
         let mapping = CacheMapping {
-            address: read_u64_le(data, off)?,
-            size: read_u64_le(data, off + 8)?,
-            file_offset: read_u64_le(data, off + 16)?,
-            max_prot: read_u32_le(data, off + 24)?,
-            init_prot: read_u32_le(data, off + 28)?,
+            address: read_u64(data, off, byte_order)?,
+            size: read_u64(data, off + 8, byte_order)?,
+            file_offset: read_u64(data, off + 16, byte_order)?,
+            max_prot: read_u32(data, off + 24, byte_order)?,
+            init_prot: read_u32(data, off + 28, byte_order)?,
+            slide_info_file_offset: None,
+            slide_info_file_size: None,
+            flags: None,
+        };
+        validate_mapping(data, i, &mapping, &mappings)?;
+        mappings.push(mapping);
+    }
+    Ok(mappings)
+}
+
+fn validate_mapping(
+    data: &[u8],
+    index: usize,
+    mapping: &CacheMapping,
+    prior_mappings: &[CacheMapping],
+) -> Result<()> {
+    if mapping.size == 0 {
+        return Err(Error::format(format!("mapping[{index}] has zero size")));
+    }
+    let va_end = mapping.address.checked_add(mapping.size).ok_or_else(|| {
+        Error::address(format!("mapping[{index}] virtual-address extent overflows"))
+    })?;
+    validate_file_range(
+        data,
+        mapping.file_offset,
+        mapping.size,
+        &format!("mapping[{index}]"),
+    )?;
+    if prior_mappings.iter().any(|prior| {
+        let prior_end = prior.address + prior.size;
+        mapping.address < prior_end && prior.address < va_end
+    }) {
+        return Err(Error::format(format!(
+            "mapping[{index}] overlaps an earlier virtual-address mapping"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_file_range(data: &[u8], offset: u64, size: u64, label: &str) -> Result<()> {
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| Error::address(format!("{label} file extent overflows")))?;
+    if end > data.len() as u64 {
+        return Err(Error::bounds(offset, size, data.len() as u64));
+    }
+    Ok(())
+}
+
+fn parse_tpro_mappings(
+    data: &[u8],
+    header_size: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheTproMapping>> {
+    if !field_present(header_size, TPRO_MAPPINGS_COUNT_OFF, 4) {
+        return Ok(Vec::new());
+    }
+    let offset = read_u32(data, TPRO_MAPPINGS_OFFSET_OFF, byte_order)? as usize;
+    let count = read_u32(data, TPRO_MAPPINGS_COUNT_OFF, byte_order)? as usize;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    if offset == 0 {
+        return Err(Error::format(
+            "dyld cache declares TPRO mappings with a zero table offset",
+        ));
+    }
+    validate_table_extent(data, offset, count, TPRO_MAPPING_INFO_SIZE, "TPRO mapping")?;
+    let mut mappings = Vec::with_capacity(count);
+    for index in 0..count {
+        let record = offset + index * TPRO_MAPPING_INFO_SIZE;
+        let mapping = CacheTproMapping {
+            address: read_u64(data, record, byte_order)?,
+            size: read_u64(data, record + 8, byte_order)?,
         };
         if mapping.size == 0 {
-            return Err(Error::format(format!("mapping[{i}] has zero size")));
+            return Err(Error::format(format!(
+                "TPRO mapping[{index}] has zero size"
+            )));
         }
-        let va_end = mapping.address.checked_add(mapping.size).ok_or_else(|| {
-            Error::address(format!("mapping[{i}] virtual-address extent overflows"))
-        })?;
-        let file_end = mapping
-            .file_offset
+        let end = mapping
+            .address
             .checked_add(mapping.size)
-            .ok_or_else(|| Error::address(format!("mapping[{i}] file extent overflows")))?;
-        if file_end > data.len() as u64 {
-            return Err(Error::bounds(
-                mapping.file_offset,
-                mapping.size,
-                data.len() as u64,
-            ));
-        }
-        if mappings.iter().any(|prior: &CacheMapping| {
+            .ok_or_else(|| Error::address(format!("TPRO mapping[{index}] extent overflows")))?;
+        if mappings.iter().any(|prior: &CacheTproMapping| {
             let prior_end = prior.address + prior.size;
-            mapping.address < prior_end && prior.address < va_end
+            mapping.address < prior_end && prior.address < end
         }) {
             return Err(Error::format(format!(
-                "mapping[{i}] overlaps an earlier virtual-address mapping"
+                "TPRO mapping[{index}] overlaps an earlier TPRO mapping"
             )));
         }
         mappings.push(mapping);
@@ -628,7 +860,12 @@ fn parse_mappings(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheM
 
 /// Parse the old-style dyld_cache_image_info entries.
 /// Layout: address(u64) + modTime(u64) + inode(u64) + pathFileOffset(u32) + pad(u32)
-fn parse_images_old(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheImage>> {
+fn parse_images_old(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheImage>> {
     validate_table_extent(data, offset, count, IMAGE_INFO_SIZE, "old image")?;
     let mut images = Vec::with_capacity(count);
     for i in 0..count {
@@ -645,8 +882,8 @@ fn parse_images_old(data: &[u8], offset: usize, count: usize) -> Result<Vec<Cach
                 data.len() as u64,
             ));
         }
-        let address = read_u64_le(data, off)?;
-        let path_offset = read_u32_le(data, off + 24)?;
+        let address = read_u64(data, off, byte_order)?;
+        let path_offset = read_u32(data, off + 24, byte_order)?;
         let path = read_c_string(data, path_offset as usize, "old image path")?;
 
         images.push(CacheImage {
@@ -660,7 +897,12 @@ fn parse_images_old(data: &[u8], offset: usize, count: usize) -> Result<Vec<Cach
 
 /// Parse the modern dyld_cache_image_text_info entries.
 /// Layout: uuid(16) + loadAddress(u64) + textSegmentSize(u32) + pathOffset(u32)
-fn parse_images_text(data: &[u8], offset: usize, count: usize) -> Result<Vec<CacheImage>> {
+fn parse_images_text(
+    data: &[u8],
+    offset: usize,
+    count: usize,
+    byte_order: DyldCacheByteOrder,
+) -> Result<Vec<CacheImage>> {
     validate_table_extent(data, offset, count, IMAGE_TEXT_INFO_SIZE, "imagesText")?;
     let mut images = Vec::with_capacity(count);
     for i in 0..count {
@@ -678,9 +920,9 @@ fn parse_images_text(data: &[u8], offset: usize, count: usize) -> Result<Vec<Cac
             ));
         }
         // Skip uuid (16 bytes)
-        let address = read_u64_le(data, off + 16)?;
-        let text_size = read_u32_le(data, off + 24)?;
-        let path_offset = read_u32_le(data, off + 28)?;
+        let address = read_u64(data, off + 16, byte_order)?;
+        let text_size = read_u32(data, off + 24, byte_order)?;
+        let path_offset = read_u32(data, off + 28, byte_order)?;
         let path = read_c_string(data, path_offset as usize, "imagesText path")?;
 
         images.push(CacheImage {

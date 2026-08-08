@@ -214,6 +214,85 @@ pub struct MachoSwiftClassOverrideRecordV1 {
     pub raw_sha256: EvidenceDigest,
 }
 
+/// Generic-context portion of a Swift class trailing descriptor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachoSwiftGenericContextLayoutV1 {
+    /// Generic-context descriptor address.
+    pub descriptor_va: u64,
+    /// Relative pointer to the generic metadata instantiation cache.
+    pub instantiation_cache_relative: i32,
+    /// Relative pointer to the default generic metadata instantiation pattern.
+    pub default_instantiation_pattern_relative: i32,
+    /// Number of generic parameters.
+    pub parameter_count: u16,
+    /// Number of generic requirements.
+    pub requirement_count: u16,
+    /// Number of key arguments used to form metadata identity.
+    pub key_argument_count: u16,
+    /// Swift 5.8-and-newer generic-context flags. This field occupied the
+    /// now-retired extra-argument count in older runtimes, where it was zero.
+    pub flags: u16,
+    /// Number of pack-shape descriptors, when the type-pack flag is set.
+    pub pack_count: u16,
+    /// Number of equivalence classes in the same-shape relation.
+    pub shape_class_count: u16,
+    /// Raw set of conditionally inverted protocols.
+    pub conditional_inverted_protocol_bits: u16,
+    /// Cumulative generic-requirement counts for the set bits above.
+    pub conditional_inverted_protocol_requirement_counts: Vec<u16>,
+    /// Number of generic value descriptors, when the value flag is set.
+    pub value_count: u32,
+    /// Complete generic-context descriptor byte length.
+    pub byte_len: u32,
+}
+
+/// Metadata-initialization portion of a Swift class trailing descriptor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum MachoSwiftMetadataInitializationLayoutV1 {
+    /// The descriptor has no metadata-initialization record.
+    None,
+    /// Singleton initialization with cache, incomplete-metadata, and completion pointers.
+    Singleton {
+        /// Initialization record address.
+        descriptor_va: u64,
+        /// Cache relative pointer as encoded.
+        cache_relative: i32,
+        /// Incomplete-metadata relative pointer as encoded.
+        incomplete_metadata_relative: i32,
+        /// Completion-function relative pointer as encoded.
+        completion_function_relative: i32,
+    },
+    /// Foreign initialization with a completion-function pointer.
+    Foreign {
+        /// Initialization record address.
+        descriptor_va: u64,
+        /// Completion-function relative pointer as encoded.
+        completion_function_relative: i32,
+    },
+}
+
+/// Typed trailing-layout evidence for one Swift class descriptor.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachoSwiftClassTrailingLayoutV1 {
+    /// Owning class descriptor address.
+    pub class_descriptor_va: u64,
+    /// Raw context descriptor flags selecting this layout.
+    pub flags: u32,
+    /// Generic-context layout, when the class is generic.
+    pub generic_context: Option<MachoSwiftGenericContextLayoutV1>,
+    /// Address of the resilient-superclass record, when present.
+    pub resilient_superclass_descriptor_va: Option<u64>,
+    /// Raw resilient-superclass type-reference relative pointer.
+    pub resilient_superclass_type_reference_relative: Option<i32>,
+    /// Metadata-initialization layout.
+    pub metadata_initialization: MachoSwiftMetadataInitializationLayoutV1,
+    /// Address immediately following all admitted layout prefixes.
+    pub dispatch_descriptor_va: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 /// Swift Decode Gap V1 evidence.
@@ -298,6 +377,9 @@ pub struct SwiftDecodeBatchV1 {
     /// Protocol generic signature requirements.
     #[serde(default)]
     pub protocol_signature_requirements: Vec<MachoSwiftProtocolSignatureRequirementRecordV1>,
+    /// Class trailing layouts used to locate dispatch records.
+    #[serde(default)]
+    pub class_trailing_layouts: Vec<MachoSwiftClassTrailingLayoutV1>,
     /// class vtable entries.
     pub class_vtable_entries: Vec<MachoSwiftClassVtableEntryV1>,
     /// class overrides.
@@ -329,6 +411,7 @@ impl SwiftDecodeBatchV1 {
             .and_then(|value| value.checked_add(self.associated_types.len()))
             .and_then(|value| value.checked_add(self.protocol_requirements.len()))
             .and_then(|value| value.checked_add(self.protocol_signature_requirements.len()))
+            .and_then(|value| value.checked_add(self.class_trailing_layouts.len()))
             .and_then(|value| value.checked_add(self.class_vtable_entries.len()))
             .and_then(|value| value.checked_add(self.class_overrides.len()))
             .and_then(|value| {
@@ -369,6 +452,8 @@ impl SwiftDecodeBatchV1 {
                     && self.conformances.is_empty()
                     && self.associated_types.is_empty()
                     && self.protocol_requirements.is_empty()
+                    && self.protocol_signature_requirements.is_empty()
+                    && self.class_trailing_layouts.is_empty()
                     && self.class_vtable_entries.is_empty()
                     && self.class_overrides.is_empty()
                     && self.gaps.is_empty() => {}

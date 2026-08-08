@@ -2,12 +2,25 @@
 
 ## 1.0.0
 
+- Complete the published dyld shared-cache layout matrix across `dyld_v0` and
+  `dyld_v1`: historical big-endian PowerPC members, legacy and extended
+  mappings with slide metadata and flags, both subcache generations, both
+  local-symbol entry widths, separate symbol members, and TPRO ranges. Family
+  assembly validates generation and byte order, and future generations remain
+  typed unsupported input.
+
+- Add exact function-local CFG reuse to refinement and deepening, including
+  normalized guide dependencies and a versioned operational transition receipt
+  with whole-stage and reused/rebuilt function counts. Reuse metadata remains
+  outside durable Fact IR, and warm recovery is regression-checked against a
+  cold reconstruction.
+
 - Add the reusable facts/hypotheses/decisions projection contract with strict,
   suggest, and best-effort C++ header policies, complete two-dimensional
   assumption receipts, and exact JSON, TOML, or inline operator selections.
   The canonical request digest binds the complete selection policy and
   validators reject projected assumptions without matching receipts. As a
-  prerelease contract, recovery remains at schema version 2 and is updated in
+  prerelease contract, recovery remains at schema version 1 and is updated in
   place rather than accumulating development-only schema versions.
 
 - Freeze the 1.x stability boundary around the public Rust API, declared
@@ -165,12 +178,11 @@
   disassembly, and language-recovery commands. A CPU-family selector such as
   `arm64` retains every matching subtype, while a qualified selector such as
   `arm64e` or `x86_64h` retains exactly that subtype; every requested selector
-  must resolve. Recovery and disassembly reports now use schema version 2 and
+  must resolve. Recovery and disassembly reports use schema version 1 and
   record the resolved selection as `all`, exact `one`, or ordered exact `many`
-  architectures. This is an intentional wire cutover: version-1 recovery and
-  disassembly artifacts are rejected and must be regenerated, and consumers
-  must update to the version-2 request shape.
-- Added closed typed access to schema-v3 analysis domains. Library callers pass
+  architectures. Because this is a prerelease wire, the request shape is
+  updated in place without retaining development-only schema history.
+- Added closed typed access to schema-v1 analysis domains. Library callers pass
   a `domain_reports` key to `SliceSnapshot::report` and receive the existing
   public Rust report type while retaining not-requested, complete-with-issues,
   unsupported, and failed-with-issues states. The snapshot wire shape and
@@ -288,6 +300,6 @@
   of explicit color for machine-readable output.
 - Adopted pinned Termosaic semantic tokens, theme resolution, and human-text
   sanitization in the CLI presentation layer without changing JSON or SARIF.
-- Added selective analysis plans and schema-v2 four-state snapshots.
+- Added selective analysis plans and schema-v1 four-state snapshots.
 - Added injected CLI I/O, canonical output formats, and distinct policy exits.
 - Added architecture, documentation, release, CI, fuzz, and benchmark authorities.

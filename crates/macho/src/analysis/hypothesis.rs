@@ -694,7 +694,7 @@ mod tests {
             Err(HypothesisSelectionDocumentError::Json(_))
         ));
 
-        let unsupported = br#"{"schema_version": 2, "selections": []}"#;
+        let unsupported = br#"{"schema_version": 0, "selections": []}"#;
         assert!(matches!(
             HypothesisSelectionDocument::load_json(unsupported),
             Err(HypothesisSelectionDocumentError::UnsupportedSchemaVersion { .. })
@@ -823,6 +823,43 @@ mod tests {
         assert_eq!(
             ledger.validate(&HypothesisSelectionPolicy::default()),
             Err(HypothesisContractError::EmptyContent)
+        );
+    }
+
+    #[test]
+    fn abstention_is_explicit_and_cannot_be_selected() {
+        let abstention = RecoveryHypothesis {
+            subject: HypothesisSubject {
+                domain: "cpp_header".into(),
+                key: "gap-without-supported-interpretation".into(),
+            },
+            unresolved: "the retained evidence does not admit a source declaration".into(),
+            candidates: Vec::new(),
+            abstention: Some("no contract-preserving interpretation exists".into()),
+        };
+        let policy = HypothesisSelectionPolicy {
+            mode: SelectionPolicyMode::BestEffort,
+            overrides: Vec::new(),
+        };
+        assert!(policy.select(&abstention).unwrap().is_none());
+        assert!(
+            HypothesisLedger {
+                hypotheses: vec![abstention.clone()],
+                selections: Vec::new(),
+            }
+            .validate(&policy)
+            .is_ok()
+        );
+
+        let mut implicit = abstention;
+        implicit.abstention = None;
+        assert_eq!(
+            HypothesisLedger {
+                hypotheses: vec![implicit],
+                selections: Vec::new(),
+            }
+            .validate(&policy),
+            Err(HypothesisContractError::InvalidRanking)
         );
     }
 }

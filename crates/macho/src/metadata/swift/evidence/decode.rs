@@ -65,6 +65,7 @@ pub fn decode_swift_strict(
                 associated_types: Vec::new(),
                 protocol_requirements: Vec::new(),
                 protocol_signature_requirements: Vec::new(),
+                class_trailing_layouts: Vec::new(),
                 class_vtable_entries: Vec::new(),
                 class_overrides: Vec::new(),
                 gaps: vec![error.gap],
@@ -142,6 +143,7 @@ pub fn decode_swift_strict(
             associated_types: Vec::new(),
             protocol_requirements: Vec::new(),
             protocol_signature_requirements: Vec::new(),
+            class_trailing_layouts: Vec::new(),
             class_vtable_entries: Vec::new(),
             class_overrides: Vec::new(),
             gaps: Vec::new(),
@@ -183,6 +185,7 @@ pub fn decode_swift_strict(
                 associated_types: Vec::new(),
                 protocol_requirements: Vec::new(),
                 protocol_signature_requirements: Vec::new(),
+                class_trailing_layouts: Vec::new(),
                 class_vtable_entries: Vec::new(),
                 class_overrides: Vec::new(),
                 gaps: vec![gap],
@@ -204,6 +207,7 @@ pub fn decode_swift_strict(
     let mut structural_unknown = 0_u64;
     let mut protocol_requirements = Vec::new();
     let mut protocol_signature_requirements = Vec::new();
+    let mut rejected_protocol_requirement_counts = BTreeMap::new();
     for descriptor in descriptors
         .iter()
         .filter(|descriptor| descriptor.section == "__swift5_protos")
@@ -214,6 +218,10 @@ pub fn decode_swift_strict(
                 protocol_requirements.append(&mut requirements);
             }
             Err(error) => {
+                rejected_protocol_requirement_counts.insert(
+                    descriptor.address,
+                    protocol_requirement_count(macho, descriptor, limits),
+                );
                 structural_unknown = structural_unknown.saturating_add(error.attempted);
                 structural_gaps.push(error.gap);
             }
@@ -233,6 +241,7 @@ pub fn decode_swift_strict(
             );
         }
     };
+    let mut class_trailing_layouts = Vec::new();
     let mut class_vtable_entries = Vec::new();
     let mut class_overrides = Vec::new();
     let mut class_dispatch_attempted = 0_u64;
@@ -242,12 +251,14 @@ pub fn decode_swift_strict(
         .filter(|descriptor| descriptor.section == "__swift5_types")
     {
         match validate_class_dispatch(macho, std::slice::from_ref(descriptor), limits) {
-            Ok((mut entries, mut overrides)) => {
+            Ok(mut evidence) => {
                 class_dispatch_attempted = class_dispatch_attempted
-                    .saturating_add(entries.len() as u64)
-                    .saturating_add(overrides.len() as u64);
-                class_vtable_entries.append(&mut entries);
-                class_overrides.append(&mut overrides);
+                    .saturating_add(evidence.layouts.len() as u64)
+                    .saturating_add(evidence.vtable_entries.len() as u64)
+                    .saturating_add(evidence.overrides.len() as u64);
+                class_trailing_layouts.append(&mut evidence.layouts);
+                class_vtable_entries.append(&mut evidence.vtable_entries);
+                class_overrides.append(&mut evidence.overrides);
             }
             Err(error) => {
                 let retained = (error.retained_vtable_entries.len() as u64)
@@ -261,19 +272,17 @@ pub fn decode_swift_strict(
             }
         }
     }
-    let class_dispatch_entries = Some(class_dispatch_attempted);
-    let total_entries =
-        match class_dispatch_entries.and_then(|count| total_entries.checked_add(count)) {
-            Some(total) if total <= limits.max_observations => total,
-            _ => {
-                return rejected(
-                    u64::MAX,
-                    "swift_structural_budget_exceeded",
-                    Some("__swift5_types".into()),
-                    "Swift class-dispatch observations exceed the selected limit",
-                );
-            }
-        };
+    let total_entries = match total_entries.checked_add(class_dispatch_attempted) {
+        Some(total) if total <= limits.max_observations => total,
+        _ => {
+            return rejected(
+                u64::MAX,
+                "swift_structural_budget_exceeded",
+                Some("__swift5_types".into()),
+                "Swift class-dispatch observations exceed the selected limit",
+            );
+        }
+    };
     let (validated_conformances, conformance_rejection) =
         match validate_conformance_list(macho, limits) {
             Ok(conformances) => (conformances, None),
@@ -513,6 +522,8 @@ pub fn decode_swift_strict(
     }
     records.sort_by_key(|record| record.descriptor_va);
     let mut conformances = Vec::with_capacity(validated_conformances.len());
+    let mut witness_pattern_unknown = 0_u64;
+    let mut witness_pattern_rejected = false;
     for validated_conformance in validated_conformances {
         let Some(conformance) = decoded_conformances.remove(&validated_conformance.address) else {
             return rejected(
@@ -540,6 +551,13 @@ pub fn decode_swift_strict(
                 .iter()
                 .filter(|requirement| requirement.protocol_descriptor_va == protocol_descriptor_va)
                 .collect::<Vec<_>>();
+            if let Some(rejected_count) =
+                rejected_protocol_requirement_counts.get(&protocol_descriptor_va)
+            {
+                witness_pattern_rejected = true;
+                witness_pattern_unknown =
+                    witness_pattern_unknown.saturating_add(rejected_count.unwrap_or(0));
+            }
             match decode_evidence_witness_table_pattern(
                 macho,
                 validated_conformance.address,
@@ -597,7 +615,8 @@ pub fn decode_swift_strict(
             );
         }
     };
-    let total_entries = match total_entries.checked_add(witness_pattern_entries) {
+    let witness_pattern_attempted = witness_pattern_entries.saturating_add(witness_pattern_unknown);
+    let total_entries = match total_entries.checked_add(witness_pattern_attempted) {
         Some(total) if total <= limits.max_observations => total,
         _ => {
             return rejected(
@@ -663,7 +682,9 @@ pub fn decode_swift_strict(
     }
     associated_types.sort_by_key(|record| record.descriptor_va);
     let mut gaps = structural_gaps;
-    let mut unknown = structural_unknown.saturating_add(class_dispatch_rejected);
+    let mut unknown = structural_unknown
+        .saturating_add(class_dispatch_rejected)
+        .saturating_add(witness_pattern_unknown);
     let conformance_status = if let Some(gap) = conformance_rejection {
         gaps.push(gap);
         unknown = unknown.saturating_add(conformance_entries);
@@ -675,7 +696,7 @@ pub fn decode_swift_strict(
     };
     let class_dispatch_status = if class_dispatch_rejected != 0 {
         SwiftCollectorStatusV1::Rejected
-    } else if class_dispatch_entries == Some(0) {
+    } else if class_dispatch_attempted == 0 {
         SwiftCollectorStatusV1::Absent
     } else {
         SwiftCollectorStatusV1::Complete
@@ -700,6 +721,7 @@ pub fn decode_swift_strict(
         associated_types,
         protocol_requirements,
         protocol_signature_requirements,
+        class_trailing_layouts,
         class_vtable_entries,
         class_overrides,
         gaps,
@@ -740,18 +762,30 @@ pub fn decode_swift_strict(
             ),
             collector(
                 "witness_patterns",
-                if witness_pattern_entries == 0 {
+                if witness_pattern_rejected {
+                    SwiftCollectorStatusV1::Rejected
+                } else if witness_pattern_entries == 0 {
                     SwiftCollectorStatusV1::Absent
                 } else {
                     SwiftCollectorStatusV1::Complete
                 },
-                witness_pattern_entries,
+                witness_pattern_attempted,
             ),
             collector(
                 "class_dispatch",
                 class_dispatch_status,
-                class_dispatch_entries.unwrap_or(u64::MAX),
+                class_dispatch_attempted,
             ),
         ],
     })
+}
+
+fn protocol_requirement_count(
+    macho: &MachoFile<'_>,
+    descriptor: &ValidatedDescriptor,
+    limits: &SwiftEvidenceLimits,
+) -> Option<u64> {
+    let header = macho.read_bytes_at_va(Va(descriptor.address), 20).ok()?;
+    let count = u64::from(macho.endian().read_u32(header[16..20].try_into().ok()?));
+    (count <= limits.max_protocol_requirements && count <= limits.max_observations).then_some(count)
 }

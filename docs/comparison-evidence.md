@@ -56,7 +56,7 @@ Legend: **Y** = first-class in-product support · **P** = partial / related ·
 | PAC-aware detour planning | **Y** (`patch --pac-policy`) | — | — | — | — | manual |
 | Semantic multi-domain **diff** | **Y** | — | — | — | — | limited |
 | Audit findings + **SARIF 2.1** | **Y** | — | **P** | — | — | varies |
-| Snapshot JSON (versioned domains) | **Y** (schema v3) | — | — | — | — | project formats |
+| Snapshot JSON (versioned domains) | **Y** (schema v1) | — | — | — | — | project formats |
 | Safe structural **mutation** | **Y** (fail-closed slack) | — | rpath/id only | — | — | patches / scripts |
 | In-process ad-hoc / P12 **sign** | **Y** | — | **Y** (Keychain/macOS) | — | — | external |
 | dyld shared cache extract | **Y** (`cache`) | limited | — | — | **Y** (flagship) | loaders |

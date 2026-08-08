@@ -104,8 +104,8 @@ pub mod xref;
 
 pub use analyzer::{
     AnalysisDocument, AnalysisFailure, AnalysisIssue, Analyzer, ContainerIdentity, DomainPayload,
-    DomainReportKey, DomainState, SliceIdentity, SliceSnapshot, SnapshotDocument,
-    UnsupportedReason, domain_reports,
+    DomainReportKey, DomainState, SNAPSHOT_SCHEMA_VERSION, SliceIdentity, SliceSnapshot,
+    SnapshotDocument, UnsupportedReason, domain_reports,
 };
 pub use control_flow::{
     ComputedBranchTransformEvidence, ControlFlowEdgeKind, GuidedControlFlowEdgeSuppression,
@@ -122,12 +122,14 @@ pub use planner::{
     AnalysisLimits, AnalysisPlan, AuditPlan, AuditRuleSpec, ContainerPlan, DiffPlan,
 };
 pub use program::{
-    DisassemblyFacts, PROGRAM_COMPLETENESS_SCHEMA_VERSION, PROGRAM_FACT_IR_SCHEMA_VERSION,
-    PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION, ProgramAddressView, ProgramAnnotations,
+    ControlFlowReuseReceipt, DisassemblyFacts, PROGRAM_COMPLETENESS_SCHEMA_VERSION,
+    PROGRAM_FACT_IR_SCHEMA_VERSION, PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION,
+    PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION, ProgramAddressView, ProgramAnnotations,
     ProgramCompletenessValidationError, ProgramExaminedUniverse, ProgramFactAuthority,
     ProgramFactDocument, ProgramFactDocumentError, ProgramFactValidationError, ProgramFacts,
     ProgramFunctionView, ProgramRecoveryCompleteness, ProgramRecoveryError, ProgramRecoveryLimits,
-    ProgramRecoveryLimitsFile, ProgramRecoveryRequest, ProgramRecoveryStage, ProgramRecoveryStatus,
+    ProgramRecoveryLimitsFile, ProgramRecoveryRequest, ProgramRecoveryReuseReceipt,
+    ProgramRecoveryStage, ProgramRecoveryStatus, ProgramRecoveryTransition,
     ProgramReferenceAnnotations, ProgramReferenceBinding, ProgramReferenceOwner,
     ProgramReferenceView, ProgramStageContract, ProgramStageReceipt, ProgramStageStatus,
     RecoveredProgram, RecoveredProgramBody, RecoveryPreview, ResolvedDirectCallEdge,
@@ -135,14 +137,13 @@ pub use program::{
 pub use recovery::{
     FunctionRelationshipChoice, GuidedReferenceOwnership, ProgramCoverage, ProgramCoverageDelta,
     ProgramCoverageDimension, ProgramCoverageUnit, ProgramImageIdentity, ProgramSubjectKey,
-    RECOVERY_CONTRACT_MAJOR, RECOVERY_CONTRACT_MINOR, RecoveryAddressRange, RecoveryChoice,
-    RecoveryContractSchema, RecoveryDecision, RecoveryDecisionApplicability,
-    RecoveryDecisionApplication, RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation,
-    RecoveryDecisionDerivationKind, RecoveryDecisionValidation, RecoveryDelta, RecoveryDeltaError,
-    RecoveryDeltaKind, RecoveryDeltaRecord, RecoveryDeltaSummary, RecoveryEffectEstimate,
-    RecoveryFrontier, RecoveryFrontierKind, RecoveryGuide, RecoveryGuideApplicability,
-    RecoveryGuideApplication, RecoveryGuideBuildError, RecoveryGuideBuilder,
-    RecoveryGuideValidation, RecoveryLayer, RecoveryPointKey, RecoveryQuestion,
-    RecoveryQuestionKind, RecoveryReferenceKind, RecoveryReferenceTargetKey, RecoverySignal,
-    RecoverySignalKey, RecoverySignalKind,
+    RECOVERY_CONTRACT_SCHEMA_VERSION, RecoveryAddressRange, RecoveryChoice, RecoveryContractSchema,
+    RecoveryDecision, RecoveryDecisionApplicability, RecoveryDecisionApplication,
+    RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation, RecoveryDecisionDerivationKind,
+    RecoveryDecisionValidation, RecoveryDelta, RecoveryDeltaError, RecoveryDeltaKind,
+    RecoveryDeltaRecord, RecoveryDeltaSummary, RecoveryEffectEstimate, RecoveryFrontier,
+    RecoveryFrontierKind, RecoveryGuide, RecoveryGuideApplicability, RecoveryGuideApplication,
+    RecoveryGuideBuildError, RecoveryGuideBuilder, RecoveryGuideValidation, RecoveryLayer,
+    RecoveryPointKey, RecoveryQuestion, RecoveryQuestionKind, RecoveryReferenceKind,
+    RecoveryReferenceTargetKey, RecoverySignal, RecoverySignalKey, RecoverySignalKind,
 };

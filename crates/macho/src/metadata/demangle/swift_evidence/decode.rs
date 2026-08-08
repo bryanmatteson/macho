@@ -290,6 +290,36 @@ mod tests {
             classify_swift_closure_symbol(reabstraction).map(|record| record.kind),
             Some(SwiftClosureSymbolKind::ReabstractionThunk)
         );
+        let decoded = decode_swift_mangling(reabstraction, &limits());
+        assert!(
+            matches!(
+                &decoded,
+                SwiftManglingEvidence::Supported { entity, .. }
+                    if entity.callable_kind == Some(SwiftCallableKind::Closure)
+                        && entity.variant_role
+                            == Some(SwiftCallableVariantRole::ReabstractionThunk)
+                        && entity.formal_type.is_some()
+            ),
+            "{decoded:#?}"
+        );
+    }
+
+    #[test]
+    fn generic_closure_retains_generic_formal_result() {
+        let generic = "$s14GenericClosure4makeyxycxlFxycfU_";
+        let decoded = decode_swift_mangling(generic, &limits());
+        assert!(
+            matches!(
+                &decoded,
+                SwiftManglingEvidence::Supported { entity, .. }
+                    if entity.callable_kind == Some(SwiftCallableKind::Closure)
+                        && entity.formal_type.as_ref().is_some_and(|formal| matches!(
+                            formal.result,
+                            SwiftTypeEvidence::GenericParameter { depth: 0, index: 0 }
+                        ))
+            ),
+            "{decoded:#?}"
+        );
     }
 
     #[test]
@@ -305,12 +335,27 @@ mod tests {
                     })
         ));
 
-        let constrained =
-            "$s24SwiftPlan0004ConditionalAAVA2A0aB6MarkerRzlE7resolvexyF";
-        assert!(matches!(
-            decode_swift_mangling(constrained, &limits()),
-            SwiftManglingEvidence::Supported { entity, .. }
-                if !entity.generic_requirements.is_empty()
-        ));
+        let constrained = "$s14GenericFixture7resolveyxxAA6MarkerRzlF";
+        let constrained = decode_swift_mangling(constrained, &limits());
+        assert!(
+            matches!(
+                &constrained,
+                SwiftManglingEvidence::Supported { entity, .. }
+                    if !entity.generic_requirements.is_empty()
+            ),
+            "{constrained:#?}"
+        );
+
+        let accessor = "$s15GenericAccessor3BoxVyxqd__cAA6MarkerRd__luig";
+        let accessor = decode_swift_mangling(accessor, &limits());
+        assert!(
+            matches!(
+                &accessor,
+                SwiftManglingEvidence::Supported { entity, .. }
+                    if entity.callable_kind == Some(SwiftCallableKind::SubscriptGet)
+                        && !entity.generic_requirements.is_empty()
+            ),
+            "{accessor:#?}"
+        );
     }
 }

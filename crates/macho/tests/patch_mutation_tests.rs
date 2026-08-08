@@ -173,17 +173,13 @@ fn zero_fill_dry_run_never_writes_and_reports_no_file_offset() {
 }
 
 #[test]
-fn section_refuses_missing_duplicate_invalid_alignment_and_no_slack() {
+fn section_refuses_duplicate_invalid_alignment_and_no_slack() {
     let input = write_macho_fixture(
         &macho_test_support::signable_thin64_x86_64(2),
         "section-refusal",
         false,
     );
-    for spec in [
-        "__MISSING,__x,0,1",
-        "__TEXT,__text,0,1",
-        "__LINKEDIT,__x,32,1",
-    ] {
+    for spec in ["__TEXT,__text,0,1", "__LINKEDIT,__x,32,1"] {
         let output = run_cli([
             "patch",
             input.path().to_str().expect("path"),
@@ -222,6 +218,46 @@ fn section_refuses_missing_duplicate_invalid_alignment_and_no_slack() {
     ]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("ambiguous"));
+}
+
+#[test]
+fn missing_segment_name_creates_a_reparseable_aligned_segment() {
+    let input = write_macho_fixture(
+        &macho_test_support::signable_thin64_x86_64(2),
+        "new-segment-input",
+        false,
+    );
+    let output_path = temp_file_path("new-segment-output");
+    let output = run_cli([
+        "patch",
+        "--format",
+        "json",
+        input.path().to_str().expect("path"),
+        "--add-zerofill-section",
+        "__NEW,__scratch,4,0x20",
+        "--output",
+        output_path.to_str().expect("path"),
+    ]);
+    let report = stdout_json(&output);
+    assert_eq!(report["data"]["written"], true);
+
+    let bytes = std::fs::read(&output_path).expect("output");
+    let container = macho::parse(&bytes).expect("reparse output");
+    let macho = container.first_macho().expect("image");
+    let segment = macho
+        .segments()
+        .iter()
+        .find(|segment| segment.name() == "__NEW")
+        .expect("new segment");
+    let section = segment
+        .sections()
+        .iter()
+        .find(|section| section.section_name() == "__scratch")
+        .expect("new section");
+    assert_eq!(section.size(), 0x20);
+    assert_eq!(section.offset().as_usize(), 0);
+    assert_eq!(segment.vm_addr().0 % 0x1000, 0);
+    let _ = std::fs::remove_file(output_path);
 }
 
 #[test]

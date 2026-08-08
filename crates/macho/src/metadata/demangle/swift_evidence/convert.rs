@@ -371,32 +371,36 @@ pub(super) fn accessor_entity(
             ));
         }
     };
-    let module = required_text(accessor.module(), "accessor module", limits)?;
+    let module = required_text(
+        accessor
+            .module()
+            .or_else(|| accessor.context().module())
+            .or_else(|| {
+                accessor
+                    .raw()
+                    .descendants()
+                    .find(|node| node.kind() == NodeKind::Module)
+                    .and_then(|node| node.text())
+            }),
+        "accessor module",
+        limits,
+    )?;
     let base_name = required_text(accessor.property_name(), "accessor property name", limits)?;
-    let property_type = accessor.property_type().ok_or_else(|| {
-        (
-            SwiftManglingGap::UnsupportedRepresentation,
-            "accessor property type is absent".into(),
-        )
-    })?;
     let (declaration_path, declaration) = accessor_context(accessor, &module, limits)?;
     let representation = if declaration.is_some() {
         SwiftFunctionRepresentation::Method
     } else {
         SwiftFunctionRepresentation::Thin
     };
-    let property_type = convert_type(property_type, limits)?;
     let setter = matches!(
         callable_kind,
         SwiftCallableKind::PropertySet | SwiftCallableKind::SubscriptSet
     );
-    Ok(SwiftMangledEntityEvidence {
-        module,
-        declaration_path,
-        declaration,
-        callable_kind: Some(callable_kind),
-        base_name: Some(base_name),
-        formal_type: Some(SwiftFormalTypeEvidence {
+    let formal_type = accessor
+        .property_type()
+        .map(|property_type| convert_type(property_type, limits))
+        .transpose()?
+        .map(|property_type| SwiftFormalTypeEvidence {
             representation,
             parameters: setter
                 .then(|| SwiftFormalParameter {
@@ -415,7 +419,14 @@ pub(super) fn accessor_entity(
             },
             r#async: false,
             throwing: false,
-        }),
+        });
+    Ok(SwiftMangledEntityEvidence {
+        module,
+        declaration_path,
+        declaration,
+        callable_kind: Some(callable_kind),
+        base_name: Some(base_name),
+        formal_type,
         generic_requirements,
         variant_role: Some(role),
         specialization: None,

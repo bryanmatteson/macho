@@ -4,6 +4,8 @@ use std::num::NonZeroUsize;
 use macho::analysis::disassembly::{
     DecodeMode, DisassemblyRequest, DisassemblySelection, SliceSelection, disassemble,
 };
+use macho::analysis::program::{ProgramRecoveryLimits, RecoveredProgram};
+use macho::analysis::recovery::{RecoveryAddressRange, RecoveryGuide};
 use macho::analysis::{AnalysisDomain, AnalysisPlan, Analyzer};
 use macho::core::{ParseLimits, ParseMode, ParseOptions};
 use macho::insn::{
@@ -101,6 +103,68 @@ fn bounded_disassembly(c: &mut Criterion) {
     });
 }
 
+fn incremental_control_flow(c: &mut Criterion) {
+    let bytes = macho_test_support::disassembly_x86_64();
+    let container = macho::parse(&bytes).expect("fixture parses");
+    let image = container.first_macho().expect("fixture has image");
+    let base = RecoveredProgram::recover_all(image, ProgramRecoveryLimits::default())
+        .expect("fixture recovers");
+    let functions = base.functions().expect("full recovery selects functions");
+    assert!(
+        functions.functions().len() > 1,
+        "fixture must contain multiple recovered functions"
+    );
+    let selected = functions
+        .functions()
+        .first()
+        .expect("fixture has a recovered function");
+    let extent = selected.extent.expect("fixture function has an extent");
+    let guide = RecoveryGuide::builder(base.image().clone())
+        .function_ranges(
+            selected.entry,
+            vec![
+                RecoveryAddressRange::new(extent.start, extent.end_exclusive)
+                    .expect("fixture extent is non-empty"),
+            ],
+        )
+        .expect("fixture range is valid guidance")
+        .build();
+    let cold = RecoveredProgram::recover_with_guide(image, base.request().clone(), &guide)
+        .expect("cold guided recovery");
+    let warm = RecoveredProgram::refine(image, &base, &guide).expect("warm guided refinement");
+    assert_eq!(warm, cold, "warm refinement must preserve cold truth");
+    assert!(
+        base.control_flow()
+            .unwrap()
+            .functions()
+            .iter()
+            .zip(warm.control_flow().unwrap().functions())
+            .any(|(before, after)| before == after),
+        "fixture must retain at least one unaffected function graph"
+    );
+
+    let mut group = c.benchmark_group("incremental_control_flow");
+    group.bench_function("cold_recover_with_guide", |b| {
+        b.iter(|| {
+            RecoveredProgram::recover_with_guide(
+                std::hint::black_box(image),
+                base.request().clone(),
+                std::hint::black_box(&guide),
+            )
+        })
+    });
+    group.bench_function("warm_refine_from_retained_base", |b| {
+        b.iter(|| {
+            RecoveredProgram::refine(
+                std::hint::black_box(image),
+                std::hint::black_box(&base),
+                std::hint::black_box(&guide),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn patch_preview(c: &mut Criterion) {
     let (thin, _) = fixtures();
     let container = macho::parse(&thin).expect("fixture parses");
@@ -163,6 +227,7 @@ criterion_group!(
     selective_analysis,
     reconstruction_and_diff,
     bounded_disassembly,
+    incremental_control_flow,
     patch_preview,
     instruction_codecs
 );

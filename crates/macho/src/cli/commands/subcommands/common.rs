@@ -115,7 +115,7 @@ pub fn analyze_selected_domain(
             let state = slice
                 .domains
                 .get(&domain)
-                .expect("all schema-v3 domains have a state");
+                .expect("all schema-v1 domains have a state");
             let value = match state {
                 DomainState::Complete { value, .. } => value.value().clone(),
                 DomainState::Failed { error, .. } => {

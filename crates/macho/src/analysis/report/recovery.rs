@@ -1002,8 +1002,9 @@ mod tests {
     }
 
     #[test]
-    fn recovery_schema_three_rejects_version_two_artifacts() {
-        assert!(serde_json::from_value::<RecoverySchemaVersion>(serde_json::json!(3)).is_ok());
+    fn recovery_schema_one_rejects_other_artifacts() {
+        assert!(serde_json::from_value::<RecoverySchemaVersion>(serde_json::json!(1)).is_ok());
+        assert!(serde_json::from_value::<RecoverySchemaVersion>(serde_json::json!(0)).is_err());
         assert!(serde_json::from_value::<RecoverySchemaVersion>(serde_json::json!(2)).is_err());
     }
 }

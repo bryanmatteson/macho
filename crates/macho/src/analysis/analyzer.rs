@@ -1,4 +1,4 @@
-//! Dependency-driven, selective analysis and schema-v3 snapshots.
+//! Dependency-driven, selective analysis and schema-v1 snapshots.
 
 mod payload;
 mod typed;
@@ -20,7 +20,7 @@ use crate::analysis::planner::{
 };
 
 /// The SNAPSHOT_SCHEMA_VERSION constant.
-pub const SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+pub const SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 
 const ADVISORY_DEPENDENCY_FAILED_CODE: &str = "analysis.dependency.advisory_failed";
 const ADVISORY_DEPENDENCY_UNSUPPORTED_CODE: &str = "analysis.dependency.advisory_unsupported";
@@ -142,7 +142,9 @@ impl SnapshotDocument {
             .get("schema_version")
             .and_then(Value::as_u64)
             .ok_or_else(|| {
-                snapshot_error("snapshot is unversioned; regenerate it with macho 0.2")
+                snapshot_error(
+                    "snapshot is unversioned; regenerate it with the current macho build",
+                )
             })?;
         if version != SNAPSHOT_SCHEMA_VERSION as u64 {
             return Err(snapshot_error(format!(
@@ -151,7 +153,7 @@ impl SnapshotDocument {
         }
         let document: Self = serde_json::from_value(value).map_err(|error| {
             snapshot_error(format!(
-                "invalid schema-v3 snapshot: {error}; regenerate it"
+                "invalid schema-v1 snapshot: {error}; regenerate it"
             ))
         })?;
         document.validate()?;

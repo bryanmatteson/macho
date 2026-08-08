@@ -1,6 +1,7 @@
 mod encoder;
 
 use crate::mutate::format::io::Endian;
+use crate::mutate::model::header::Bitness;
 use crate::mutate::model::load_command::LoadCommand;
 use crate::mutate::model::macho_file::MachoFile;
 use crate::mutate::model::segment::Segment;
@@ -29,6 +30,8 @@ pub(crate) fn build_edited_binary(
     commands: &[(LoadCommand, Vec<u8>)],
     segments: &[EditableSegment<'_>],
 ) -> Result<Vec<u8>> {
+    validate_added_section_ownership(original, commands, segments)?;
+
     let endian = original.endian();
     let header_size = original.bitness().header_size();
     let original_header_end = header_size
@@ -52,7 +55,7 @@ pub(crate) fn build_edited_binary(
         .ok_or_else(|| Error::invalid("new load-command range overflow"))?;
     let payload_start = first_occupied_offset(original, original_header_end);
     if new_header_end > payload_start {
-        return Err(Error::invalid(format!(
+        return Err(Error::unsupported(format!(
             "insufficient load-command slack: commands end at {new_header_end:#x}, but existing payload begins at {payload_start:#x}; relocating existing payload is unsupported"
         )));
     }
@@ -87,6 +90,254 @@ pub(crate) fn build_edited_binary(
     }
 
     Ok(output)
+}
+
+#[derive(Debug)]
+struct ProtectedFileRange {
+    start: u64,
+    end: u64,
+    owner: String,
+}
+
+/// Prove that bytes written for added sections do not already belong to a
+/// modeled file-backed structure. Zero bytes are not evidence of free space:
+/// an `LC_NOTE`, symbol table, relocation table, or another command-owned blob
+/// may legitimately contain only zeroes. This check belongs at final build so
+/// it is independent of the order in which editor operations were staged.
+fn validate_added_section_ownership(
+    original: &MachoFile<'_>,
+    commands: &[(LoadCommand, Vec<u8>)],
+    segments: &[EditableSegment<'_>],
+) -> Result<()> {
+    fn add_range(
+        ranges: &mut Vec<ProtectedFileRange>,
+        start: u64,
+        count: u64,
+        stride: u64,
+        owner: impl Into<String>,
+    ) -> Result<()> {
+        if count == 0 || stride == 0 {
+            return Ok(());
+        }
+        let size = count
+            .checked_mul(stride)
+            .ok_or_else(|| Error::invalid("modeled file range size overflow"))?;
+        let end = start
+            .checked_add(size)
+            .ok_or_else(|| Error::invalid("modeled file range end overflow"))?;
+        ranges.push(ProtectedFileRange {
+            start,
+            end,
+            owner: owner.into(),
+        });
+        Ok(())
+    }
+
+    let mut ranges = Vec::new();
+    for segment in original.segments() {
+        add_range(
+            &mut ranges,
+            segment.file_offset().0,
+            segment.file_size(),
+            1,
+            format!("segment {}", segment.name()),
+        )?;
+        for section in segment.sections() {
+            add_range(
+                &mut ranges,
+                section.relocation_offset().0,
+                u64::from(section.relocation_count()),
+                8,
+                format!(
+                    "relocations for section {},{}",
+                    segment.name(),
+                    section.section_name()
+                ),
+            )?;
+        }
+    }
+
+    let symbol_size = match original.bitness() {
+        Bitness::Bits32 => 12,
+        Bitness::Bits64 => 16,
+    };
+    let module_size = match original.bitness() {
+        Bitness::Bits32 => 52,
+        Bitness::Bits64 => 56,
+    };
+    let input_len = u64::try_from(original.bytes().len())
+        .map_err(|_| Error::invalid("input length exceeds u64"))?;
+    let mut has_unknown_command = false;
+
+    for (command, _) in commands {
+        match command {
+            LoadCommand::Symtab(data) => {
+                add_range(
+                    &mut ranges,
+                    data.sym_offset.into(),
+                    data.nsyms.into(),
+                    symbol_size,
+                    "LC_SYMTAB symbols",
+                )?;
+                add_range(
+                    &mut ranges,
+                    data.str_offset.into(),
+                    data.str_size.into(),
+                    1,
+                    "LC_SYMTAB strings",
+                )?;
+            }
+            LoadCommand::Dysymtab(data) => {
+                for (offset, count, stride, owner) in [
+                    (data.tocoff, data.ntoc, 8, "LC_DYSYMTAB table of contents"),
+                    (
+                        data.modtaboff,
+                        data.nmodtab,
+                        module_size,
+                        "LC_DYSYMTAB modules",
+                    ),
+                    (
+                        data.extrefsymoff,
+                        data.nextrefsyms,
+                        4,
+                        "LC_DYSYMTAB external references",
+                    ),
+                    (
+                        data.indirectsymoff,
+                        data.nindirectsyms,
+                        4,
+                        "LC_DYSYMTAB indirect symbols",
+                    ),
+                    (
+                        data.extreloff,
+                        data.nextrel,
+                        8,
+                        "LC_DYSYMTAB external relocations",
+                    ),
+                    (
+                        data.locreloff,
+                        data.nlocrel,
+                        8,
+                        "LC_DYSYMTAB local relocations",
+                    ),
+                ] {
+                    add_range(&mut ranges, offset.into(), count.into(), stride, owner)?;
+                }
+            }
+            LoadCommand::DyldInfo(data) | LoadCommand::DyldInfoOnly(data) => {
+                for (offset, size, owner) in [
+                    (data.rebase_off, data.rebase_size, "LC_DYLD_INFO rebases"),
+                    (data.bind_off, data.bind_size, "LC_DYLD_INFO bindings"),
+                    (
+                        data.weak_bind_off,
+                        data.weak_bind_size,
+                        "LC_DYLD_INFO weak bindings",
+                    ),
+                    (
+                        data.lazy_bind_off,
+                        data.lazy_bind_size,
+                        "LC_DYLD_INFO lazy bindings",
+                    ),
+                    (data.export_off, data.export_size, "LC_DYLD_INFO exports"),
+                ] {
+                    add_range(&mut ranges, offset.into(), size.into(), 1, owner)?;
+                }
+            }
+            LoadCommand::CodeSignature(data)
+            | LoadCommand::SegmentSplitInfo(data)
+            | LoadCommand::FunctionStarts(data)
+            | LoadCommand::DataInCode(data)
+            | LoadCommand::DylibCodeSignDrs(data)
+            | LoadCommand::LinkerOptimizationHint(data)
+            | LoadCommand::DyldExportsTrie(data)
+            | LoadCommand::DyldChainedFixups(data)
+            | LoadCommand::AtomInfo(data)
+            | LoadCommand::FunctionVariants(data)
+            | LoadCommand::FunctionVariantFixups(data) => add_range(
+                &mut ranges,
+                data.data_offset.into(),
+                data.data_size.into(),
+                1,
+                command.name(),
+            )?,
+            LoadCommand::EncryptionInfo(data) | LoadCommand::EncryptionInfo64(data) => add_range(
+                &mut ranges,
+                data.crypt_offset.into(),
+                data.crypt_size.into(),
+                1,
+                command.name(),
+            )?,
+            LoadCommand::TwolevelHints(data) => add_range(
+                &mut ranges,
+                data.offset.into(),
+                data.nhints.into(),
+                4,
+                "LC_TWOLEVEL_HINTS",
+            )?,
+            LoadCommand::Note(data) => add_range(
+                &mut ranges,
+                data.offset,
+                data.size,
+                1,
+                format!("LC_NOTE {}", data.data_owner),
+            )?,
+            LoadCommand::FilesetEntry(data) => {
+                // A fileset command gives the nested image's start, not its
+                // length. Conservatively protect it through the original EOF.
+                if data.file_offset < input_len {
+                    add_range(
+                        &mut ranges,
+                        data.file_offset,
+                        input_len - data.file_offset,
+                        1,
+                        format!("LC_FILESET_ENTRY {}", data.entry_id),
+                    )?;
+                }
+            }
+            LoadCommand::Unknown(_) => has_unknown_command = true,
+            _ => {}
+        }
+    }
+
+    for section in segments.iter().flat_map(|segment| &segment.added_sections) {
+        let SectionContent::FileBacked(bytes) = section.request.content() else {
+            continue;
+        };
+        let write_end =
+            section
+                .file_offset
+                .checked_add(u64::try_from(bytes.len()).map_err(|_| {
+                    Error::invalid("new section length cannot be represented as u64")
+                })?)
+                .ok_or_else(|| Error::invalid("new section payload range overflow"))?
+                .min(input_len);
+        if write_end <= section.file_offset {
+            continue;
+        }
+        if has_unknown_command {
+            return Err(Error::unsupported(format!(
+                "cannot place section {},{} in existing file bytes while an unknown load command may own file ranges",
+                section.request.segment_name(),
+                section.request.section_name()
+            )));
+        }
+        if let Some(protected) = ranges
+            .iter()
+            .find(|protected| protected.start < write_end && section.file_offset < protected.end)
+        {
+            return Err(Error::unsupported(format!(
+                "cannot place section {},{} in {:#x}..{write_end:#x}: the range overlaps {} at {:#x}..{:#x}",
+                section.request.segment_name(),
+                section.request.section_name(),
+                section.file_offset,
+                protected.owner,
+                protected.start,
+                protected.end
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Return the first byte that is known to be payload rather than command slack.

@@ -1,5 +1,7 @@
 use super::*;
-use crate::dyld_cache::parse::{IMAGE_INFO_SIZE, IMAGE_TEXT_INFO_SIZE, MAPPING_INFO_SIZE};
+use crate::dyld_cache::parse::{
+    IMAGE_INFO_SIZE, IMAGE_TEXT_INFO_SIZE, MAPPING_AND_SLIDE_INFO_SIZE, MAPPING_INFO_SIZE,
+};
 
 const FAMILY_BASE: u64 = 0x1_0000_0000;
 const IMAGE_VA: u64 = FAMILY_BASE + 0x1400;
@@ -10,6 +12,14 @@ fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
 
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32_be(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+fn put_u64_be(bytes: &mut [u8], offset: usize, value: u64) {
+    bytes[offset..offset + 8].copy_from_slice(&value.to_be_bytes());
 }
 
 fn put_name(bytes: &mut [u8], offset: usize, name: &str) {
@@ -155,9 +165,9 @@ fn make_v1_cache_with_local_symbols() -> Vec<u8> {
     put_u32(&mut data, 0x514, 1);
     put_u32(&mut data, 0x518, 1);
     put_name(&mut data, 0x528, "\0local\0");
-    put_u32(&mut data, 0x530, 0x1400);
-    put_u32(&mut data, 0x534, 0);
-    put_u32(&mut data, 0x538, 1);
+    put_u64(&mut data, 0x530, 0x1400);
+    put_u32(&mut data, 0x538, 0);
+    put_u32(&mut data, 0x53c, 1);
     data
 }
 
@@ -324,6 +334,64 @@ fn make_modern_cache(arch: &str) -> Vec<u8> {
     data
 }
 
+fn make_v0_powerpc_cache() -> Vec<u8> {
+    let mapping_offset = 32_u32;
+    let images_offset = mapping_offset + MAPPING_INFO_SIZE as u32;
+    let path_offset = images_offset + IMAGE_INFO_SIZE as u32;
+    let image_va = 0x9000_0000_u64;
+    let image_file_offset = 0x1000_u64;
+    let path = b"/usr/lib/libSystem.B.dylib\0";
+    let mut data = vec![0_u8; 0x2000];
+    data[..16].copy_from_slice(b"dyld_v0     ppc\0");
+    put_u32_be(&mut data, 16, mapping_offset);
+    put_u32_be(&mut data, 20, 1);
+    put_u32_be(&mut data, 24, images_offset);
+    put_u32_be(&mut data, 28, 1);
+    put_u64_be(&mut data, mapping_offset as usize, image_va);
+    put_u64_be(&mut data, mapping_offset as usize + 8, 0x1000);
+    put_u64_be(&mut data, mapping_offset as usize + 16, image_file_offset);
+    put_u32_be(&mut data, mapping_offset as usize + 24, 5);
+    put_u32_be(&mut data, mapping_offset as usize + 28, 5);
+    put_u64_be(&mut data, images_offset as usize, image_va);
+    put_u32_be(&mut data, images_offset as usize + 24, path_offset);
+    data[path_offset as usize..path_offset as usize + path.len()].copy_from_slice(path);
+    data
+}
+
+fn make_extended_mapping_cache() -> Vec<u8> {
+    let mapping_offset = 0x228_usize;
+    let extended_offset = mapping_offset + MAPPING_INFO_SIZE;
+    let tpro_offset = extended_offset + MAPPING_AND_SLIDE_INFO_SIZE;
+    let address = 0x1_8000_0000_u64;
+    let mut data = vec![0_u8; 0x800];
+    cache_magic(&mut data, "arm64e");
+    put_u32(&mut data, 16, mapping_offset as u32);
+    put_u32(&mut data, 20, 1);
+    put_u32(&mut data, 0x138, extended_offset as u32);
+    put_u32(&mut data, 0x13c, 1);
+    put_u32(&mut data, 0x200, tpro_offset as u32);
+    put_u32(&mut data, 0x204, 1);
+
+    put_u64(&mut data, mapping_offset, address);
+    put_u64(&mut data, mapping_offset + 8, 0x400);
+    put_u64(&mut data, mapping_offset + 16, 0x400);
+    put_u32(&mut data, mapping_offset + 24, 3);
+    put_u32(&mut data, mapping_offset + 28, 3);
+
+    put_u64(&mut data, extended_offset, address);
+    put_u64(&mut data, extended_offset + 8, 0x400);
+    put_u64(&mut data, extended_offset + 16, 0x400);
+    put_u64(&mut data, extended_offset + 24, 0x380);
+    put_u64(&mut data, extended_offset + 32, 0x10);
+    put_u64(&mut data, extended_offset + 40, 1 << 6);
+    put_u32(&mut data, extended_offset + 48, 3);
+    put_u32(&mut data, extended_offset + 52, 3);
+
+    put_u64(&mut data, tpro_offset, address + 0x100);
+    put_u64(&mut data, tpro_offset + 8, 0x80);
+    data
+}
+
 #[test]
 fn parse_old_format_cache() {
     let data = make_minimal_cache("arm64e");
@@ -333,6 +401,21 @@ fn parse_old_format_cache() {
     assert_eq!(cache.images().len(), 1);
     assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
     assert_eq!(cache.header.generation, DyldCacheHeaderGeneration::Legacy);
+    assert_eq!(cache.header.format_version, DyldCacheFormatVersion::V1);
+    assert_eq!(cache.header.byte_order, DyldCacheByteOrder::Little);
+}
+
+#[test]
+fn parse_historical_v0_big_endian_powerpc_cache() {
+    let data = make_v0_powerpc_cache();
+    let cache = parse_dyld_cache(&data).expect("parse historical PowerPC cache");
+    assert_eq!(cache.arch(), "ppc");
+    assert_eq!(cache.header.format_version, DyldCacheFormatVersion::V0);
+    assert_eq!(cache.header.byte_order, DyldCacheByteOrder::Big);
+    assert_eq!(cache.mappings()[0].address, 0x9000_0000);
+    assert_eq!(cache.mappings()[0].file_offset, 0x1000);
+    assert_eq!(cache.images()[0].address, 0x9000_0000);
+    assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
 }
 
 #[test]
@@ -345,6 +428,49 @@ fn parse_modern_format_cache() {
     assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
     assert_eq!(cache.images()[0].text_size, 4096);
     assert_eq!(cache.images()[0].address, 0x1_8000_0000);
+}
+
+#[test]
+fn incomplete_images_text_coordinates_are_rejected() {
+    let mut data = make_modern_cache("arm64e");
+    put_u64(&mut data, 0x90, 0);
+    let error = parse_dyld_cache(&data).expect_err("imagesText count is required with its offset");
+    assert!(error.to_string().contains("imagesText offset and count"));
+}
+
+#[test]
+fn current_extended_mappings_and_tpro_ranges_are_retained() {
+    let data = make_extended_mapping_cache();
+    let cache = parse_dyld_cache(&data).expect("parse current extended cache layout");
+    let mapping = &cache.mappings()[0];
+    assert_eq!(mapping.slide_info_file_offset, Some(0x380));
+    assert_eq!(mapping.slide_info_file_size, Some(0x10));
+    assert_eq!(mapping.flags, Some(1 << 6));
+    assert_eq!(
+        cache.tpro_mappings,
+        [CacheTproMapping {
+            address: 0x1_8000_0100,
+            size: 0x80,
+        }]
+    );
+
+    let mut mismatch = data.clone();
+    put_u64(&mut mismatch, 0x228 + MAPPING_INFO_SIZE + 8, 0x200);
+    let error = parse_dyld_cache(&mismatch).expect_err("mapping tables disagree");
+    assert!(error.to_string().contains("disagrees"));
+
+    let mut escaped_tpro = data;
+    let tpro_offset = 0x228 + MAPPING_INFO_SIZE + MAPPING_AND_SLIDE_INFO_SIZE;
+    put_u64(&mut escaped_tpro, tpro_offset, 0x1_9000_0000);
+    let family = DyldCacheFamily::parse(
+        CacheMemberInput {
+            name: "primary",
+            data: &escaped_tpro,
+        },
+        [],
+    )
+    .expect_err("TPRO range outside mapped VM space");
+    assert!(family.to_string().contains("TPRO"));
 }
 
 #[test]
@@ -373,6 +499,49 @@ fn apple_header_generations_and_local_symbol_entry_widths_are_explicit() {
         DyldCacheHeaderGeneration::SubcacheV2
     );
     assert_eq!(cache.subcaches()[0].file_suffix, ".01");
+
+    // Apple's width transition is tied to the symbolFileUUID field boundary,
+    // before cacheSubType introduced suffix-bearing subcache records. Exercise
+    // the exact offsetof boundary, where the UUID itself is not yet readable.
+    let mut intermediate = vec![0_u8; 0x380];
+    cache_magic(&mut intermediate, "arm64e");
+    put_u32(&mut intermediate, 16, 0x190);
+    put_u64(&mut intermediate, 0x48, 0x300);
+    put_u64(&mut intermediate, 0x50, 0x40);
+    put_u32(&mut intermediate, 0x300, 24);
+    put_u32(&mut intermediate, 0x304, 1);
+    put_u32(&mut intermediate, 0x308, 40);
+    put_u32(&mut intermediate, 0x30c, 8);
+    put_u32(&mut intermediate, 0x310, 48);
+    put_u32(&mut intermediate, 0x314, 1);
+    put_name(&mut intermediate, 0x328, "\0local\0");
+    put_u64(&mut intermediate, 0x330, 0x1_0000_1400);
+    put_u32(&mut intermediate, 0x338, 0);
+    put_u32(&mut intermediate, 0x33c, 1);
+    let cache = parse_dyld_cache(&intermediate).expect("parse intermediate header layout");
+    assert_eq!(
+        cache.header.generation,
+        DyldCacheHeaderGeneration::SubcacheV1
+    );
+    assert_eq!(
+        cache.local_symbols.as_ref().unwrap().entries[0].dylib_offset,
+        0x1_0000_1400
+    );
+}
+
+#[test]
+fn current_image_array_wins_over_obsolete_nonzero_fields() {
+    let (mut primary, _, _) = make_family();
+    put_u32(&mut primary, 24, 0x340);
+    put_u32(&mut primary, 28, 1);
+    put_u64(&mut primary, 0x340, FAMILY_BASE + 0x88);
+    put_u32(&mut primary, 0x358, 0x360);
+    put_name(&mut primary, 0x360, "/obsolete/image");
+
+    let cache = parse_dyld_cache(&primary).expect("parse cache with obsolete image fields");
+    assert_eq!(cache.images().len(), 1);
+    assert_eq!(cache.images()[0].address, IMAGE_VA);
+    assert_eq!(cache.images()[0].path, "/usr/lib/libFixture.dylib");
 }
 
 #[test]
@@ -493,6 +662,19 @@ fn malformed_local_symbol_ranges_are_rejected() {
     put_u32(&mut symbols, 0x33c, 2);
     let error = parse_dyld_cache(&symbols).expect_err("entry exceeds nlist array");
     assert!(error.to_string().contains("nlist range"));
+}
+
+#[test]
+fn future_local_symbol_arch_and_zero_subcache_uuid_fail_closed() {
+    let mut unknown_arch = make_symbols_member([0x77; 16]);
+    cache_magic(&mut unknown_arch, "riscv64");
+    let error = parse_dyld_cache(&unknown_arch).expect_err("unknown local-symbol ABI");
+    assert_eq!(error.kind, DyldCacheErrorKind::Unsupported);
+
+    let mut zero_uuid = make_v1_cache_with_local_symbols();
+    zero_uuid[0x200..0x210].fill(0);
+    let error = parse_dyld_cache(&zero_uuid).expect_err("zero subcache UUID");
+    assert!(error.to_string().contains("zero UUID"));
 }
 
 #[test]

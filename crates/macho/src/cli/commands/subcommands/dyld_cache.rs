@@ -69,8 +69,12 @@ struct InfoDocument<'a> {
 #[derive(Serialize)]
 struct MemberDocument<'a> {
     name: &'a str,
+    kind: crate::dyld_cache::CacheFamilyMemberKind,
     uuid: String,
+    format_version: crate::dyld_cache::DyldCacheFormatVersion,
+    byte_order: crate::dyld_cache::DyldCacheByteOrder,
     mappings: &'a [crate::dyld_cache::CacheMapping],
+    tpro_mappings: &'a [crate::dyld_cache::CacheTproMapping],
 }
 
 #[derive(Serialize)]
@@ -127,7 +131,7 @@ fn map_declared_siblings(primary_path: &Path, cache: &DyldCache) -> Result<Vec<(
         .iter()
         .map(|entry| entry.file_suffix.clone())
         .collect::<Vec<_>>();
-    if cache.header.symbol_file_uuid != [0; 16] {
+    if cache.requires_symbols_member() {
         suffixes.push(".symbols".to_owned());
     }
     suffixes
@@ -163,8 +167,12 @@ fn print_info(
                 .iter()
                 .map(|member| MemberDocument {
                     name: member.name(),
+                    kind: member.kind(),
                     uuid: format_uuid(member.cache().header.uuid),
+                    format_version: member.cache().header.format_version,
+                    byte_order: member.cache().header.byte_order,
                     mappings: member.cache().mappings(),
+                    tpro_mappings: member.cache().tpro_mappings(),
                 })
                 .collect(),
         };
@@ -173,14 +181,21 @@ fn print_info(
     }
     writeln!(out, "dyld shared-cache family")?;
     writeln!(out, "  arch:     {}", family.primary().arch())?;
+    writeln!(
+        out,
+        "  format:   {:?} {:?}",
+        family.primary().header.format_version,
+        family.primary().header.byte_order
+    )?;
     writeln!(out, "  images:   {}", family.primary().images().len())?;
     writeln!(out, "  members:  {}", family.members().len())?;
     for (member_index, member) in family.members().iter().enumerate() {
         writeln!(out)?;
         writeln!(
             out,
-            "  member[{member_index}] {}  uuid={}",
+            "  member[{member_index}] {}  kind={:?} uuid={}",
             member.name(),
+            member.kind(),
             format_uuid(member.cache().header.uuid)
         )?;
         for (mapping_index, mapping) in member.cache().mappings().iter().enumerate() {
@@ -191,6 +206,14 @@ fn print_info(
                 mapping.address,
                 mapping.file_offset,
                 format_prot(mapping.init_prot)
+            )?;
+        }
+        for (mapping_index, mapping) in member.cache().tpro_mappings().iter().enumerate() {
+            let end = mapping.address + mapping.size;
+            writeln!(
+                out,
+                "    tpro[{mapping_index}]    {:#018x}..{end:#018x}",
+                mapping.address,
             )?;
         }
     }

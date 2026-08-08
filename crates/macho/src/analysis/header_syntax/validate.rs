@@ -483,9 +483,10 @@ fn collect_declared_types(
             }
         }
         Decl::Record { path, members, .. } => {
-            tags.insert(path_string(path));
+            let record = path_string(path);
+            tags.insert(record.clone());
             for member in members {
-                collect_declared_types(member, tags, classes, protocols);
+                collect_declared_types_in_namespace(member, &record, tags, classes, protocols);
             }
         }
         Decl::Forward { path, .. } | Decl::Alias { path, .. } => {
@@ -542,9 +543,10 @@ fn collect_declared_types_in_namespace(
         Decl::Record { path, members, .. } => {
             let path = path_string(path);
             tags.insert(path.clone());
-            tags.insert(format!("{namespace}::{path}"));
+            let record = format!("{namespace}::{path}");
+            tags.insert(record.clone());
             for member in members {
-                collect_declared_types_in_namespace(member, namespace, tags, classes, protocols);
+                collect_declared_types_in_namespace(member, &record, tags, classes, protocols);
             }
         }
         Decl::Forward { path, .. } | Decl::Alias { path, .. } => {

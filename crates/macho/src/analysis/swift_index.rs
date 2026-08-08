@@ -2,8 +2,9 @@
 
 use crate::core::model::macho_file::MachoFile;
 use crate::metadata::swift::evidence::{
-    MachoSwiftClassOverrideRecordV1, MachoSwiftClassVtableEntryV1, MachoSwiftRecordV1,
-    SwiftDecodeBatchV1, SwiftDecodeOutcomeV1, SwiftEvidenceLimits, decode_swift_strict,
+    MachoSwiftClassOverrideRecordV1, MachoSwiftClassTrailingLayoutV1, MachoSwiftClassVtableEntryV1,
+    MachoSwiftProtocolSignatureRequirementRecordV1, MachoSwiftRecordV1, SwiftDecodeBatchV1,
+    SwiftDecodeOutcomeV1, SwiftEvidenceLimits, decode_swift_strict,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -185,6 +186,18 @@ impl SwiftIndex {
         &self.batch.class_overrides
     }
 
+    /// Typed generic, resilient-superclass, and metadata-initialization layouts.
+    pub fn class_trailing_layouts(&self) -> &[MachoSwiftClassTrailingLayoutV1] {
+        &self.batch.class_trailing_layouts
+    }
+
+    /// Raw ABI generic-signature requirements retained per protocol descriptor.
+    pub fn protocol_signature_requirements(
+        &self,
+    ) -> &[MachoSwiftProtocolSignatureRequirementRecordV1] {
+        &self.batch.protocol_signature_requirements
+    }
+
     /// Overall completion state.
     pub const fn status(&self) -> SwiftIndexStatus {
         self.completeness.status
@@ -209,7 +222,10 @@ impl SwiftIndex {
             || self.completeness != batch_completeness(&self.batch)
             || self.batch.records.len() as u64 > self.limits.max_nominal_descriptors
             || self.batch.conformances.len() as u64 > self.limits.max_conformances
-            || self.batch.protocol_requirements.len() as u64 > self.limits.max_protocol_requirements
+            || self.batch.class_trailing_layouts.len() as u64 > self.limits.max_nominal_descriptors
+            || (self.batch.protocol_requirements.len() as u64)
+                .checked_add(self.batch.protocol_signature_requirements.len() as u64)
+                .is_none_or(|count| count > self.limits.max_protocol_requirements)
             || (self.batch.class_vtable_entries.len() as u64)
                 .checked_add(self.batch.class_overrides.len() as u64)
                 .is_none_or(|count| count > self.limits.max_dispatch_slots)
@@ -236,6 +252,19 @@ impl SwiftIndex {
             (pair[0].protocol_descriptor_va, pair[0].requirement_index)
                 < (pair[1].protocol_descriptor_va, pair[1].requirement_index)
         });
+        let signature_requirements_are_canonical = self
+            .batch
+            .protocol_signature_requirements
+            .windows(2)
+            .all(|pair| {
+                (pair[0].protocol_descriptor_va, pair[0].requirement_index)
+                    < (pair[1].protocol_descriptor_va, pair[1].requirement_index)
+            });
+        let class_layouts_are_canonical = self
+            .batch
+            .class_trailing_layouts
+            .windows(2)
+            .all(|pair| pair[0].class_descriptor_va < pair[1].class_descriptor_va);
         let vtables_are_canonical = self.batch.class_vtable_entries.windows(2).all(|pair| {
             (pair[0].class_descriptor_va, pair[0].slot_index)
                 < (pair[1].class_descriptor_va, pair[1].slot_index)
@@ -268,6 +297,8 @@ impl SwiftIndex {
             && conformances_are_canonical
             && associated_types_are_canonical
             && requirements_are_canonical
+            && signature_requirements_are_canonical
+            && class_layouts_are_canonical
             && vtables_are_canonical
             && overrides_are_canonical
             && nested_ordinals_are_canonical

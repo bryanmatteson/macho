@@ -23,23 +23,24 @@ pub(super) fn swift_conformance_list_entry_count(macho: &MachoFile<'_>) -> u64 {
         })
 }
 
+pub(super) struct ClassDispatchEvidence {
+    pub(super) layouts: Vec<MachoSwiftClassTrailingLayoutV1>,
+    pub(super) vtable_entries: Vec<MachoSwiftClassVtableEntryV1>,
+    pub(super) overrides: Vec<MachoSwiftClassOverrideRecordV1>,
+}
+
 pub(super) fn validate_class_dispatch(
     macho: &MachoFile<'_>,
     descriptors: &[ValidatedDescriptor],
     limits: &SwiftEvidenceLimits,
-) -> Result<
-    (
-        Vec<MachoSwiftClassVtableEntryV1>,
-        Vec<MachoSwiftClassOverrideRecordV1>,
-    ),
-    ClassDispatchValidationError,
-> {
+) -> Result<ClassDispatchEvidence, ClassDispatchValidationError> {
     const HAS_VTABLE: u32 = 0x8000_0000;
     const HAS_OVERRIDE_TABLE: u32 = 0x4000_0000;
     const HAS_RESILIENT_SUPERCLASS: u32 = 0x2000_0000;
     const METADATA_INITIALIZATION_MASK: u32 = 0x0003_0000;
     const IS_GENERIC: u32 = 0x80;
 
+    let mut layouts = Vec::new();
     let mut vtable_entries = Vec::new();
     let mut overrides = Vec::new();
     let mut attempted = 0_u64;
@@ -64,41 +65,26 @@ pub(super) fn validate_class_dispatch(
         if flags & 0x1f != 16 {
             continue;
         }
-        let mut cursor = descriptor.address.checked_add(44).ok_or_else(|| {
+        let cursor = descriptor.address.checked_add(44).ok_or_else(|| {
             class_dispatch_error(
                 attempted.saturating_add(1),
                 Some(descriptor.index),
                 "Swift class trailing-descriptor address overflowed",
             )
         })?;
-        if flags & IS_GENERIC != 0 {
-            cursor = skip_generic_context(macho, cursor, attempted, descriptor.index)?;
-        }
-        if flags & HAS_RESILIENT_SUPERCLASS != 0 {
-            cursor = cursor.checked_add(4).ok_or_else(|| {
-                class_dispatch_error(
-                    attempted.saturating_add(1),
-                    Some(descriptor.index),
-                    "Swift resilient-superclass trailing record overflowed",
-                )
-            })?;
-        }
-        cursor = match flags & METADATA_INITIALIZATION_MASK {
-            0 => Some(cursor),
-            // Singleton metadata initialization carries cache, incomplete
-            // metadata, and completion-function relative pointers.
-            0x0001_0000 => cursor.checked_add(12),
-            // Foreign metadata initialization carries one completion pointer.
-            0x0002_0000 => cursor.checked_add(4),
-            _ => None,
-        }
-        .ok_or_else(|| {
-            class_dispatch_unsupported(
-                attempted.saturating_add(1),
-                Some(descriptor.index),
-                "Swift class metadata-initialization trailing record is unsupported",
-            )
-        })?;
+        let (mut cursor, layout) = decode_class_trailing_layout(
+            macho,
+            descriptor.address,
+            descriptor.index,
+            flags,
+            cursor,
+            attempted,
+            IS_GENERIC,
+            HAS_RESILIENT_SUPERCLASS,
+            METADATA_INITIALIZATION_MASK,
+            limits,
+        )?;
+        layouts.push(layout);
         if flags & HAS_VTABLE != 0 {
             let vtable_header = macho.read_bytes_at_va(Va(cursor), 8).map_err(|error| {
                 class_dispatch_error(
@@ -355,63 +341,96 @@ pub(super) fn validate_class_dispatch(
             }
         }
     }
-    Ok((vtable_entries, overrides))
+    Ok(ClassDispatchEvidence {
+        layouts,
+        vtable_entries,
+        overrides,
+    })
 }
 
-fn skip_generic_context(
+#[allow(clippy::too_many_arguments)]
+fn decode_class_trailing_layout(
     macho: &MachoFile<'_>,
-    cursor: u64,
-    attempted: u64,
+    class_descriptor_va: u64,
     descriptor_index: u64,
-) -> Result<u64, ClassDispatchValidationError> {
-    let header = macho.read_bytes_at_va(Va(cursor), 8).map_err(|error| {
-        class_dispatch_error(
-            attempted.saturating_add(1),
-            Some(descriptor_index),
-            format!("Swift generic context header is truncated: {error}"),
-        )
-    })?;
-    let parameter_count = u64::from(
-        macho
-            .endian()
-            .read_u16(header[0..2].try_into().expect("generic parameter count")),
-    );
-    let requirement_count = u64::from(
-        macho
-            .endian()
-            .read_u16(header[2..4].try_into().expect("generic requirement count")),
-    );
-    let parameter_bytes = parameter_count
-        .checked_add(3)
-        .map(|value| value & !3)
-        .ok_or_else(|| {
+    flags: u32,
+    mut cursor: u64,
+    attempted: u64,
+    is_generic: u32,
+    has_resilient_superclass: u32,
+    metadata_initialization_mask: u32,
+    limits: &SwiftEvidenceLimits,
+) -> Result<(u64, MachoSwiftClassTrailingLayoutV1), ClassDispatchValidationError> {
+    let generic_context = if flags & is_generic != 0 {
+        let descriptor_va = cursor;
+        let header = macho.read_bytes_at_va(Va(cursor), 16).map_err(|error| {
             class_dispatch_error(
                 attempted.saturating_add(1),
                 Some(descriptor_index),
-                "Swift generic parameter descriptor length overflowed",
+                format!("Swift type-generic context header is truncated: {error}"),
             )
         })?;
-    let requirement_bytes = requirement_count.checked_mul(12).ok_or_else(|| {
-        class_dispatch_error(
-            attempted.saturating_add(1),
-            Some(descriptor_index),
-            "Swift generic requirement descriptor length overflowed",
-        )
-    })?;
-    let length = 8_u64
-        .checked_add(parameter_bytes)
-        .and_then(|value| value.checked_add(requirement_bytes))
-        .ok_or_else(|| {
-            class_dispatch_error(
+        let instantiation_cache_relative = macho
+            .endian()
+            .read_i32(header[0..4].try_into().expect("generic instantiation cache"));
+        let default_instantiation_pattern_relative = macho.endian().read_i32(
+            header[4..8]
+                .try_into()
+                .expect("generic instantiation pattern"),
+        );
+        let parameter_count = macho
+            .endian()
+            .read_u16(header[8..10].try_into().expect("generic parameter count"));
+        let requirement_count = macho
+            .endian()
+            .read_u16(header[10..12].try_into().expect("generic requirement count"));
+        let key_argument_count = macho
+            .endian()
+            .read_u16(header[12..14].try_into().expect("generic key argument count"));
+        let generic_flags = macho.endian().read_u16(
+            header[14..16]
+                .try_into()
+                .expect("generic context flags"),
+        );
+        if generic_flags & !0x7 != 0 {
+            return Err(class_dispatch_unsupported(
                 attempted.saturating_add(1),
                 Some(descriptor_index),
-                "Swift generic context length overflowed",
-            )
-        })?;
-    macho
-        .read_bytes_at_va(
+                "Swift generic context uses unknown trailing-layout flags",
+            ));
+        }
+        let parameter_bytes = u64::from(parameter_count)
+            .checked_add(3)
+            .map(|value| value & !3)
+            .ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic parameter descriptor length overflowed",
+                )
+            })?;
+        let requirement_bytes = u64::from(requirement_count)
+            .checked_mul(12)
+            .ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic requirement descriptor length overflowed",
+                )
+            })?;
+        let base_length = 16_u64
+            .checked_add(parameter_bytes)
+            .and_then(|value| value.checked_add(requirement_bytes))
+            .ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic context length overflowed",
+                )
+            })?;
+        macho.read_bytes_at_va(
             Va(cursor),
-            usize::try_from(length).map_err(|_| {
+            usize::try_from(base_length).map_err(|_| {
                 class_dispatch_error(
                     attempted.saturating_add(1),
                     Some(descriptor_index),
@@ -426,13 +445,387 @@ fn skip_generic_context(
                 format!("Swift generic context is truncated: {error}"),
             )
         })?;
-    cursor.checked_add(length).ok_or_else(|| {
-        class_dispatch_error(
-            attempted.saturating_add(1),
-            Some(descriptor_index),
-            "Swift generic context end overflowed",
-        )
-    })
+        cursor = cursor.checked_add(base_length).ok_or_else(|| {
+            class_dispatch_error(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                "Swift generic context end overflowed",
+            )
+        })?;
+
+        let (pack_count, shape_class_count) = if generic_flags & 0x1 != 0 {
+            let pack_header = macho.read_bytes_at_va(Va(cursor), 4).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift generic pack-shape header is truncated: {error}"),
+                )
+            })?;
+            let pack_count = macho
+                .endian()
+                .read_u16(pack_header[0..2].try_into().expect("generic pack count"));
+            let shape_class_count = macho.endian().read_u16(
+                pack_header[2..4]
+                    .try_into()
+                    .expect("generic shape-class count"),
+            );
+            if u64::from(pack_count) > limits.max_observations {
+                return Err(class_dispatch_budget_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic pack-shape count exceeds the observation limit",
+                ));
+            }
+            let pack_length = u64::from(pack_count)
+                .checked_mul(8)
+                .and_then(|value| value.checked_add(4))
+                .ok_or_else(|| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift generic pack-shape length overflowed",
+                    )
+                })?;
+            macho.read_bytes_at_va(
+                Va(cursor),
+                usize::try_from(pack_length).map_err(|_| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift generic pack-shape layout exceeds host limits",
+                    )
+                })?,
+            )
+            .map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift generic pack-shape layout is truncated: {error}"),
+                )
+            })?;
+            cursor = cursor.checked_add(pack_length).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic pack-shape end overflowed",
+                )
+            })?;
+            (pack_count, shape_class_count)
+        } else {
+            (0, 0)
+        };
+
+        let mut conditional_inverted_protocol_bits = 0_u16;
+        let mut conditional_inverted_protocol_requirement_counts = Vec::new();
+        if generic_flags & 0x2 != 0 {
+            let set = macho.read_bytes_at_va(Va(cursor), 2).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift conditional-inverted-protocol set is truncated: {error}"),
+                )
+            })?;
+            conditional_inverted_protocol_bits =
+                macho.endian().read_u16(set.try_into().expect("invertible protocol set"));
+            let count_len = u64::from(conditional_inverted_protocol_bits.count_ones())
+                .checked_mul(2)
+                .ok_or_else(|| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift conditional-inverted-protocol count length overflowed",
+                    )
+                })?;
+            let counts_va = cursor.checked_add(2).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift conditional-inverted-protocol count address overflowed",
+                )
+            })?;
+            let counts = macho
+                .read_bytes_at_va(
+                    Va(counts_va),
+                    usize::try_from(count_len).map_err(|_| {
+                        class_dispatch_error(
+                            attempted.saturating_add(1),
+                            Some(descriptor_index),
+                            "Swift conditional-inverted-protocol counts exceed host limits",
+                        )
+                    })?,
+                )
+                .map_err(|error| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        format!(
+                            "Swift conditional-inverted-protocol counts are truncated: {error}"
+                        ),
+                    )
+                })?;
+            conditional_inverted_protocol_requirement_counts = counts
+                .chunks_exact(2)
+                .map(|raw| macho.endian().read_u16(raw.try_into().unwrap()))
+                .collect();
+            if !conditional_inverted_protocol_requirement_counts
+                .windows(2)
+                .all(|window| window[0] <= window[1])
+            {
+                return Err(class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift conditional-inverted-protocol counts are not cumulative",
+                ));
+            }
+            let conditional_requirement_count = conditional_inverted_protocol_requirement_counts
+                .last()
+                .copied()
+                .unwrap_or(0);
+            if u64::from(conditional_requirement_count) > limits.max_observations {
+                return Err(class_dispatch_budget_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift conditional-inverted-protocol requirements exceed the observation limit",
+                ));
+            }
+            let counts_end = counts_va.checked_add(count_len).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift conditional-inverted-protocol counts overflowed",
+                )
+            })?;
+            let requirements_va = counts_end.checked_add(3).map(|value| value & !3).ok_or_else(
+                || {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift conditional-inverted-protocol alignment overflowed",
+                    )
+                },
+            )?;
+            let requirements_len = u64::from(conditional_requirement_count)
+                .checked_mul(12)
+                .ok_or_else(|| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift conditional-inverted-protocol requirement length overflowed",
+                    )
+                })?;
+            macho.read_bytes_at_va(
+                Va(requirements_va),
+                usize::try_from(requirements_len).map_err(|_| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift conditional-inverted-protocol requirements exceed host limits",
+                    )
+                })?,
+            )
+            .map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!(
+                        "Swift conditional-inverted-protocol requirements are truncated: {error}"
+                    ),
+                )
+            })?;
+            cursor = requirements_va
+                .checked_add(requirements_len)
+                .ok_or_else(|| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift conditional-inverted-protocol layout overflowed",
+                    )
+                })?;
+        }
+
+        let value_count = if generic_flags & 0x4 != 0 {
+            let value_header = macho.read_bytes_at_va(Va(cursor), 4).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift generic-value header is truncated: {error}"),
+                )
+            })?;
+            let value_count = macho
+                .endian()
+                .read_u32(value_header.try_into().expect("generic value count"));
+            if u64::from(value_count) > limits.max_observations {
+                return Err(class_dispatch_budget_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic-value count exceeds the observation limit",
+                ));
+            }
+            let value_length = u64::from(value_count)
+                .checked_mul(4)
+                .and_then(|value| value.checked_add(4))
+                .ok_or_else(|| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift generic-value layout length overflowed",
+                    )
+                })?;
+            macho.read_bytes_at_va(
+                Va(cursor),
+                usize::try_from(value_length).map_err(|_| {
+                    class_dispatch_error(
+                        attempted.saturating_add(1),
+                        Some(descriptor_index),
+                        "Swift generic-value layout exceeds host limits",
+                    )
+                })?,
+            )
+            .map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift generic-value layout is truncated: {error}"),
+                )
+            })?;
+            cursor = cursor.checked_add(value_length).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic-value layout end overflowed",
+                )
+            })?;
+            value_count
+        } else {
+            0
+        };
+
+        let length = cursor.checked_sub(descriptor_va).ok_or_else(|| {
+            class_dispatch_error(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                "Swift generic context length underflowed",
+            )
+        })?;
+        Some(MachoSwiftGenericContextLayoutV1 {
+            descriptor_va,
+            instantiation_cache_relative,
+            default_instantiation_pattern_relative,
+            parameter_count,
+            requirement_count,
+            key_argument_count,
+            flags: generic_flags,
+            pack_count,
+            shape_class_count,
+            conditional_inverted_protocol_bits,
+            conditional_inverted_protocol_requirement_counts,
+            value_count,
+            byte_len: u32::try_from(length).map_err(|_| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic context length exceeds the public record",
+                )
+            })?,
+        })
+    } else {
+        None
+    };
+    let (resilient_superclass_descriptor_va, resilient_superclass_type_reference_relative) =
+        if flags & has_resilient_superclass != 0 {
+            let descriptor_va = cursor;
+            let raw = macho.read_bytes_at_va(Va(cursor), 4).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift resilient-superclass record is truncated: {error}"),
+                )
+            })?;
+            let relative = macho.endian().read_i32(
+                raw.try_into()
+                    .expect("Swift resilient-superclass relative pointer"),
+            );
+            cursor = cursor.checked_add(4).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift resilient-superclass trailing record overflowed",
+                )
+            })?;
+            (Some(descriptor_va), Some(relative))
+        } else {
+            (None, None)
+        };
+    let metadata_initialization = match flags & metadata_initialization_mask {
+        0 => MachoSwiftMetadataInitializationLayoutV1::None,
+        0x0001_0000 => {
+            let descriptor_va = cursor;
+            let raw = macho.read_bytes_at_va(Va(cursor), 12).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift singleton metadata-initialization record is truncated: {error}"),
+                )
+            })?;
+            cursor = cursor.checked_add(12).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift singleton metadata-initialization record overflowed",
+                )
+            })?;
+            MachoSwiftMetadataInitializationLayoutV1::Singleton {
+                descriptor_va,
+                cache_relative: macho.endian().read_i32(raw[0..4].try_into().unwrap()),
+                incomplete_metadata_relative: macho
+                    .endian()
+                    .read_i32(raw[4..8].try_into().unwrap()),
+                completion_function_relative: macho
+                    .endian()
+                    .read_i32(raw[8..12].try_into().unwrap()),
+            }
+        }
+        0x0002_0000 => {
+            let descriptor_va = cursor;
+            let raw = macho.read_bytes_at_va(Va(cursor), 4).map_err(|error| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    format!("Swift foreign metadata-initialization record is truncated: {error}"),
+                )
+            })?;
+            cursor = cursor.checked_add(4).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift foreign metadata-initialization record overflowed",
+                )
+            })?;
+            MachoSwiftMetadataInitializationLayoutV1::Foreign {
+                descriptor_va,
+                completion_function_relative: macho.endian().read_i32(raw.try_into().unwrap()),
+            }
+        }
+        _ => {
+            return Err(class_dispatch_unsupported(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                "Swift class metadata-initialization trailing record is unsupported",
+            ));
+        }
+    };
+    Ok((
+        cursor,
+        MachoSwiftClassTrailingLayoutV1 {
+            class_descriptor_va,
+            flags,
+            generic_context,
+            resilient_superclass_descriptor_va,
+            resilient_superclass_type_reference_relative,
+            metadata_initialization,
+            dispatch_descriptor_va: cursor,
+        },
+    ))
 }
 
 fn class_method_kind(
@@ -661,13 +1054,15 @@ pub(super) fn validate_protocol_requirements(
                         "Swift protocol signature-requirement address overflowed",
                     )
                 })?;
-            let raw = macho.read_bytes_at_va(Va(descriptor_va), 12).map_err(|error| {
-                protocol_requirement_error(
-                    attempted,
-                    Some(descriptor.index),
-                    format!("Swift protocol signature requirement is truncated: {error}"),
-                )
-            })?;
+            let raw = macho
+                .read_bytes_at_va(Va(descriptor_va), 12)
+                .map_err(|error| {
+                    protocol_requirement_error(
+                        attempted,
+                        Some(descriptor.index),
+                        format!("Swift protocol signature requirement is truncated: {error}"),
+                    )
+                })?;
             signature_requirements.push(MachoSwiftProtocolSignatureRequirementRecordV1 {
                 protocol_descriptor_va: descriptor.address,
                 requirement_index: u32::try_from(requirement_index).map_err(|_| {
@@ -681,11 +1076,9 @@ pub(super) fn validate_protocol_requirements(
                 flags: macho
                     .endian()
                     .read_u32(raw[0..4].try_into().expect("generic requirement flags")),
-                parameter_relative: macho.endian().read_i32(
-                    raw[4..8]
-                        .try_into()
-                        .expect("generic requirement parameter"),
-                ),
+                parameter_relative: macho
+                    .endian()
+                    .read_i32(raw[4..8].try_into().expect("generic requirement parameter")),
                 constraint_relative: macho.endian().read_i32(
                     raw[8..12]
                         .try_into()
@@ -864,5 +1257,150 @@ fn protocol_requirement_unsupported(
             record_index,
             safe_detail,
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn image(bytes: &[u8]) -> MachoFile<'_> {
+        match crate::core::parse(bytes).expect("fixture parses") {
+            MachoContainer::Thin(macho) => macho,
+            MachoContainer::Fat(_) => panic!("expected thin image"),
+        }
+    }
+
+    #[test]
+    fn generic_resilient_and_metadata_initialization_layouts_are_typed() {
+        const BASE: usize = 0x130;
+        const VA: u64 = 0x1_0000_0130;
+        const GENERIC: u32 = 0x80;
+        const RESILIENT: u32 = 0x2000_0000;
+        const SINGLETON: u32 = 0x0001_0000;
+        let mut bytes = macho_test_support::disassembly_x86_64();
+        bytes[BASE..BASE + 4].copy_from_slice(&11_i32.to_le_bytes());
+        bytes[BASE + 4..BASE + 8].copy_from_slice(&12_i32.to_le_bytes());
+        bytes[BASE + 8..BASE + 16].copy_from_slice(&[2, 0, 1, 0, 3, 0, 0, 0]);
+        bytes[BASE + 32..BASE + 36].copy_from_slice(&17_i32.to_le_bytes());
+        bytes[BASE + 36..BASE + 40].copy_from_slice(&1_i32.to_le_bytes());
+        bytes[BASE + 40..BASE + 44].copy_from_slice(&2_i32.to_le_bytes());
+        bytes[BASE + 44..BASE + 48].copy_from_slice(&3_i32.to_le_bytes());
+        let macho = image(&bytes);
+        let (end, layout) = decode_class_trailing_layout(
+            &macho,
+            0x1_0000_0100,
+            0,
+            GENERIC | RESILIENT | SINGLETON,
+            VA,
+            0,
+            GENERIC,
+            RESILIENT,
+            0x0003_0000,
+            &SwiftEvidenceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(end, VA + 48);
+        assert_eq!(layout.dispatch_descriptor_va, end);
+        assert_eq!(
+            layout.generic_context,
+            Some(MachoSwiftGenericContextLayoutV1 {
+                descriptor_va: VA,
+                instantiation_cache_relative: 11,
+                default_instantiation_pattern_relative: 12,
+                parameter_count: 2,
+                requirement_count: 1,
+                key_argument_count: 3,
+                flags: 0,
+                pack_count: 0,
+                shape_class_count: 0,
+                conditional_inverted_protocol_bits: 0,
+                conditional_inverted_protocol_requirement_counts: Vec::new(),
+                value_count: 0,
+                byte_len: 32,
+            })
+        );
+        assert_eq!(layout.resilient_superclass_descriptor_va, Some(VA + 32));
+        assert_eq!(
+            layout.resilient_superclass_type_reference_relative,
+            Some(17)
+        );
+        assert!(matches!(
+            layout.metadata_initialization,
+            MachoSwiftMetadataInitializationLayoutV1::Singleton {
+                descriptor_va,
+                cache_relative: 1,
+                incomplete_metadata_relative: 2,
+                completion_function_relative: 3,
+            } if descriptor_va == VA + 36
+        ));
+
+        bytes[BASE + 48..BASE + 52].copy_from_slice(&29_i32.to_le_bytes());
+        let macho = image(&bytes);
+        let (foreign_end, foreign) = decode_class_trailing_layout(
+            &macho,
+            0x1_0000_0100,
+            0,
+            0x0002_0000,
+            VA + 48,
+            0,
+            GENERIC,
+            RESILIENT,
+            0x0003_0000,
+            &SwiftEvidenceLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(foreign_end, VA + 52);
+        assert!(matches!(
+            foreign.metadata_initialization,
+            MachoSwiftMetadataInitializationLayoutV1::Foreign {
+                descriptor_va,
+                completion_function_relative: 29,
+            } if descriptor_va == VA + 48
+        ));
+    }
+
+    #[test]
+    fn modern_generic_trailing_shapes_advance_to_the_dispatch_layout() {
+        const BASE: usize = 0x130;
+        const VA: u64 = 0x1_0000_0130;
+        const GENERIC: u32 = 0x80;
+        let mut bytes = macho_test_support::disassembly_x86_64();
+        bytes[BASE..BASE + 4].copy_from_slice(&11_i32.to_le_bytes());
+        bytes[BASE + 4..BASE + 8].copy_from_slice(&12_i32.to_le_bytes());
+        bytes[BASE + 8..BASE + 16].copy_from_slice(&[0, 0, 0, 0, 0, 0, 7, 0]);
+        bytes[BASE + 16..BASE + 20].copy_from_slice(&[1, 0, 1, 0]);
+        bytes[BASE + 28..BASE + 30].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[BASE + 30..BASE + 32].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[BASE + 32..BASE + 34].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[BASE + 60..BASE + 64].copy_from_slice(&2_u32.to_le_bytes());
+        let macho = image(&bytes);
+
+        let (end, layout) = decode_class_trailing_layout(
+            &macho,
+            0x1_0000_0100,
+            0,
+            GENERIC,
+            VA,
+            0,
+            GENERIC,
+            0x2000_0000,
+            0x0003_0000,
+            &SwiftEvidenceLimits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(end, VA + 72);
+        let generic = layout.generic_context.unwrap();
+        assert_eq!(generic.flags, 7);
+        assert_eq!((generic.pack_count, generic.shape_class_count), (1, 1));
+        assert_eq!(generic.conditional_inverted_protocol_bits, 3);
+        assert_eq!(
+            generic.conditional_inverted_protocol_requirement_counts,
+            vec![1, 2]
+        );
+        assert_eq!(generic.value_count, 2);
+        assert_eq!(generic.byte_len, 72);
+        assert_eq!(layout.dispatch_descriptor_va, VA + 72);
     }
 }

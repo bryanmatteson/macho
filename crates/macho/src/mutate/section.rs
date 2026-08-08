@@ -262,7 +262,7 @@ impl From<Segment> for EditableSegment<'_> {
 
 pub(crate) fn place_section<'data>(
     segments: &mut [EditableSegment<'data>],
-    input_len: usize,
+    input: &[u8],
     bitness: Bitness,
     request: AddSection<'data>,
 ) -> Result<()> {
@@ -337,8 +337,8 @@ pub(crate) fn place_section<'data>(
                 })
                 .map(|(_, segment)| segment.original.file_offset().0)
                 .min();
-            let input_len =
-                u64::try_from(input_len).map_err(|_| Error::invalid("input length exceeds u64"))?;
+            let input_len = u64::try_from(input.len())
+                .map_err(|_| Error::invalid("input length exceeds u64"))?;
             if next_file_segment.is_none()
                 && target.file_size == target.original.file_size()
                 && declared_end != input_len
@@ -368,10 +368,24 @@ pub(crate) fn place_section<'data>(
             if let Some(next_start) = next_file_segment
                 && file_end > next_start
             {
-                return Err(Error::invalid(format!(
-                    "cannot extend segment {} through {file_end:#x}: the next file-backed segment starts at {next_start:#x}",
+                return Err(Error::unsupported(format!(
+                    "cannot extend segment {} through {file_end:#x}: the next file-backed segment starts at {next_start:#x}, and relocating existing payload is unsupported",
                     request.segment_name()
                 )));
+            }
+            let occupied_end = file_end.min(input_len);
+            if occupied_end > declared_end {
+                let start = usize::try_from(declared_end)
+                    .map_err(|_| Error::invalid("candidate gap start exceeds usize"))?;
+                let end = usize::try_from(occupied_end)
+                    .map_err(|_| Error::invalid("candidate gap end exceeds usize"))?;
+                if input[start..end].iter().any(|byte| *byte != 0) {
+                    return Err(Error::unsupported(format!(
+                        "cannot place section {},{} in {declared_end:#x}..{occupied_end:#x}: the candidate inter-segment gap contains nonzero bytes whose ownership is unknown",
+                        request.segment_name(),
+                        request.section_name()
+                    )));
+                }
             }
             let relative = file_offset
                 .checked_sub(segment_file_start)
@@ -461,7 +475,7 @@ pub(crate) fn place_section<'data>(
         .min()
     {
         if new_vm_end > next_vm_start {
-            return Err(Error::invalid(format!(
+            return Err(Error::unsupported(format!(
                 "section {},{} would extend segment {} through {new_vm_end:#x}, overlapping the next segment at {next_vm_start:#x}",
                 request.segment_name(),
                 request.section_name(),

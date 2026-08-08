@@ -263,7 +263,7 @@ mod tests {
         let mismatched = serde_json::json!({
             "kind": "c_surface",
             "report_schema": 1,
-            "report": {"schema_version": 2, "slices": []}
+            "report": {"schema_version": 0, "slices": []}
         });
         assert!(serde_json::from_value::<DomainPayload>(mismatched).is_err());
     }

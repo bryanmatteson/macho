@@ -91,7 +91,7 @@ pub const PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION: u32 = 1;
 /// Current schema for examined-universe and stage completeness receipts.
 pub const PROGRAM_COMPLETENESS_SCHEMA_VERSION: u32 = 1;
 /// Current schema for durable whole-program Fact IR documents.
-pub const PROGRAM_FACT_IR_SCHEMA_VERSION: u32 = 2;
+pub const PROGRAM_FACT_IR_SCHEMA_VERSION: u32 = 1;
 
 /// Explicit limits for every independently selectable recovery module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2032,6 +2032,102 @@ pub struct RecoveredProgram {
     completeness: ProgramRecoveryCompleteness,
 }
 
+/// Wire version for operational program-recovery reuse receipts.
+///
+/// Reuse receipts describe how an immutable transition was computed. They are
+/// intentionally separate from durable program Fact IR because reuse does not
+/// change the recovered facts or their authority.
+pub const PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION: u32 = 1;
+
+/// Function-local reuse performed while rebuilding the control-flow stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ControlFlowReuseReceipt {
+    total_functions: u64,
+    reused_functions: u64,
+    rebuilt_functions: u64,
+}
+
+impl ControlFlowReuseReceipt {
+    /// Number of final function graphs in the recovered control-flow index.
+    pub const fn total_functions(&self) -> u64 {
+        self.total_functions
+    }
+
+    /// Number of final function graphs admitted from the prior program.
+    pub const fn reused_functions(&self) -> u64 {
+        self.reused_functions
+    }
+
+    /// Number of final function graphs recovered from the current image.
+    pub const fn rebuilt_functions(&self) -> u64 {
+        self.rebuilt_functions
+    }
+}
+
+/// Deterministic operational receipt for one immutable recovery transition.
+///
+/// A stage in `reused_stages` was copied as a whole. A stage in
+/// `rebuilt_stages` was executed again; the control-flow receipt can still
+/// report exact function-local reuse inside that rebuilt stage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProgramRecoveryReuseReceipt {
+    schema_version: u32,
+    reused_stages: BTreeSet<ProgramRecoveryStage>,
+    rebuilt_stages: BTreeSet<ProgramRecoveryStage>,
+    control_flow: Option<ControlFlowReuseReceipt>,
+}
+
+impl ProgramRecoveryReuseReceipt {
+    /// Operational receipt schema version.
+    pub const fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+
+    /// Executed stages copied whole from the prior immutable program.
+    pub fn reused_stages(&self) -> &BTreeSet<ProgramRecoveryStage> {
+        &self.reused_stages
+    }
+
+    /// Executed stages recomputed for the new immutable program.
+    pub fn rebuilt_stages(&self) -> &BTreeSet<ProgramRecoveryStage> {
+        &self.rebuilt_stages
+    }
+
+    /// Function-local detail when the transition includes control flow.
+    pub const fn control_flow(&self) -> Option<&ControlFlowReuseReceipt> {
+        self.control_flow.as_ref()
+    }
+}
+
+/// A recovered immutable program together with its operational reuse receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgramRecoveryTransition {
+    program: RecoveredProgram,
+    reuse_receipt: ProgramRecoveryReuseReceipt,
+}
+
+impl ProgramRecoveryTransition {
+    /// Recovered program produced by the transition.
+    pub const fn program(&self) -> &RecoveredProgram {
+        &self.program
+    }
+
+    /// Operational reuse evidence for this transition.
+    pub const fn reuse_receipt(&self) -> &ProgramRecoveryReuseReceipt {
+        &self.reuse_receipt
+    }
+
+    /// Consume the transition and return only the recovered program.
+    pub fn into_program(self) -> RecoveredProgram {
+        self.program
+    }
+
+    /// Consume the transition and return the program and receipt separately.
+    pub fn into_parts(self) -> (RecoveredProgram, ProgramRecoveryReuseReceipt) {
+        (self.program, self.reuse_receipt)
+    }
+}
+
 /// Immutable counterfactual preview containing both views under one exact
 /// request and budget set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2045,6 +2141,7 @@ pub struct RecoveryPreview {
 struct ProgramRecoveryReuse<'program> {
     prior: &'program RecoveredProgram,
     dirty: BTreeSet<ProgramRecoveryStage>,
+    control_flow_guidance: Option<ControlFlowRecoveryGuidance>,
 }
 
 #[derive(Default)]
@@ -2062,6 +2159,105 @@ impl ProgramRecoveryReuse<'_> {
     }
 }
 
+fn control_flow_reuse_receipt(
+    program: &RecoveredProgram,
+    reused_functions: u64,
+) -> Option<ControlFlowReuseReceipt> {
+    program.control_flow.as_ref().map(|control_flow| {
+        let total_functions = u64::try_from(control_flow.functions().len()).unwrap_or(u64::MAX);
+        let reused_functions = reused_functions.min(total_functions);
+        ControlFlowReuseReceipt {
+            total_functions,
+            reused_functions,
+            rebuilt_functions: total_functions.saturating_sub(reused_functions),
+        }
+    })
+}
+
+fn reuse_receipt_for_unchanged_program(program: &RecoveredProgram) -> ProgramRecoveryReuseReceipt {
+    let reused_functions = program.control_flow.as_ref().map_or(0, |control_flow| {
+        u64::try_from(control_flow.functions().len()).unwrap_or(u64::MAX)
+    });
+    ProgramRecoveryReuseReceipt {
+        schema_version: PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION,
+        reused_stages: program.executed.clone(),
+        rebuilt_stages: BTreeSet::new(),
+        control_flow: control_flow_reuse_receipt(program, reused_functions),
+    }
+}
+
+fn reuse_receipt_for_rebuilt_program(program: &RecoveredProgram) -> ProgramRecoveryReuseReceipt {
+    ProgramRecoveryReuseReceipt {
+        schema_version: PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION,
+        reused_stages: BTreeSet::new(),
+        rebuilt_stages: program.executed.clone(),
+        control_flow: control_flow_reuse_receipt(program, 0),
+    }
+}
+
+fn control_flow_guidance_from_guide(
+    guide: Option<&RecoveryGuide>,
+) -> Option<ControlFlowRecoveryGuidance> {
+    let guide = guide?;
+    let mut non_instruction_ranges = Vec::new();
+    let mut instruction_ranges = Vec::new();
+    let mut suppressed_edges = BTreeSet::new();
+    let mut suppressed_direct_calls = BTreeSet::new();
+    for decision in &guide.decisions {
+        match (&decision.point.subject, &decision.choice) {
+            (
+                ProgramSubjectKey::ExecutableByteRange {
+                    start,
+                    end_exclusive,
+                    ..
+                },
+                RecoveryChoice::ByteRole { role },
+            ) => {
+                if *role == ExecutableByteKind::Instruction {
+                    instruction_ranges.push((*start, *end_exclusive));
+                } else {
+                    non_instruction_ranges.push((*start, *end_exclusive));
+                }
+            }
+            (
+                ProgramSubjectKey::ControlFlowEdge {
+                    function_entry,
+                    source,
+                    target,
+                    edge_kind,
+                },
+                RecoveryChoice::SuppressControlFlowEdge,
+            ) => {
+                suppressed_edges.insert((*function_entry, *source, *target, *edge_kind));
+            }
+            (
+                ProgramSubjectKey::DirectCallsite {
+                    caller,
+                    instruction_address,
+                    target_address,
+                },
+                RecoveryChoice::SuppressDirectCall,
+            ) => {
+                suppressed_direct_calls.insert((*caller, *instruction_address, *target_address));
+            }
+            _ => {}
+        }
+    }
+    non_instruction_ranges.sort_unstable();
+    instruction_ranges.sort_unstable();
+    (!non_instruction_ranges.is_empty()
+        || !instruction_ranges.is_empty()
+        || !suppressed_edges.is_empty()
+        || !suppressed_direct_calls.is_empty())
+    .then_some(ControlFlowRecoveryGuidance {
+        image: guide.image.clone(),
+        non_instruction_ranges,
+        instruction_ranges,
+        suppressed_edges,
+        suppressed_direct_calls,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn recover_control_flow_stage(
     macho: &MachoFile<'_>,
@@ -2071,15 +2267,11 @@ fn recover_control_flow_stage(
     limits: crate::analysis::control_flow::ControlFlowLimits,
     guidance: Option<&ControlFlowRecoveryGuidance>,
     reuse: Option<&ProgramRecoveryReuse<'_>>,
-) -> Result<ControlFlowIndex, ControlFlowRecoveryError> {
-    // Reuse is deliberately limited to an exact unguided predecessor. Guided
-    // byte roles and suppressions are function-local in effect but the prior
-    // program does not retain their normalized input key independently of the
-    // guide receipt yet, so treating them as reusable would be an admission
-    // claim that cannot be revalidated here.
-    if guidance.is_none()
-        && let Some(reuse) = reuse
-        && reuse.prior.guide.is_none()
+) -> Result<(ControlFlowIndex, u64), ControlFlowRecoveryError> {
+    // Pointer and exception equality is the stage-level fast gate. The fold
+    // independently validates every durable input and compares normalized
+    // prior/current guidance before admitting each retained function graph.
+    if let Some(reuse) = reuse
         && reuse.prior.pointers.as_ref() == pointers
         && reuse.prior.exceptions.as_ref() == exceptions
         && let (Some(prior_functions), Some(prior_control_flow)) = (
@@ -2093,21 +2285,25 @@ fn recover_control_flow_stage(
             pointers,
             exceptions,
             limits,
-            prior_functions,
-            prior_control_flow,
-            reuse.prior.pointers.as_ref(),
-            reuse.prior.exceptions.as_ref(),
-        )
-        .map(|(control_flow, _)| control_flow);
+            guidance,
+            crate::analysis::control_flow::ControlFlowReuse {
+                functions: prior_functions,
+                control_flow: prior_control_flow,
+                pointers: reuse.prior.pointers.as_ref(),
+                exceptions: reuse.prior.exceptions.as_ref(),
+                guidance: reuse.control_flow_guidance.as_ref(),
+            },
+        );
     }
-    match guidance {
+    let control_flow = match guidance {
         Some(guidance) => ControlFlowIndex::recover_with_guidance(
             macho, functions, pointers, exceptions, limits, guidance,
         ),
         None => {
             ControlFlowIndex::recover_with_evidence(macho, functions, pointers, exceptions, limits)
         }
-    }
+    }?;
+    Ok((control_flow, 0))
 }
 
 fn dependent_stage_closure(
@@ -2218,23 +2414,48 @@ impl RecoveredProgram {
         prior: &Self,
         guide: &RecoveryGuide,
     ) -> Result<Self, ProgramRecoveryError> {
+        Self::refine_with_reuse_receipt(macho, prior, guide)
+            .map(ProgramRecoveryTransition::into_program)
+    }
+
+    /// Produce an immutable guided state and report exact reuse from `prior`.
+    ///
+    /// The receipt is operational metadata: it is not stored in the returned
+    /// program or projected into durable program Fact IR. The returned program
+    /// is therefore byte-for-byte equivalent to an independent cold recovery.
+    pub fn refine_with_reuse_receipt(
+        macho: &MachoFile<'_>,
+        prior: &Self,
+        guide: &RecoveryGuide,
+    ) -> Result<ProgramRecoveryTransition, ProgramRecoveryError> {
         if prior.image != FunctionImageIdentity::from_macho(macho) {
             return Err(ProgramRecoveryError::ProgramImageMismatch);
         }
         if prior.guide.as_ref() == Some(guide) && prior.guide_application.is_some() {
-            return Ok(prior.clone());
+            return Ok(ProgramRecoveryTransition {
+                program: prior.clone(),
+                reuse_receipt: reuse_receipt_for_unchanged_program(prior),
+            });
         }
         let base = match prior.guide {
             None => prior.clone(),
             Some(_) => Self::recover(macho, prior.request.clone())?,
         };
         let validation = base.validate_guide_for_image(macho, guide);
-        let mut next = Self::recover_guided_from_base(macho, prior.request.clone(), guide, &base)?;
+        let mut transition = Self::recover_guided_from_base_with_reuse(
+            macho,
+            prior.request.clone(),
+            guide,
+            &base,
+            prior,
+            true,
+        )?;
+        let next = &mut transition.program;
         if next.guide_application.is_none() {
             next.guide = Some(guide.clone());
-            next.guide_application = Some(build_guide_application(&base, &next, guide, validation));
+            next.guide_application = Some(build_guide_application(&base, next, guide, validation));
         }
-        Ok(next)
+        Ok(transition)
     }
 
     /// Deepen a prior state by unioning additional requested stages and
@@ -2246,6 +2467,20 @@ impl RecoveredProgram {
         extra_stages: impl IntoIterator<Item = ProgramRecoveryStage>,
         limit_overrides: Option<ProgramRecoveryLimits>,
     ) -> Result<Self, ProgramRecoveryError> {
+        self.deepen_with_reuse_receipt(macho, extra_stages, limit_overrides)
+            .map(ProgramRecoveryTransition::into_program)
+    }
+
+    /// Deepen this state and report whole-stage and function-local CFG reuse.
+    ///
+    /// The receipt describes only construction of the returned immutable
+    /// state. It is intentionally excluded from that state's durable facts.
+    pub fn deepen_with_reuse_receipt(
+        &self,
+        macho: &MachoFile<'_>,
+        extra_stages: impl IntoIterator<Item = ProgramRecoveryStage>,
+        limit_overrides: Option<ProgramRecoveryLimits>,
+    ) -> Result<ProgramRecoveryTransition, ProgramRecoveryError> {
         if self.image != FunctionImageIdentity::from_macho(macho) {
             return Err(ProgramRecoveryError::ProgramImageMismatch);
         }
@@ -2254,7 +2489,10 @@ impl RecoveredProgram {
         let request =
             ProgramRecoveryRequest::new(requested, limit_overrides.unwrap_or(self.request.limits));
         match self.guide.as_ref() {
-            Some(guide) => Self::recover_with_guide(macho, request, guide),
+            Some(guide) => {
+                let base = Self::recover(macho, request.clone())?;
+                Self::recover_guided_from_base_with_reuse(macho, request, guide, &base, self, true)
+            }
             None => {
                 let executed = request.resolved();
                 let mut roots = executed
@@ -2279,7 +2517,13 @@ impl RecoveredProgram {
                     None,
                     request,
                     ProgramRecoveryGuidance::default(),
-                    Some(ProgramRecoveryReuse { prior: self, dirty }),
+                    Some(ProgramRecoveryReuse {
+                        prior: self,
+                        dirty,
+                        control_flow_guidance: control_flow_guidance_from_guide(
+                            self.guide.as_ref(),
+                        ),
+                    }),
                 )
             }
         }
@@ -2367,7 +2611,8 @@ impl RecoveredProgram {
         guide: &RecoveryGuide,
         base: &RecoveredProgram,
     ) -> Result<Self, ProgramRecoveryError> {
-        Self::recover_guided_from_base_with_reuse(macho, request, guide, base, true)
+        Self::recover_guided_from_base_with_reuse(macho, request, guide, base, base, true)
+            .map(ProgramRecoveryTransition::into_program)
     }
 
     fn recover_guided_from_base_with_reuse(
@@ -2375,8 +2620,9 @@ impl RecoveredProgram {
         request: ProgramRecoveryRequest,
         guide: &RecoveryGuide,
         base: &RecoveredProgram,
+        reuse_prior: &RecoveredProgram,
         reuse_unchanged_stages: bool,
-    ) -> Result<Self, ProgramRecoveryError> {
+    ) -> Result<ProgramRecoveryTransition, ProgramRecoveryError> {
         let mut validation = base.validate_guide_for_image(macho, guide);
         if validation.decisions.iter().any(|decision| {
             matches!(
@@ -2532,7 +2778,15 @@ impl RecoveredProgram {
             && suppressed_direct_calls.is_empty()
             && guided_reference_ownerships.is_empty()
         {
-            return Ok(base.clone());
+            let reuse_receipt = if reuse_unchanged_stages && base == reuse_prior {
+                reuse_receipt_for_unchanged_program(base)
+            } else {
+                reuse_receipt_for_rebuilt_program(base)
+            };
+            return Ok(ProgramRecoveryTransition {
+                program: base.clone(),
+                reuse_receipt,
+            });
         }
 
         let byte_guidance = ExecutableByteRecoveryGuidance {
@@ -2558,8 +2812,19 @@ impl RecoveredProgram {
         };
         let executed = request.resolved();
         let dirty = dependent_stage_closure(dirty_roots, &executed);
-        let reuse = reuse_unchanged_stages.then_some(ProgramRecoveryReuse { prior: base, dirty });
-        let mut guided = Self::recover_selected_reusing(
+        let reuse = reuse_unchanged_stages.then_some(ProgramRecoveryReuse {
+            prior: reuse_prior,
+            dirty: if base == reuse_prior {
+                dirty
+            } else {
+                // A replacement guide can remove any prior premise. Rebuild
+                // every whole stage while still admitting function-local CFG
+                // entries whose exact normalized inputs remain unchanged.
+                executed.clone()
+            },
+            control_flow_guidance: control_flow_guidance_from_guide(reuse_prior.guide.as_ref()),
+        });
+        let mut transition = Self::recover_selected_reusing(
             macho,
             None,
             request,
@@ -2572,8 +2837,9 @@ impl RecoveredProgram {
             },
             reuse,
         )?;
-        guided.guide_application = Some(build_guide_application(base, &guided, guide, validation));
-        Ok(guided)
+        let guided = &mut transition.program;
+        guided.guide_application = Some(build_guide_application(base, guided, guide, validation));
+        Ok(transition)
     }
 
     /// Convenience entry point applying a guide while selecting every recovery stage.
@@ -2621,6 +2887,7 @@ impl RecoveredProgram {
         guidance: ProgramRecoveryGuidance<'_>,
     ) -> Result<Self, ProgramRecoveryError> {
         Self::recover_selected_reusing(macho, supplied_functions, request, guidance, None)
+            .map(ProgramRecoveryTransition::into_program)
     }
 
     fn recover_selected_reusing(
@@ -2629,7 +2896,7 @@ impl RecoveredProgram {
         request: ProgramRecoveryRequest,
         guidance: ProgramRecoveryGuidance<'_>,
         reuse: Option<ProgramRecoveryReuse<'_>>,
-    ) -> Result<Self, ProgramRecoveryError> {
+    ) -> Result<ProgramRecoveryTransition, ProgramRecoveryError> {
         let ProgramRecoveryGuidance {
             functions: function_guidance,
             executable_bytes: byte_guidance,
@@ -2647,6 +2914,15 @@ impl RecoveredProgram {
                 })
         }));
         let can_reuse = |stage| reuse.as_ref().is_some_and(|reuse| reuse.can_reuse(stage));
+        let reused_stages = executed
+            .iter()
+            .copied()
+            .filter(|stage| can_reuse(*stage))
+            .collect::<BTreeSet<_>>();
+        let rebuilt_stages = executed
+            .difference(&reused_stages)
+            .copied()
+            .collect::<BTreeSet<_>>();
         let recovers_function_inventory = executed.contains(&ProgramRecoveryStage::Functions)
             && !can_reuse(ProgramRecoveryStage::Functions)
             && supplied_functions.is_none();
@@ -2796,14 +3072,19 @@ impl RecoveredProgram {
         } else {
             None
         };
+        let mut control_flow_reused_function_count = 0_u64;
         let mut control_flow = if executed.contains(&ProgramRecoveryStage::ControlFlow) {
             if can_reuse(ProgramRecoveryStage::ControlFlow) {
-                reuse.as_ref().unwrap().prior.control_flow.clone()
+                let retained = reuse.as_ref().unwrap().prior.control_flow.clone();
+                control_flow_reused_function_count = retained.as_ref().map_or(0, |control_flow| {
+                    u64::try_from(control_flow.functions().len()).unwrap_or(u64::MAX)
+                });
+                retained
             } else {
                 let functions = functions
                     .as_ref()
                     .expect("resolved control-flow dependency includes functions");
-                Some(recover_control_flow_stage(
+                let (recovered, reused_functions) = recover_control_flow_stage(
                     macho,
                     functions,
                     pointers.as_ref(),
@@ -2811,7 +3092,9 @@ impl RecoveredProgram {
                     limits.control_flow,
                     control_flow_guidance,
                     reuse.as_ref(),
-                )?)
+                )?;
+                control_flow_reused_function_count = reused_functions;
+                Some(recovered)
             }
         } else {
             None
@@ -2836,7 +3119,7 @@ impl RecoveredProgram {
                 let refined = functions
                     .as_ref()
                     .expect("refined function inventory was just installed");
-                let rebuilt = recover_control_flow_stage(
+                let (rebuilt, reused_functions) = recover_control_flow_stage(
                     macho,
                     refined,
                     pointers.as_ref(),
@@ -2845,6 +3128,7 @@ impl RecoveredProgram {
                     control_flow_guidance,
                     reuse.as_ref(),
                 )?;
+                control_flow_reused_function_count = reused_functions;
                 control_flow = Some(rebuilt);
             }
         }
@@ -3045,7 +3329,7 @@ impl RecoveredProgram {
             },
         );
         completeness.validate()?;
-        Ok(Self {
+        let program = Self {
             image,
             recovery_schema: RecoveryContractSchema::CURRENT,
             request,
@@ -3073,6 +3357,16 @@ impl RecoveredProgram {
             guide,
             guide_application: None,
             completeness,
+        };
+        let reuse_receipt = ProgramRecoveryReuseReceipt {
+            schema_version: PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION,
+            reused_stages,
+            rebuilt_stages,
+            control_flow: control_flow_reuse_receipt(&program, control_flow_reused_function_count),
+        };
+        Ok(ProgramRecoveryTransition {
+            program,
+            reuse_receipt,
         })
     }
 
@@ -7420,16 +7714,60 @@ mod tests {
         .unwrap();
 
         let empty = RecoveryGuide::new(prior.image().clone());
-        let refined = RecoveredProgram::refine(&macho, &prior, &empty).unwrap();
+        let refined_transition =
+            RecoveredProgram::refine_with_reuse_receipt(&macho, &prior, &empty).unwrap();
+        assert_eq!(
+            refined_transition.reuse_receipt().schema_version(),
+            PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION
+        );
+        assert_eq!(
+            refined_transition.reuse_receipt().reused_stages(),
+            prior.executed_stages()
+        );
+        assert!(
+            refined_transition
+                .reuse_receipt()
+                .rebuilt_stages()
+                .is_empty()
+        );
+        let receipt_json = serde_json::to_value(refined_transition.reuse_receipt()).unwrap();
+        assert_eq!(
+            receipt_json["schema_version"],
+            serde_json::Value::from(PROGRAM_RECOVERY_REUSE_RECEIPT_VERSION)
+        );
+        assert_eq!(
+            receipt_json["reused_stages"],
+            serde_json::json!(["symbols", "strings"])
+        );
+        let refined = refined_transition.into_program();
         assert_eq!(refined.request(), prior.request());
         assert_eq!(refined.strings(), prior.strings());
         assert_eq!(refined.guide(), Some(&empty));
         assert!(refined.guide_application().is_some());
         refined.to_fact_document().validate().unwrap();
+        assert!(
+            serde_json::to_value(refined.to_fact_document())
+                .unwrap()
+                .get("reuse_receipt")
+                .is_none()
+        );
 
-        let deepened = prior
-            .deepen(&macho, [ProgramRecoveryStage::Functions], None)
+        let deepened_transition = prior
+            .deepen_with_reuse_receipt(&macho, [ProgramRecoveryStage::Functions], None)
             .unwrap();
+        assert!(
+            deepened_transition
+                .reuse_receipt()
+                .reused_stages()
+                .contains(&ProgramRecoveryStage::Strings)
+        );
+        assert!(
+            deepened_transition
+                .reuse_receipt()
+                .rebuilt_stages()
+                .contains(&ProgramRecoveryStage::Functions)
+        );
+        let deepened = deepened_transition.into_program();
         assert!(
             deepened
                 .request()
@@ -7787,7 +8125,7 @@ mod tests {
             unreachable!()
         };
         let guide = RecoveryGuide::builder(base.image().clone())
-            .function_ranges(FINAL, ranges)
+            .function_ranges(FINAL, ranges.clone())
             .unwrap()
             .assign_reference_owner(source, target, reference_kind, FINAL)
             .build();
@@ -7797,9 +8135,11 @@ mod tests {
             base.request().clone(),
             &guide,
             &base,
+            &base,
             false,
         )
-        .unwrap();
+        .unwrap()
+        .into_program();
         assert_eq!(
             guided, cold_guided,
             "selective refine must be exactly equivalent to a cold guided rebuild"
@@ -7859,6 +8199,20 @@ mod tests {
                 .reference_view(loaded_reference)
                 .target_string
                 .is_some()
+        );
+
+        let warm_replacement = RecoveredProgram::refine(&macho, &loaded, &overlap_guide).unwrap();
+        assert_eq!(
+            warm_replacement, ambiguous,
+            "replacing a strict-loaded guide must equal cold recovery for the new guide"
+        );
+        assert_eq!(
+            warm_replacement
+                .to_fact_document()
+                .to_json_pretty()
+                .unwrap(),
+            ambiguous.to_fact_document().to_json_pretty().unwrap(),
+            "warm replacement must preserve exact durable Fact IR identity"
         );
 
         let mut invalid_document = guided.to_fact_document();
@@ -8528,8 +8882,25 @@ mod tests {
         assert!(validation.decisions.iter().all(|decision| {
             decision.applicability == RecoveryDecisionApplicability::Applicable
         }));
-        let guided =
-            RecoveredProgram::recover_all_with_guide(&macho, limits, &direct_guide).unwrap();
+        let transition =
+            RecoveredProgram::refine_with_reuse_receipt(&macho, &base, &direct_guide).unwrap();
+        let control_flow_reuse = transition
+            .reuse_receipt()
+            .control_flow()
+            .expect("control-flow transition has a function-local receipt");
+        assert_eq!(
+            control_flow_reuse.reused_functions() + control_flow_reuse.rebuilt_functions(),
+            control_flow_reuse.total_functions()
+        );
+        assert!(control_flow_reuse.reused_functions() > 0);
+        assert!(control_flow_reuse.rebuilt_functions() > 0);
+        assert!(
+            transition
+                .reuse_receipt()
+                .rebuilt_stages()
+                .contains(&ProgramRecoveryStage::ControlFlow)
+        );
+        let guided = transition.into_program();
         let guided_call_graph = guided.control_flow().unwrap().by_entry(caller).unwrap();
         assert!(
             guided_call_graph
@@ -9326,7 +9697,7 @@ mod tests {
         );
 
         let mut unsupported = guide;
-        unsupported.schema.major = RecoveryContractSchema::CURRENT.major + 1;
+        unsupported.schema = RecoveryContractSchema::unsupported_fixture(0);
         let validation = program.validate_guide(&unsupported);
         assert_eq!(
             validation.decisions[0].applicability,

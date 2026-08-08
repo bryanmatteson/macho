@@ -588,11 +588,8 @@ fn validate_header(
     header
         .assumption_ledger
         .validate(context.selection_policy)
-        .map_err(|error| {
-            eprintln!("hypothesis ledger: {error}");
-            RecoveryValidationError::HeaderProjection
-        })?;
-    validate_header_source(header).inspect_err(|error| eprintln!("header source: {error}"))?;
+        .map_err(|_| RecoveryValidationError::HeaderProjection)?;
+    validate_header_source(header)?;
     if !header.validation.syntax_valid || !header.validation.semantic_valid {
         return Err(RecoveryValidationError::HeaderProjection);
     }
@@ -636,8 +633,7 @@ fn validate_header(
             }
         }
     }
-    validate_hypothesis_evidence(&header.assumption_ledger, context, &gap_ids)
-        .inspect_err(|error| eprintln!("hypothesis evidence: {error}"))?;
+    validate_hypothesis_evidence(&header.assumption_ledger, context, &gap_ids)?;
     let mut declared_entities = BTreeSet::new();
     for declaration in &header.declarations {
         validate_declaration_entity(declaration, context.entities)?;
@@ -663,8 +659,7 @@ fn validate_header(
         context.recovered_entities,
         &header.assumption_ledger,
         &covered,
-    )
-    .inspect_err(|error| eprintln!("declaration assumptions: {error}"))?;
+    )?;
     Ok(())
 }
 

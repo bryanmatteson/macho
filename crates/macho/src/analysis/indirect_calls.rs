@@ -6750,6 +6750,9 @@ fn recover_site(
     if uncertain_function_ownership {
         reasons.insert("indirect.function_ownership_uncertain".into());
     }
+    if dynamic_dispatch_open {
+        reasons.insert("indirect.objc_runtime_dispatch_open".into());
+    }
     let status = if omitted_candidate_count != 0 || value_flow_truncated {
         IndirectCallSiteStatus::Truncated
     } else if candidates.is_empty()
@@ -7938,7 +7941,10 @@ const fn merge_collector_status(
 mod tests {
     use super::*;
     use crate::analysis::control_flow::ControlFlowLimits;
-    use crate::analysis::functions::{FunctionIdentity, FunctionRecoveryLimits};
+    use crate::analysis::functions::{
+        FunctionIdentity, FunctionImageIdentity, FunctionRecoveryLimits,
+    };
+    use crate::analysis::recovery::{ProgramSubjectKey, RecoveryQuestionKind};
 
     const MAIN: u64 = 0x1_0000_0100;
     const HELPER: u64 = 0x1_0000_0120;
@@ -7960,6 +7966,7 @@ mod tests {
     #[test]
     fn unresolved_objc_dispatch_reasons_require_partial_status() {
         for reason in [
+            "indirect.objc_runtime_dispatch_open",
             "indirect.objc_selector_unresolved",
             "indirect.objc_selector_without_implementation",
             "indirect.objc_receiver_unresolved",
@@ -8655,6 +8662,24 @@ mod tests {
                 && internal_address(candidate) == Some(MAIN)
         }));
         assert_eq!(call.status, IndirectCallSiteStatus::Partial, "{call:#?}");
+
+        let questions = crate::analysis::recovery::build_recovery_questions(
+            &FunctionImageIdentity::from_macho(&macho),
+            None,
+            None,
+            None,
+            None,
+            Some(&index),
+            &[],
+        );
+        assert!(questions.iter().any(|question| {
+            question.kind == RecoveryQuestionKind::IndirectTargets
+                && question.subject
+                    == ProgramSubjectKey::IndirectTransfer {
+                        function_entry: call.source_function,
+                        instruction_address: call.instruction_address,
+                    }
+        }));
     }
 
     #[test]

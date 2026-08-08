@@ -168,13 +168,13 @@ macro_rules! exact_version {
     };
 }
 
-exact_version!(RecoverySchemaVersion, 2);
+exact_version!(RecoverySchemaVersion, 1);
 exact_version!(ObjCReportVersion, 1);
 exact_version!(SwiftReportVersion, 1);
 exact_version!(HypothesisBundleVersion, 1);
 exact_version!(ModelResponseVersion, 1);
 exact_version!(HypothesisReportVersion, 1);
-exact_version!(SnapshotSchemaVersion, 3);
+exact_version!(SnapshotSchemaVersion, 1);
 
 /// A validated non-empty order-bearing collection.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

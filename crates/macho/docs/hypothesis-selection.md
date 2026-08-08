@@ -148,9 +148,13 @@ The initial rules are intentionally small and conspicuous:
 - a type spelling that cannot be represented safely may use a non-reserved,
   per-gap `macho_unknown_type_<GAP_ID>` partial forward declaration; its
   spelling, specialization, layout, and ABI remain explicitly unauthoritative;
+- an exact nested record type used by a projected member is forward-declared
+  inside the same already-selected owner shell. This preserves the recovered
+  type spelling and shares the owner's receipt; it does not independently
+  assert the shell's namespace/class interpretation or record layout;
 - competing namespace/class interpretations remain in the ledger.
 
-This prerelease contract remains on recovery schema version 2; development
+This prerelease contract remains on recovery schema version 1; development
 changes update that schema in place until a release boundary is declared. The
 complete `hypothesis_selection_policy`, including exact overrides, is part of
 the canonical request digest and must match the resolved projection plan.

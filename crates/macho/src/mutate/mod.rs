@@ -175,7 +175,7 @@ impl<'image, 'section> MachoEditor<'image, 'section> {
         {
             section::place_section(
                 &mut self.segments,
-                self.original.bytes().len(),
+                self.original.bytes(),
                 self.original.bitness(),
                 request,
             )

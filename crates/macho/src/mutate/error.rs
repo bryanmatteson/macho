@@ -4,6 +4,7 @@ use crate::core::{ContextFrame, OffsetSpan, ParseError};
 use crate::metadata::codesign::CodesignError;
 
 const INVALID_INPUT_CODE: &str = "mutation.input.invalid";
+const UNSUPPORTED_CODE: &str = "mutation.unsupported";
 const OUT_OF_BOUNDS_CODE: &str = "mutation.bounds.exceeded";
 const VALIDATION_FAILED_CODE: &str = "mutation.validation.failed";
 const PARSE_FAILED_CODE: &str = "mutation.parse.failed";
@@ -33,6 +34,9 @@ pub enum MutationOperation {
 pub enum MutationErrorKind {
     /// The InvalidInput variant.
     InvalidInput,
+    /// The requested mutation would require a transformation whose complete
+    /// address-bearing rewrite contract is not modeled.
+    Unsupported,
     /// The OutOfBounds variant.
     OutOfBounds,
     /// The Validation variant.
@@ -93,6 +97,15 @@ impl MutationError {
             message,
         )
     }
+    /// Construct a typed safe-stop for a valid request that would require an
+    /// unmodeled structural rewrite such as relocating existing payload.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::new(
+            MutationOperation::Layout,
+            MutationErrorKind::Unsupported,
+            message,
+        )
+    }
     /// Performs validation.
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new(
@@ -122,6 +135,7 @@ impl MutationError {
     pub const fn code(&self) -> &'static str {
         match self.kind {
             MutationErrorKind::InvalidInput => INVALID_INPUT_CODE,
+            MutationErrorKind::Unsupported => UNSUPPORTED_CODE,
             MutationErrorKind::OutOfBounds => OUT_OF_BOUNDS_CODE,
             MutationErrorKind::Validation => VALIDATION_FAILED_CODE,
             MutationErrorKind::Parse => PARSE_FAILED_CODE,

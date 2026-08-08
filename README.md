@@ -52,7 +52,7 @@ Report-producing commands speak `--format text` for humans and `--format json` f
 - **Evidence-accountable header recovery.** `objc --headers`, `swift --headers`, `c --headers`, and `cpp --headers` project typed declarations from the runtime metadata, symbols, and debug evidence that survive compilation. Every report carries completeness states and an unresolved ledger, so partial evidence stays explicit instead of becoming a plausible-looking guess.
 - **In-process code signing.** Ad-hoc and PKCS#12 signing and verification happen inside the tool. No `xcrun`, no Keychain, no macOS. The same inputs work on all three platforms, and passwords are read from a file so they never touch the command line or your shell history.
 - **Byte-safe by construction.** The core parser validates structure before it trusts it, and the whole workspace is continuously fuzzed (headers, load commands, code signatures, dyld metadata, mutation, and more).
-- **Mutation that refuses to corrupt.** Patches extend existing slack and file-backed segments only; they never relocate existing payload, symbols, or fixups. If a placement isn't provably safe, the transaction refuses to commit.
+- **Mutation that refuses to corrupt.** Patches extend existing slack and file-backed segments only; they never relocate existing payload, symbols, or fixups. If a placement isn't provably safe, the transaction refuses to commit. The [layout boundary](crates/macho/docs/mutation-layout.md) inventories every modeled coordinate and the opaque structures that make universal relayout unsound.
 - **Semantic diffing and auditing.** `diff` compares two binaries by meaning and can fail CI on breaking changes; `audit` surfaces signing and configuration findings with stable diagnostic codes.
 - **Pick only what you need.** One package exposes feature-gated parser, metadata, analysis, mutation, workflow, and CLI modules, so narrow consumers do not compile capabilities they did not select.
 
@@ -175,9 +175,14 @@ artifact is delivered. Existing outputs are never replaced unless
 `--force` is explicit. The JSON result includes a per-domain completeness
 ledger; cache-level local symbols and cache-resident signatures are reported as
 unresolved, absent, or rejected rather than presented as standalone evidence.
-Current support targets Apple's published dyld v1 legacy, subcache V1, subcache
-V2, and local-symbol layouts. Valid layouts that cannot be reconstructed safely
-fail as unsupported instead of producing a partial artifact; validated
+Layout coverage includes every published `dyld_v0` and `dyld_v1` cache family:
+historical big-endian PowerPC caches, legacy and extended mapping tables,
+monolithic and V1/V2 split families, both local-symbol entry widths, separate
+`.symbols` members, and current TPRO ranges. The exact support and validation
+matrix is documented in the [dyld shared-cache layout contract](crates/macho/docs/dyld-cache-layouts.md).
+Unknown future cache generations or architectures fail as unsupported. A
+layout-valid image whose Mach-O coordinates cannot be reconstructed safely also
+fails as unsupported instead of producing a partial artifact; validated
 cache-level locals remain explicit unresolved evidence because they are not
 silently merged into the standalone image's `LC_SYMTAB`.
 
@@ -304,7 +309,7 @@ for slice in &document.slices {
 `domain_reports` also provides typed keys for load commands, segments, exports,
 imports, fixups, code signing, strings, ranges, xrefs, audit, and canonical C,
 C++, Objective-C, and Swift recovery reports. Typed reads do not change the
-schema-version-3 snapshot wire representation.
+schema-version-1 snapshot wire representation.
 
 Whole-program recovery is also selective. Each module is independently
 queryable; the request adds only declared prerequisites. Higher-level layers can
@@ -476,9 +481,23 @@ std::fs::write("MyApp.patched", rebuilt)?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-File-backed additions extend only the final file-backed segment, and only when its declared range ends exactly at the slice boundary. Load commands grow only through existing zero-filled header slack. `AddSection::new` accepts any borrowed `AsRef<[u8]>` — a slice, a `Vec<u8>`, or a caller-owned read-only `memmap2::Mmap` — stores the payload as a slice, copies only the two fixed-width Mach-O names inline, and allocates no heap of its own. For a file, keep the mapping alive until the transaction commits; a bare `File` can't expose borrowed bytes.
+File-backed additions use a bounded gap in the named segment or extend that
+segment only when no later file-backed payload would move and no modeled load
+command or relocation table owns the candidate bytes—even if those bytes are
+zero. If the named segment does not exist, the editor can instead append a
+page-aligned segment and its first section after the existing file and VM
+ranges; callers may set the new segment's initial and maximum protections
+explicitly. Existing payload, symbols, fixups, and address-bearing records
+never move. Load commands still grow only through existing zero-filled header
+slack, so a packed header rejects the operation rather than attempting an
+implicit relink. `AddSection::new`
+accepts any borrowed `AsRef<[u8]>` — a slice, a `Vec<u8>`, or a caller-owned
+read-only `memmap2::Mmap` — stores the payload as a slice, copies only the two
+fixed-width Mach-O names inline, and allocates no heap of its own. For a file,
+keep the mapping alive until the transaction commits; a bare `File` can't
+expose borrowed bytes.
 
-Injected `SignatureProvider` implementations may declare a known ad-hoc or certificate kind; providers that omit `kind()` are opaque, own their own verification, and never expose credentials. The generic verifier accepts only the ad-hoc and certificate mechanisms it understands. Selective analysis builds an `AnalysisPlan` before execution, and snapshot documents (schema version 3) preserve `not_requested`, `complete`, `unsupported`, and `failed` as distinct states — a gap in the data is never silently rendered as a zero.
+Injected `SignatureProvider` implementations may declare a known ad-hoc or certificate kind; providers that omit `kind()` are opaque, own their own verification, and never expose credentials. The generic verifier accepts only the ad-hoc and certificate mechanisms it understands. Selective analysis builds an `AnalysisPlan` before execution, and snapshot documents (schema version 1) preserve `not_requested`, `complete`, `unsupported`, and `failed` as distinct states — a gap in the data is never silently rendered as a zero.
 
 External transformation engines use `macho::analysis::program::RecoveredProgram`
 as the full-facts entry and persist `ProgramFactDocument` when they need durable,
@@ -486,7 +505,9 @@ query-only state. `macho::evidence::SelectedImageEvidence` is the narrower leaf
 port for consumers that intentionally do not need a program. Product IR,
 operator edit storage, branches, queries, and mutations remain consumer-owned;
 Macho owns selected-image decoding, recovery questions, guides, completeness,
-and independent-versus-guided provenance. See
+and independent-versus-guided provenance. Refinement and deepening can return a
+versioned operational reuse receipt with exact whole-stage and function-local
+CFG reuse counts; that receipt remains outside durable Fact IR. See
 [`crates/macho/docs/program-fact-ir.md`](crates/macho/docs/program-fact-ir.md)
 for the Fact IR contract and
 [`crates/macho/docs/splice-handoff.md`](crates/macho/docs/splice-handoff.md) for

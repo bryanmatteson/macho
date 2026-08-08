@@ -413,7 +413,8 @@ mod tests {
         let error = no_space
             .prepare()
             .expect_err("later segment must not be relocated");
-        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+        assert_eq!(error.kind, MutationErrorKind::Unsupported);
+        assert_eq!(error.code(), "mutation.unsupported");
         assert_eq!(input, original.bytes());
     }
 
@@ -439,6 +440,58 @@ mod tests {
             &[1, 2, 3, 4]
         );
         assert_eq!(&output[0x1200..0x1210], &input[0x1200..0x1210]);
+    }
+
+    #[test]
+    fn add_section_rejects_nonzero_bytes_in_an_unowned_gap() {
+        let mut input = macho_test_support::signable_thin64_x86_64_with_data_gap(2);
+        input[0x1101] = 0xA5;
+        let container = crate::core::parse(&input).expect("fixture parses");
+        let macho = container.first_macho().expect("thin Mach-O");
+        let mut transaction = PatchTransaction::new(macho);
+        transaction.add_section(
+            AddSection::new("__DATA", "__payload", &[1, 2, 3, 4]).expect("valid section request"),
+        );
+
+        let error = transaction
+            .commit()
+            .expect_err("opaque gap bytes must not be overwritten");
+        assert_eq!(error.kind, MutationErrorKind::Unsupported);
+        assert!(error.to_string().contains("ownership is unknown"));
+        assert_eq!(input[0x1101], 0xA5);
+    }
+
+    #[test]
+    fn add_section_rejects_zero_filled_command_owned_gap_in_any_edit_order() {
+        let input = macho_test_support::signable_thin64_x86_64_with_data_gap(2);
+        let container = crate::core::parse(&input).expect("fixture parses");
+        let macho = container.first_macho().expect("thin Mach-O");
+        let note = LoadCommand::Note(crate::mutate::model::load_command::NoteData {
+            data_owner: "gap-owner".to_string(),
+            offset: 0x1100,
+            size: 4,
+        });
+
+        for note_first in [true, false] {
+            let mut transaction = PatchTransaction::new(macho);
+            if note_first {
+                transaction.add_command(note.clone());
+            }
+            transaction.add_section(
+                AddSection::new("__DATA", "__payload", &[1, 2, 3, 4])
+                    .expect("valid section request"),
+            );
+            if !note_first {
+                transaction.add_command(note.clone());
+            }
+
+            let error = transaction
+                .prepare()
+                .expect_err("command-owned zero bytes must not be overwritten");
+            assert_eq!(error.kind, MutationErrorKind::Unsupported);
+            assert_eq!(error.code(), "mutation.unsupported");
+            assert!(error.to_string().contains("LC_NOTE gap-owner"));
+        }
     }
 
     #[test]
@@ -496,7 +549,8 @@ mod tests {
         let error = transaction
             .commit()
             .expect_err("existing payload relocation must fail closed");
-        assert_eq!(error.kind, MutationErrorKind::InvalidInput);
+        assert_eq!(error.kind, MutationErrorKind::Unsupported);
+        assert_eq!(error.code(), "mutation.unsupported");
         assert!(
             error
                 .to_string()

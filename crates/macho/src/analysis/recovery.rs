@@ -19,15 +19,11 @@ use crate::analysis::functions::{
 use crate::analysis::functions::{
     FunctionEvidenceConfidence, FunctionImageIdentity, FunctionIndex,
 };
-use crate::analysis::indirect_calls::{
-    IndirectCallIndex, IndirectCallSiteStatus, IndirectTransferKind,
-};
+use crate::analysis::indirect_calls::{IndirectCallIndex, IndirectCallSiteStatus};
 use crate::analysis::xref::{Xref, XrefIndex, XrefKind, XrefTarget};
 
-/// Current major version of the steerable-recovery wire contract.
-pub const RECOVERY_CONTRACT_MAJOR: u16 = 1;
-/// Current minor version of the steerable-recovery wire contract.
-pub const RECOVERY_CONTRACT_MINOR: u16 = 1;
+/// Current version of the steerable-recovery wire contract.
+pub const RECOVERY_CONTRACT_SCHEMA_VERSION: u32 = 1;
 
 /// Exact thin-image identity used by all program-recovery layers.
 pub type ProgramImageIdentity = FunctionImageIdentity;
@@ -91,13 +87,8 @@ impl From<XrefKind> for RecoveryReferenceKind {
 
 /// Version of serialized recovery questions, guides, and derivations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RecoveryContractSchema {
-    /// Breaking contract version.
-    pub major: u16,
-    /// Backward-compatible contract revision.
-    pub minor: u16,
-}
+#[serde(transparent)]
+pub struct RecoveryContractSchema(u32);
 
 /// Canonical half-open address range used by caller-authored recovery premises.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -124,10 +115,17 @@ impl RecoveryAddressRange {
 
 impl RecoveryContractSchema {
     /// Schema emitted by this library version.
-    pub const CURRENT: Self = Self {
-        major: RECOVERY_CONTRACT_MAJOR,
-        minor: RECOVERY_CONTRACT_MINOR,
-    };
+    pub const CURRENT: Self = Self(RECOVERY_CONTRACT_SCHEMA_VERSION);
+
+    /// Return the exact wire-schema version.
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn unsupported_fixture(version: u32) -> Self {
+        Self(version)
+    }
 }
 
 /// Name-independent, image-local identity of a recovered or unresolved object.
@@ -1350,14 +1348,7 @@ fn build_indirect_recovery_questions(
                 function_entry: call.source_function,
                 instruction_address: call.instruction_address,
             };
-            let runtime_open = call.reasons.iter().any(|reason| {
-                reason.contains("runtime") || reason == "indirect.swift_runtime_instantiation_open"
-            }) || call.kinds.iter().any(|kind| {
-                matches!(
-                    kind,
-                    IndirectTransferKind::ObjectiveCDispatch | IndirectTransferKind::SwiftDispatch
-                )
-            });
+            let runtime_open = call.reasons.iter().any(|reason| reason.contains("runtime"));
             let kind = if runtime_open {
                 RecoveryQuestionKind::RuntimeDispatch
             } else {
@@ -1873,6 +1864,20 @@ pub(crate) fn cross_reference_subject(reference: &Xref) -> ProgramSubjectKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recovery_contract_is_exact_schema_one() {
+        assert_eq!(RECOVERY_CONTRACT_SCHEMA_VERSION, 1);
+        assert_eq!(RecoveryContractSchema::CURRENT.get(), 1);
+        assert_eq!(
+            serde_json::to_value(RecoveryContractSchema::CURRENT).unwrap(),
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            serde_json::from_value::<RecoveryContractSchema>(serde_json::json!(1)).unwrap(),
+            RecoveryContractSchema::CURRENT
+        );
+    }
 
     #[test]
     fn emitted_range_ownership_choice_is_a_supported_decision() {

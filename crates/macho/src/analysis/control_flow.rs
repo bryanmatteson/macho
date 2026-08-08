@@ -1192,11 +1192,7 @@ impl ControlFlowIndex {
         exceptions: Option<&ExceptionIndex>,
         limits: ControlFlowLimits,
         guidance: Option<&ControlFlowRecoveryGuidance>,
-        prior_functions: &FunctionIndex,
-        prior_control_flow: &ControlFlowIndex,
-        prior_pointers: Option<&PointerIndex>,
-        prior_exceptions: Option<&ExceptionIndex>,
-        prior_guidance: Option<&ControlFlowRecoveryGuidance>,
+        reuse: ControlFlowReuse<'_>,
     ) -> Result<(Self, u64), ControlFlowRecoveryError> {
         let (mut graphs, summary) = Self::fold_internal(
             macho,
@@ -1205,13 +1201,7 @@ impl ControlFlowIndex {
             exceptions,
             limits,
             guidance,
-            Some(ControlFlowReuse {
-                functions: prior_functions,
-                control_flow: prior_control_flow,
-                pointers: prior_pointers,
-                exceptions: prior_exceptions,
-                guidance: prior_guidance,
-            }),
+            Some(reuse),
             None,
             FunctionRecoveryProjection::Full,
             Vec::with_capacity,
@@ -1373,19 +1363,21 @@ impl ControlFlowIndex {
                             incoming_decoded_byte_budget: *prior_remaining,
                             guidance: function_control_flow_guidance_key(
                                 prior_function,
-                                prior_graph,
                                 reuse.as_ref().and_then(|prior| prior.guidance),
                             ),
                         } == FunctionControlFlowReuseKey {
                             function,
                             non_returning_functions: &non_returning_functions,
                             incoming_decoded_byte_budget: remaining_bytes,
-                            guidance: function_control_flow_guidance_key(
-                                function,
-                                prior_graph,
-                                guidance,
-                            ),
-                        }
+                            guidance: function_control_flow_guidance_key(function, guidance),
+                        } && function_target_inputs_equal(
+                            prior_graph,
+                            reuse
+                                .as_ref()
+                                .expect("prior graph came from a reuse context")
+                                .functions,
+                            functions,
+                        )
                     })
                     .map(|(_, graph, _)| {
                         remaining_bytes = remaining_bytes
@@ -1546,7 +1538,6 @@ impl ControlFlowIndex {
 
 fn function_control_flow_guidance_key(
     function: &RecoveredFunction,
-    graph: &FunctionControlFlow,
     guidance: Option<&ControlFlowRecoveryGuidance>,
 ) -> FunctionControlFlowGuidanceKey {
     let Some(guidance) = guidance else {
@@ -1556,13 +1547,7 @@ fn function_control_flow_guidance_key(
     let overlaps_function = |(start, end): &(u64, u64)| {
         coverage
             .iter()
-            .any(|range| *start < range.end_exclusive && *end > range.start)
-    };
-    let overlaps_retained_table = |(start, end): &(u64, u64)| {
-        graph
-            .jump_tables
-            .iter()
-            .any(|table| *start < table.end_exclusive && *end > table.table_address)
+            .any(|range| *start < range.end && *end > range.start)
     };
     FunctionControlFlowGuidanceKey {
         non_instruction_ranges: guidance
@@ -1571,12 +1556,7 @@ fn function_control_flow_guidance_key(
             .copied()
             .filter(overlaps_function)
             .collect(),
-        instruction_ranges: guidance
-            .instruction_ranges
-            .iter()
-            .copied()
-            .filter(|range| overlaps_function(range) || overlaps_retained_table(range))
-            .collect(),
+        instruction_ranges: guidance.instruction_ranges.to_vec(),
         suppressed_edges: guidance
             .suppressed_edges
             .iter()
@@ -1590,6 +1570,43 @@ fn function_control_flow_guidance_key(
             .map(|(_, instruction, target)| (*instruction, *target))
             .collect(),
     }
+}
+
+fn function_target_inputs_equal(
+    graph: &FunctionControlFlow,
+    prior: &FunctionIndex,
+    current: &FunctionIndex,
+) -> bool {
+    let direct_call_targets = graph.calls.iter().filter_map(|call| match &call.target {
+        ControlFlowCallTarget::Direct { address, .. } => Some(*address),
+        ControlFlowCallTarget::Indirect { .. } => None,
+    });
+    let direct_exit_targets = graph.exits.iter().filter_map(|exit| {
+        matches!(
+            exit.kind,
+            ControlFlowExitKind::DirectBranch | ControlFlowExitKind::NonReturningTransfer
+        )
+        .then_some(exit.target)
+        .flatten()
+    });
+    direct_call_targets
+        .chain(direct_exit_targets)
+        .all(|address| {
+            function_target_input(prior, address) == function_target_input(current, address)
+        })
+}
+
+fn function_target_input(
+    functions: &FunctionIndex,
+    address: u64,
+) -> (
+    Option<(u64, FunctionEvidenceConfidence)>,
+    Vec<RecoveredFunctionTarget>,
+) {
+    let exact = functions
+        .by_entry(address)
+        .map(|function| (function.entry, function.entry_confidence));
+    (exact, recovered_function_targets(functions, address))
 }
 
 fn function_control_flow_durable_invariants_hold(
@@ -2737,12 +2754,9 @@ fn computed_branch_transform(
     instructions: &[ControlFlowInstruction],
     address: u64,
 ) -> Option<ComputedBranchTransformEvidence> {
-    let Some(index) = instructions
+    let index = instructions
         .iter()
-        .position(|instruction| instruction.address == address)
-    else {
-        return None;
-    };
+        .position(|instruction| instruction.address == address)?;
     let contributing_instructions = instructions[index.saturating_sub(6)..=index]
         .iter()
         .filter_map(|instruction| {
@@ -6067,7 +6081,19 @@ mod tests {
         let prior = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
 
         let (warm, reused) = ControlFlowIndex::recover_reusing(
-            &macho, &functions, None, None, limits, None, &functions, &prior, None, None, None,
+            &macho,
+            &functions,
+            None,
+            None,
+            limits,
+            None,
+            ControlFlowReuse {
+                functions: &functions,
+                control_flow: &prior,
+                pointers: None,
+                exceptions: None,
+                guidance: None,
+            },
         )
         .unwrap();
 
@@ -6101,11 +6127,13 @@ mod tests {
             None,
             limits,
             None,
-            &prior_functions,
-            &prior,
-            None,
-            None,
-            None,
+            ControlFlowReuse {
+                functions: &prior_functions,
+                control_flow: &prior,
+                pointers: None,
+                exceptions: None,
+                guidance: None,
+            },
         )
         .unwrap();
 
@@ -6113,6 +6141,72 @@ mod tests {
         assert!(reused > 0);
         assert!((reused as usize) < warm.functions().len());
         assert!(warm.durable_invariants_hold());
+    }
+
+    #[test]
+    fn replacement_guidance_reuses_only_functions_with_equal_local_keys() {
+        let bytes = x86_branching_fixture();
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        assert!(functions.functions().len() > 1);
+        let limits = ControlFlowLimits::default();
+        let prior = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
+        let first = &prior.functions()[0];
+        let edge = first.edges.first().expect("fixture has a local CFG edge");
+        let source = first.blocks[edge.from as usize].start;
+        let target = first.blocks[edge.to as usize].start;
+        let guidance = ControlFlowRecoveryGuidance {
+            image: functions.image().clone(),
+            non_instruction_ranges: Vec::new(),
+            instruction_ranges: Vec::new(),
+            suppressed_edges: BTreeSet::from([(first.function_entry, source, target, edge.kind)]),
+            suppressed_direct_calls: BTreeSet::new(),
+        };
+        let cold = ControlFlowIndex::recover_with_guidance(
+            &macho, &functions, None, None, limits, &guidance,
+        )
+        .unwrap();
+        let (warm, reused) = ControlFlowIndex::recover_reusing(
+            &macho,
+            &functions,
+            None,
+            None,
+            limits,
+            Some(&guidance),
+            ControlFlowReuse {
+                functions: &functions,
+                control_flow: &prior,
+                pointers: None,
+                exceptions: None,
+                guidance: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(warm, cold);
+        assert!(reused > 0);
+        assert!((reused as usize) < warm.functions().len());
+
+        let cold_reverted = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
+        let (warm_reverted, reverted_reuse) = ControlFlowIndex::recover_reusing(
+            &macho,
+            &functions,
+            None,
+            None,
+            limits,
+            None,
+            ControlFlowReuse {
+                functions: &functions,
+                control_flow: &cold,
+                pointers: None,
+                exceptions: None,
+                guidance: Some(&guidance),
+            },
+        )
+        .unwrap();
+        assert_eq!(warm_reverted, cold_reverted);
+        assert!(reverted_reuse > 0);
+        assert!((reverted_reuse as usize) < warm_reverted.functions().len());
     }
 
     #[test]
@@ -6132,11 +6226,13 @@ mod tests {
                 ..ControlFlowLimits::default()
             },
             None,
-            &functions,
-            &prior,
-            None,
-            None,
-            None,
+            ControlFlowReuse {
+                functions: &functions,
+                control_flow: &prior,
+                pointers: None,
+                exceptions: None,
+                guidance: None,
+            },
         )
         .unwrap_err();
         assert_eq!(error, ControlFlowRecoveryError::PriorReuseMismatch);
@@ -6158,11 +6254,13 @@ mod tests {
             None,
             limits,
             None,
-            &functions,
-            &prior,
-            None,
-            None,
-            None,
+            ControlFlowReuse {
+                functions: &functions,
+                control_flow: &prior,
+                pointers: None,
+                exceptions: None,
+                guidance: None,
+            },
         )
         .unwrap_err();
 

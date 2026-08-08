@@ -1,6 +1,6 @@
 //! Closed schema registries used by the implementation and verifier.
 
-/// Exact snapshot schema-3 domain IDs.
+/// Exact snapshot schema-1 domain IDs.
 pub const DOMAIN_IDS: &[&str] = &[
     "container",
     "header",

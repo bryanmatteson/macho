@@ -70,13 +70,13 @@ different same-architecture image still fails.
 Before the first public release, breaking wire edits replace schema 1 in place;
 there is no compatibility promise or artificial migration history. After the
 first public release, increment `PROGRAM_FACT_IR_SCHEMA_VERSION` for a breaking
-document or stage-payload change. `RECOVERY_CONTRACT_MAJOR` must then increase
+document or stage-payload change. Increment `RECOVERY_CONTRACT_SCHEMA_VERSION`
 when a subject key, question identity, choice meaning, or guide-validation rule
-changes incompatibly. Compatible additive recovery-contract changes increment
-`RECOVERY_CONTRACT_MINOR`. A Fact IR document records both versions and loading
+changes incompatibly. Before that release, both prerelease schemas remain `1`
+and are updated in place. A Fact IR document records both versions and loading
 currently requires the exact supported recovery contract.
 
-The current pre-release wire is Fact IR schema 1 / recovery contract 1.0.
+The current pre-release wire is Fact IR schema 1 / recovery contract schema 1.
 
 ## Independent and guided facts
 
@@ -114,10 +114,22 @@ limit block changed and their transitive consumers. A retained guide takes the
 conservative cold-base path and must remain valid, otherwise the transition
 fails rather than silently dropping operator intent.
 
+Call `refine_with_reuse_receipt` or `deepen_with_reuse_receipt` when the host
+needs operational proof of what was reused. The returned
+`ProgramRecoveryTransition` separates the immutable program from a
+schema-versioned `ProgramRecoveryReuseReceipt`; the convenience methods above
+discard that receipt and return the same program.
+
 Consumers can persist with `to_fact_document` plus `to_json_pretty`, load with
 `ProgramFactDocument::load_json` plus `RecoveredProgram::from_document`, inspect
 stage availability with `stage_status`, and map open-world or incomplete work
-through `frontier_subjects`.
+through `frontiers`; `frontier_subjects` remains the compact identity-only
+projection. Site-local indirect and runtime-dispatch frontiers retain their
+exact function and instruction subject, stable reason, omitted-candidate
+count, and whether current runtime evidence is required. Unsupported computed
+branch transforms additionally retain the bounded instruction coordinates
+that contributed indexed-memory operands. A runtime-open frontier never
+promotes a recorded file candidate to current process truth.
 
 The stable consumer façade is `macho::analysis`; it re-exports the program
 entrypoints, Fact IR and completeness types, guide authoring/validation and
@@ -151,7 +163,7 @@ dependency closure to preserve full-rebuild equivalence.
 
 | `RecoveryChoice` | Affected stages | Status |
 | --- | --- | --- |
-| `KeepUnresolved` | None; records a redundant decision | Supported |
+| `KeepUnresolved` | None; explicitly retains the site-local indirect/runtime frontier without promoting a candidate | Supported |
 | `AcceptFunctionEntry` | Functions, control flow, executable bytes, direct calls, transfers, indirect calls, xrefs, semantics | Supported |
 | `Reject` on a function candidate | Same function-dependent stages | Supported |
 | `FunctionRelationship` | Same function-dependent stages | Supported |
@@ -186,9 +198,22 @@ compare selective refine and deepen results to full cold rebuilds.
 Function-local CFG reuse is admitted only for an exact prior image and limits,
 an equal complete `RecoveredFunction`, unchanged pointer/exception inputs, the
 same non-returning fixed-point set, and the same incoming global decoded-byte
-budget. Reused graphs are charged their retained decoded-byte count before the
-next function is considered, so truncation and continuations stay identical to
-a cold fold. Cache admission and hit counts are not serialized and never
-change Fact IR identity, coverage, limitations, or questions. Guided CFGs are
-not currently reusable because their normalized function-local inputs are not
-stored as an independent durable cache key.
+budget. Guided transitions additionally compare a normalized function-local
+key containing overlapping byte roles, exact edge/call suppressions, and the
+complete instruction-role set. Instruction roles are deliberately conservative:
+a prior role can suppress a jump table so completely that no retained table
+remains from which to reconstruct a narrower dependency. Reused graphs are
+charged their retained decoded-byte count before the next function is
+considered, so truncation and continuations stay identical to a cold fold.
+The operational receipt serializes independently when a host wants telemetry,
+but cache admission and hit counts are never embedded in program Fact IR and
+never change its identity, coverage, limitations, or questions. Its stage sets
+partition the executed stages into whole-stage reuse and rebuilds; its optional
+ControlFlow detail partitions the final function graphs into reused and
+rebuilt counts.
+
+The `architecture` Criterion target keeps `cold_recover_with_guide` and
+`warm_refine_from_retained_base` side by side on the same deterministic
+multi-function fixture. Benchmark setup asserts exact cold/warm program
+equality and the presence of an unaffected function graph before timing; wall
+times remain host-specific quality evidence rather than a semantic threshold.

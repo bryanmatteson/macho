@@ -20,7 +20,7 @@ unregistered constants, and rows without an owning constant.
 | `analysis.disassembly.arch.unsupported` | error | A selected raw CPU tuple is absent or unsupported by the decoder. |
 | `analysis.disassembly.count.unsatisfied` | error | Natural section end was reached before the requested instruction count. |
 | `analysis.disassembly.output.failed` | error | Streamed disassembly output could not be written to its destination. |
-| `analysis.disassembly.report.invalid` | error | A schema-version-2 disassembly report is internally inconsistent. |
+| `analysis.disassembly.report.invalid` | error | A schema-version-1 disassembly report is internally inconsistent. |
 | `analysis.disassembly.request.invalid` | error | A disassembly request has an invalid cross-field combination. |
 | `analysis.disassembly.section.invalid` | error | An exact section selector is malformed. |
 | `analysis.disassembly.section.missing` | error | An exact selected section is absent or not file-backed. |
@@ -80,6 +80,7 @@ unregistered constants, and rows without an owning constant.
 | `mutation.codesign.failed` | error | Mutation failed through a retained code-signature source. |
 | `mutation.input.invalid` | error | A patch or mutation request is invalid. |
 | `mutation.parse.failed` | error | Mutation failed through a retained core parser source. |
+| `mutation.unsupported` | error | A valid mutation request requires a structural rewrite that is not modeled safely. |
 | `mutation.validation.failed` | error | A candidate mutation failed structural validation. |
 | `objc.address.invalid` | error | Objective-C metadata contains an address or offset that cannot be mapped safely. |
 | `objc.bounds.exceeded` | error | Objective-C metadata references bytes outside the bounded input. |

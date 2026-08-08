@@ -806,7 +806,27 @@ mod tests {
             .unwrap();
         assert_eq!(unit.declarations.len(), 2);
         assert!(matches!(unit.declarations[0], Decl::Record { .. }));
-        assert!(matches!(unit.declarations[1], Decl::Function { .. }));
+        assert!(matches!(
+            unit.declarations[1],
+            Decl::Function {
+                storage: StorageClass::Extern,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn preserves_extern_storage_on_variables() {
+        let unit = TreeSitterHeaderParser
+            .parse(Language::C, "extern unsigned long global_count;")
+            .unwrap();
+        assert!(matches!(
+            unit.declarations.as_slice(),
+            [Decl::Variable {
+                storage: StorageClass::Extern,
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -892,6 +912,32 @@ mod tests {
                     ..
                 }
             ]
+        ));
+    }
+
+    #[test]
+    fn coalesces_adjacent_cpp_members_with_the_same_access() {
+        let unit = TreeSitterHeaderParser
+            .parse(
+                Language::Cpp,
+                "class Widget { public: class Nested; int consume(Nested & value); };",
+            )
+            .unwrap();
+        let [Decl::Record { members, .. }] = unit.declarations.as_slice() else {
+            panic!("expected one record: {:?}", unit.declarations);
+        };
+        let [
+            Decl::AccessSection {
+                access: Access::Public,
+                declarations,
+            },
+        ] = members.as_slice()
+        else {
+            panic!("expected one public access section: {members:?}");
+        };
+        assert!(matches!(
+            declarations.as_slice(),
+            [Decl::Forward { .. }, Decl::Function { .. }]
         ));
     }
 

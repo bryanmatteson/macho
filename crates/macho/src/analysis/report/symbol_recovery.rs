@@ -912,7 +912,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_rejects_pre_amendment_entity_shape() {
+    fn v1_rejects_pre_amendment_entity_shape() {
         let bytes = macho_test_support::thin64_x86_64_with_data_symbols(&[
             macho_test_support::SymbolFixture {
                 name: "_global",
@@ -934,16 +934,16 @@ mod tests {
     }
 
     #[test]
-    fn v2_rejects_v1_and_false_architecture_provenance() {
+    fn v1_rejects_invalid_schema_and_false_architecture_provenance() {
         let bytes = macho_test_support::thin64_x86_64_with_symbols(&[]);
         let container = crate::core::parse(&bytes).unwrap();
         let report =
             recover_symbol_surface(container.first_macho().unwrap(), RecoveryLanguage::CAbi)
                 .unwrap();
 
-        let mut v1 = serde_json::to_value(&report).unwrap();
-        v1["schema_version"] = serde_json::json!(1);
-        assert!(serde_json::from_value::<RecoveryReport>(v1).is_err());
+        let mut invalid = serde_json::to_value(&report).unwrap();
+        invalid["schema_version"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<RecoveryReport>(invalid).is_err());
 
         let mut wrong_architecture = serde_json::to_value(report).unwrap();
         wrong_architecture["request"]["architectures"] = serde_json::json!({

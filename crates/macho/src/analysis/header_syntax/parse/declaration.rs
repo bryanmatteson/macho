@@ -8,7 +8,8 @@ use super::{
 };
 
 pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<Decl>, ParseError> {
-    let trimmed = strip_attributes(text.trim().trim_end_matches(';').trim());
+    let declaration = text.trim().trim_end_matches(';').trim();
+    let trimmed = strip_attributes(declaration);
     if trimmed.is_empty() {
         return Ok(Vec::new());
     }
@@ -54,12 +55,12 @@ pub(super) fn lower_declaration(text: &str, language: Language) -> Result<Vec<De
         return Ok(vec![Decl::Function {
             name,
             signature,
-            storage: parse_storage(trimmed),
+            storage: parse_storage(declaration),
             linkage: linkage(language),
         }]);
     }
     let (ty, names) = split_type_and_declarators(trimmed)?;
-    let storage = parse_storage(trimmed);
+    let storage = parse_storage(declaration);
     let ty = parse_type(ty, language)?;
     names
         .into_iter()
@@ -153,10 +154,21 @@ pub(super) fn lower_record(text: &str, language: Language) -> Result<Decl, Parse
                         access,
                     })
                 }
-                other => members.push(Decl::AccessSection {
-                    access,
-                    declarations: vec![other],
-                }),
+                other => {
+                    if let Some(Decl::AccessSection {
+                        access: existing_access,
+                        declarations,
+                    }) = members.last_mut()
+                        && *existing_access == access
+                    {
+                        declarations.push(other);
+                    } else {
+                        members.push(Decl::AccessSection {
+                            access,
+                            declarations: vec![other],
+                        });
+                    }
+                }
             }
         }
     }

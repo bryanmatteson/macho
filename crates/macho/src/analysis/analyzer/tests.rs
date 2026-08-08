@@ -370,7 +370,7 @@ fn rejects_unversioned_and_mismatched_snapshots() {
 }
 
 #[test]
-fn typed_reports_preserve_state_and_schema_v3_wire_shape() {
+fn typed_reports_preserve_state_and_schema_v1_wire_shape() {
     let bytes =
         macho_test_support::thin64_x86_64_with_symbols(&[macho_test_support::SymbolFixture {
             name: "_typed_entry",
@@ -410,7 +410,7 @@ fn typed_reports_preserve_state_and_schema_v3_wire_shape() {
     ));
 
     // Typed reads are a projection over the existing payload and cannot alter
-    // schema-v3 serialization.
+    // schema-v1 serialization.
     let after = serde_json::to_string(&document).unwrap();
     assert_eq!(after, before);
     let wire: Value = serde_json::from_str(&before).unwrap();
