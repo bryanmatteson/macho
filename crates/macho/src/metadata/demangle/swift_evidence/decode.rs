@@ -291,4 +291,26 @@ mod tests {
             Some(SwiftClosureSymbolKind::ReabstractionThunk)
         );
     }
+
+    #[test]
+    fn setter_and_supported_generic_requirements_are_typed() {
+        let setter = "$s4Test3FooV3barSivs";
+        assert!(matches!(
+            decode_swift_mangling(setter, &limits()),
+            SwiftManglingEvidence::Supported { entity, .. }
+                if entity.callable_kind == Some(SwiftCallableKind::PropertySet)
+                    && entity.formal_type.as_ref().is_some_and(|formal| {
+                        formal.parameters.len() == 1
+                            && matches!(formal.result, SwiftTypeEvidence::Tuple { ref elements } if elements.is_empty())
+                    })
+        ));
+
+        let constrained =
+            "$s24SwiftPlan0004ConditionalAAVA2A0aB6MarkerRzlE7resolvexyF";
+        assert!(matches!(
+            decode_swift_mangling(constrained, &limits()),
+            SwiftManglingEvidence::Supported { entity, .. }
+                if !entity.generic_requirements.is_empty()
+        ));
+    }
 }

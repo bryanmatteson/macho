@@ -19,12 +19,15 @@ use crate::analysis::functions::{
 use crate::analysis::functions::{
     FunctionEvidenceConfidence, FunctionImageIdentity, FunctionIndex,
 };
+use crate::analysis::indirect_calls::{
+    IndirectCallIndex, IndirectCallSiteStatus, IndirectTransferKind,
+};
 use crate::analysis::xref::{Xref, XrefIndex, XrefKind, XrefTarget};
 
 /// Current major version of the steerable-recovery wire contract.
 pub const RECOVERY_CONTRACT_MAJOR: u16 = 1;
 /// Current minor version of the steerable-recovery wire contract.
-pub const RECOVERY_CONTRACT_MINOR: u16 = 0;
+pub const RECOVERY_CONTRACT_MINOR: u16 = 1;
 
 /// Exact thin-image identity used by all program-recovery layers.
 pub type ProgramImageIdentity = FunctionImageIdentity;
@@ -346,6 +349,41 @@ pub enum RecoveryQuestionKind {
     RuntimeDispatch,
     /// Which image satisfies a dependency.
     DependencyImage,
+}
+
+/// Stable classification of one unresolved recovery frontier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum RecoveryFrontierKind {
+    /// A computed control-flow transform is not in the admitted static model.
+    ComputedBranchTransform,
+    /// One indirect transfer lacks a complete static target set.
+    IndirectTargets,
+    /// Current runtime state is required to establish the dispatch target.
+    RuntimeDispatch,
+    /// An explicit recovery budget omitted evidence.
+    Budget,
+    /// A stage-level frontier not attributable to one retained site.
+    Stage,
+    /// A runtime-open dependency boundary.
+    Dependency,
+}
+
+/// One exact, typed unresolved frontier retained by program recovery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryFrontier {
+    /// Structural object at which recovery stopped.
+    pub subject: ProgramSubjectKey,
+    /// Stable frontier classification.
+    pub kind: RecoveryFrontierKind,
+    /// Stable leaf reason code.
+    pub reason: String,
+    /// True when additional file-only analysis cannot establish current truth.
+    pub requires_runtime_evidence: bool,
+    /// Candidate records omitted at this exact site.
+    pub omitted_candidate_count: u64,
 }
 
 /// Exact image-bound identity of one recovery question.
@@ -1243,6 +1281,10 @@ fn authored_choice_matches_point(decision: &RecoveryDecision) -> bool {
             RecoveryQuestionKind::ReferenceOwnership,
             ProgramSubjectKey::CrossReference { .. },
             RecoveryChoice::ReferenceOwner { .. }
+        ) | (
+            RecoveryQuestionKind::IndirectTargets | RecoveryQuestionKind::RuntimeDispatch,
+            ProgramSubjectKey::IndirectTransfer { .. },
+            RecoveryChoice::KeepUnresolved
         )
     )
 }
@@ -1254,6 +1296,7 @@ pub(crate) fn build_recovery_questions(
     control_flow: Option<&ControlFlowIndex>,
     executable_bytes: Option<&ExecutableByteIndex>,
     xrefs: Option<&XrefIndex>,
+    indirect_calls: Option<&IndirectCallIndex>,
     guided_reference_ownerships: &[GuidedReferenceOwnership],
 ) -> Vec<RecoveryQuestion> {
     let mut questions =
@@ -1264,7 +1307,82 @@ pub(crate) fn build_recovery_questions(
         xrefs,
         guided_reference_ownerships,
     ));
+    questions.extend(build_indirect_recovery_questions(image, indirect_calls));
+    questions.sort_by(|left, right| {
+        (&left.subject, question_kind_order(left.kind))
+            .cmp(&(&right.subject, question_kind_order(right.kind)))
+    });
     questions
+}
+
+const fn question_kind_order(kind: RecoveryQuestionKind) -> u8 {
+    match kind {
+        RecoveryQuestionKind::FunctionEntry => 0,
+        RecoveryQuestionKind::FunctionRelationship => 1,
+        RecoveryQuestionKind::FunctionRanges => 2,
+        RecoveryQuestionKind::RangeOwnership => 3,
+        RecoveryQuestionKind::InstructionBoundary => 4,
+        RecoveryQuestionKind::ByteRole => 5,
+        RecoveryQuestionKind::ControlFlowEdge => 6,
+        RecoveryQuestionKind::DirectCall => 7,
+        RecoveryQuestionKind::ReferenceOwnership => 8,
+        RecoveryQuestionKind::NonReturningCall => 9,
+        RecoveryQuestionKind::IndirectTargets => 10,
+        RecoveryQuestionKind::FunctionAbi => 11,
+        RecoveryQuestionKind::RuntimeDispatch => 12,
+        RecoveryQuestionKind::DependencyImage => 13,
+    }
+}
+
+fn build_indirect_recovery_questions(
+    image: &ProgramImageIdentity,
+    indirect_calls: Option<&IndirectCallIndex>,
+) -> Vec<RecoveryQuestion> {
+    let Some(indirect_calls) = indirect_calls else {
+        return Vec::new();
+    };
+    indirect_calls
+        .calls()
+        .iter()
+        .filter(|call| call.status != IndirectCallSiteStatus::Complete)
+        .map(|call| {
+            let subject = ProgramSubjectKey::IndirectTransfer {
+                function_entry: call.source_function,
+                instruction_address: call.instruction_address,
+            };
+            let runtime_open = call.reasons.iter().any(|reason| {
+                reason.contains("runtime") || reason == "indirect.swift_runtime_instantiation_open"
+            }) || call.kinds.iter().any(|kind| {
+                matches!(
+                    kind,
+                    IndirectTransferKind::ObjectiveCDispatch | IndirectTransferKind::SwiftDispatch
+                )
+            });
+            let kind = if runtime_open {
+                RecoveryQuestionKind::RuntimeDispatch
+            } else {
+                RecoveryQuestionKind::IndirectTargets
+            };
+            RecoveryQuestion {
+                key: RecoveryPointKey {
+                    image: image.clone(),
+                    subject: subject.clone(),
+                    kind,
+                },
+                subject,
+                kind,
+                choices: vec![RecoveryChoice::KeepUnresolved],
+                signals: Vec::new(),
+                estimated_effect: RecoveryEffectEstimate {
+                    affected_layers: vec![
+                        RecoveryLayer::Calls,
+                        RecoveryLayer::ValueFlow,
+                        RecoveryLayer::Semantics,
+                    ],
+                },
+            }
+        })
+        .collect()
 }
 
 fn build_core_recovery_questions(

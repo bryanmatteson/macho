@@ -126,6 +126,62 @@ fn make_member(uuid: [u8; 16], address: u64, size: u64, arch: &str) -> Vec<u8> {
     data
 }
 
+fn make_v1_cache_with_local_symbols() -> Vec<u8> {
+    let mut data = vec![0_u8; 0x700];
+    cache_magic(&mut data, "arm64e");
+    put_u32(&mut data, 16, 0x1c8);
+    put_u32(&mut data, 20, 1);
+    data[0x58..0x68].copy_from_slice(&[0x44; 16]);
+    put_u64(&mut data, 0x48, 0x500);
+    put_u64(&mut data, 0x50, 0x40);
+    put_u32(&mut data, 0x188, 0x200);
+    put_u32(&mut data, 0x18c, 2);
+
+    put_u64(&mut data, 0x1c8, FAMILY_BASE);
+    put_u64(&mut data, 0x1d0, 0x100);
+    put_u64(&mut data, 0x1d8, 0x400);
+    put_u32(&mut data, 0x1e0, 5);
+    put_u32(&mut data, 0x1e4, 5);
+    data[0x200..0x210].copy_from_slice(&[0x55; 16]);
+    put_u64(&mut data, 0x210, 0x1000);
+    data[0x218..0x228].copy_from_slice(&[0x66; 16]);
+    put_u64(&mut data, 0x228, 0x2000);
+
+    put_u32(&mut data, 0x500, 24);
+    put_u32(&mut data, 0x504, 1);
+    put_u32(&mut data, 0x508, 40);
+    put_u32(&mut data, 0x50c, 8);
+    put_u32(&mut data, 0x510, 48);
+    put_u32(&mut data, 0x514, 1);
+    put_u32(&mut data, 0x518, 1);
+    put_name(&mut data, 0x528, "\0local\0");
+    put_u32(&mut data, 0x530, 0x1400);
+    put_u32(&mut data, 0x534, 0);
+    put_u32(&mut data, 0x538, 1);
+    data
+}
+
+fn make_symbols_member(uuid: [u8; 16]) -> Vec<u8> {
+    let mut data = vec![0_u8; 0x380];
+    cache_magic(&mut data, "arm64e");
+    put_u32(&mut data, 16, 0x260);
+    data[0x58..0x68].copy_from_slice(&uuid);
+    put_u64(&mut data, 0x48, 0x300);
+    put_u64(&mut data, 0x50, 0x40);
+    put_u32(&mut data, 0x300, 24);
+    put_u32(&mut data, 0x304, 1);
+    put_u32(&mut data, 0x308, 40);
+    put_u32(&mut data, 0x30c, 8);
+    put_u32(&mut data, 0x310, 48);
+    put_u32(&mut data, 0x314, 1);
+    put_u32(&mut data, 0x318, 1);
+    put_name(&mut data, 0x328, "\0local\0");
+    put_u64(&mut data, 0x330, 0x1400);
+    put_u32(&mut data, 0x338, 0);
+    put_u32(&mut data, 0x33c, 1);
+    data
+}
+
 fn synthetic_export_trie() -> Vec<u8> {
     let mut trie = vec![0, 1, b'_', 0, 6, 0, 0, 1];
     trie.extend_from_slice(b"main");
@@ -276,6 +332,7 @@ fn parse_old_format_cache() {
     assert_eq!(cache.mappings().len(), 1);
     assert_eq!(cache.images().len(), 1);
     assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
+    assert_eq!(cache.header.generation, DyldCacheHeaderGeneration::Legacy);
 }
 
 #[test]
@@ -288,6 +345,154 @@ fn parse_modern_format_cache() {
     assert_eq!(cache.images()[0].path, "/usr/lib/libSystem.B.dylib");
     assert_eq!(cache.images()[0].text_size, 4096);
     assert_eq!(cache.images()[0].address, 0x1_8000_0000);
+}
+
+#[test]
+fn apple_header_generations_and_local_symbol_entry_widths_are_explicit() {
+    let v1 = make_v1_cache_with_local_symbols();
+    let cache = parse_dyld_cache(&v1).expect("parse V1 cache");
+    assert_eq!(
+        cache.header.generation,
+        DyldCacheHeaderGeneration::SubcacheV1
+    );
+    assert_eq!(
+        cache
+            .subcaches()
+            .iter()
+            .map(|entry| entry.file_suffix.as_str())
+            .collect::<Vec<_>>(),
+        [".1", ".2"]
+    );
+    let locals = cache.local_symbols.as_ref().expect("embedded locals");
+    assert_eq!(locals.entries[0].dylib_offset, 0x1400);
+
+    let (primary, _, _) = make_family();
+    let cache = parse_dyld_cache(&primary).expect("parse V2 cache");
+    assert_eq!(
+        cache.header.generation,
+        DyldCacheHeaderGeneration::SubcacheV2
+    );
+    assert_eq!(cache.subcaches()[0].file_suffix, ".01");
+}
+
+#[test]
+fn future_magic_and_headers_outside_apples_envelope_are_typed_unsupported() {
+    let mut future_magic = make_minimal_cache("arm64e");
+    future_magic[..7].copy_from_slice(b"dyld_v2");
+    let error = parse_dyld_cache(&future_magic).expect_err("future magic");
+    assert_eq!(error.kind, DyldCacheErrorKind::Unsupported);
+
+    let mut future_header = make_minimal_cache("arm64e");
+    put_u32(&mut future_header, 16, 0x408);
+    let error = parse_dyld_cache(&future_header).expect_err("future header envelope");
+    assert_eq!(error.kind, DyldCacheErrorKind::Unsupported);
+}
+
+#[test]
+fn separate_symbols_member_is_required_and_uuid_validated() {
+    let (mut primary, first, second) = make_family();
+    let symbols_uuid = [0x77; 16];
+    primary[0x190..0x1a0].copy_from_slice(&symbols_uuid);
+    let symbols = make_symbols_member(symbols_uuid);
+    let family = DyldCacheFamily::parse(
+        CacheMemberInput {
+            name: "primary",
+            data: &primary,
+        },
+        [
+            CacheMemberInput {
+                name: ".01",
+                data: &first,
+            },
+            CacheMemberInput {
+                name: ".02.dyldlinkedit",
+                data: &second,
+            },
+            CacheMemberInput {
+                name: ".symbols",
+                data: &symbols,
+            },
+        ],
+    )
+    .expect("complete family with symbols");
+    let symbol_member = family.members().last().expect("symbols member");
+    assert_eq!(symbol_member.kind(), CacheFamilyMemberKind::Symbols);
+    assert_eq!(
+        symbol_member
+            .cache()
+            .local_symbols
+            .as_ref()
+            .expect("validated store")
+            .entries[0]
+            .dylib_offset,
+        0x1400
+    );
+    let image = family
+        .reconstruct_image(0, MaterializationLimits::default())
+        .expect("reconstruction with validated external locals");
+    assert_eq!(
+        image.completeness.local_symbols.state,
+        CompletenessState::Unresolved
+    );
+    assert!(
+        image
+            .completeness
+            .local_symbols
+            .detail
+            .contains("validated cache-level")
+    );
+
+    let missing = DyldCacheFamily::parse(
+        CacheMemberInput {
+            name: "primary",
+            data: &primary,
+        },
+        [
+            CacheMemberInput {
+                name: ".01",
+                data: &first,
+            },
+            CacheMemberInput {
+                name: ".02.dyldlinkedit",
+                data: &second,
+            },
+        ],
+    )
+    .expect_err("missing symbols member");
+    assert!(missing.to_string().contains(".symbols"));
+
+    let mut wrong_symbols = symbols;
+    wrong_symbols[0x58] ^= 0xff;
+    let wrong = DyldCacheFamily::parse(
+        CacheMemberInput {
+            name: "primary",
+            data: &primary,
+        },
+        [
+            CacheMemberInput {
+                name: ".01",
+                data: &first,
+            },
+            CacheMemberInput {
+                name: ".02.dyldlinkedit",
+                data: &second,
+            },
+            CacheMemberInput {
+                name: ".symbols",
+                data: &wrong_symbols,
+            },
+        ],
+    )
+    .expect_err("wrong symbols UUID");
+    assert!(wrong.to_string().contains("UUID mismatch"));
+}
+
+#[test]
+fn malformed_local_symbol_ranges_are_rejected() {
+    let mut symbols = make_symbols_member([0x77; 16]);
+    put_u32(&mut symbols, 0x33c, 2);
+    let error = parse_dyld_cache(&symbols).expect_err("entry exceeds nlist array");
+    assert!(error.to_string().contains("nlist range"));
 }
 
 #[test]
@@ -550,6 +755,19 @@ fn malformed_symbol_reference_prevents_delivery() {
         .reconstruct_image(0, MaterializationLimits::default())
         .expect_err("n_strx at string-table end");
     assert!(error.to_string().contains("string index"));
+}
+
+#[test]
+fn reconstruction_fails_closed_on_unknown_load_commands() {
+    let (primary, mut first, second) = make_family();
+    let command = 0x800 + 32 + 72 + 72 + 24;
+    put_u32(&mut first, command, 0x7fff_1234);
+    let family = parse_family(&primary, &first, &second);
+    let error = family
+        .reconstruct_image(0, MaterializationLimits::default())
+        .expect_err("unknown command may carry file coordinates");
+    assert_eq!(error.kind, DyldCacheErrorKind::Unsupported);
+    assert!(error.to_string().contains("unhandled Mach-O load command"));
 }
 
 #[test]

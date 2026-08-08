@@ -8,7 +8,7 @@
 mod artifact;
 mod bundle;
 mod prompt;
-mod syntax;
+pub(crate) mod syntax;
 mod validate;
 
 pub use artifact::{

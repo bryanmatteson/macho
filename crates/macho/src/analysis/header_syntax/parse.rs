@@ -583,7 +583,15 @@ pub(super) fn parse_parameters(
 ) -> Result<(Vec<Parameter>, bool, ParameterState), ParseError> {
     let text = text.trim();
     if text.is_empty() {
-        return Ok((Vec::new(), false, ParameterState::Unspecified));
+        return Ok((
+            Vec::new(),
+            false,
+            if language == Language::C {
+                ParameterState::Unspecified
+            } else {
+                ParameterState::Known
+            },
+        ));
     }
     if text == "void" {
         return Ok((Vec::new(), false, ParameterState::Known));
@@ -810,6 +818,31 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unit.declarations.len(), 2);
+    }
+
+    #[test]
+    fn empty_parameter_lists_follow_the_selected_language() {
+        for (language, expected) in [
+            (Language::C, ParameterState::Unspecified),
+            (Language::Cpp, ParameterState::Known),
+        ] {
+            let unit = TreeSitterHeaderParser
+                .parse(language, "int value();")
+                .unwrap();
+            let [
+                Decl::Function {
+                    signature:
+                        Type::Function {
+                            parameter_state, ..
+                        },
+                    ..
+                },
+            ] = unit.declarations.as_slice()
+            else {
+                panic!("expected one function: {:?}", unit.declarations);
+            };
+            assert_eq!(*parameter_state, expected);
+        }
     }
 
     #[test]

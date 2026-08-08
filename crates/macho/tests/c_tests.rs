@@ -86,7 +86,7 @@ fn c_command_outputs_json() {
     let json: serde_json::Value = serde_json::from_str(&stdout).expect("json");
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["command"], "c");
-    assert_eq!(json["data"]["schema_version"], 2);
+    assert_eq!(json["data"]["schema_version"], 3);
     assert_eq!(json["data"]["language"], "c_abi");
     let slice = &json["data"]["slices"][0];
     assert!(slice["observations"].is_array());

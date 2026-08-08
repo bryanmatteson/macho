@@ -57,10 +57,10 @@ use crate::analysis::recovery::{
     RecoveryDecision, RecoveryDecisionApplicability, RecoveryDecisionApplication,
     RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation, RecoveryDecisionDerivationKind,
     RecoveryDelta, RecoveryDeltaError, RecoveryDeltaKind, RecoveryDeltaRecord,
-    RecoveryDeltaSummary, RecoveryGuide, RecoveryGuideApplicability, RecoveryGuideApplication,
-    RecoveryGuideValidation, RecoveryLayer, RecoveryQuestion, RecoveryQuestionKind,
-    RecoveryReferenceKind, RecoveryReferenceTargetKey, build_recovery_questions,
-    cross_reference_subject, validate_recovery_guide,
+    RecoveryDeltaSummary, RecoveryFrontier, RecoveryFrontierKind, RecoveryGuide,
+    RecoveryGuideApplicability, RecoveryGuideApplication, RecoveryGuideValidation, RecoveryLayer,
+    RecoveryQuestion, RecoveryQuestionKind, RecoveryReferenceKind, RecoveryReferenceTargetKey,
+    build_recovery_questions, cross_reference_subject, validate_recovery_guide,
 };
 use crate::analysis::rtti::{
     RecoveredTypeInfo, RecoveredVtable, RttiIndex, RttiIndexStatus, RttiRecoveryError,
@@ -91,7 +91,7 @@ pub const PROGRAM_RECOVERY_LIMITS_SCHEMA_VERSION: u32 = 1;
 /// Current schema for examined-universe and stage completeness receipts.
 pub const PROGRAM_COMPLETENESS_SCHEMA_VERSION: u32 = 1;
 /// Current schema for durable whole-program Fact IR documents.
-pub const PROGRAM_FACT_IR_SCHEMA_VERSION: u32 = 1;
+pub const PROGRAM_FACT_IR_SCHEMA_VERSION: u32 = 2;
 
 /// Explicit limits for every independently selectable recovery module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1762,6 +1762,7 @@ impl ProgramFactDocument {
                 self.program.control_flow.as_ref(),
                 self.program.executable_bytes.as_ref(),
                 self.program.xrefs.as_ref(),
+                self.program.indirect_calls.as_ref(),
                 &self.program.guided_reference_ownerships,
             )
         {
@@ -2058,6 +2059,54 @@ struct ProgramRecoveryGuidance<'guide> {
 impl ProgramRecoveryReuse<'_> {
     fn can_reuse(&self, stage: ProgramRecoveryStage) -> bool {
         self.prior.executed.contains(&stage) && !self.dirty.contains(&stage)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recover_control_flow_stage(
+    macho: &MachoFile<'_>,
+    functions: &FunctionIndex,
+    pointers: Option<&PointerIndex>,
+    exceptions: Option<&ExceptionIndex>,
+    limits: crate::analysis::control_flow::ControlFlowLimits,
+    guidance: Option<&ControlFlowRecoveryGuidance>,
+    reuse: Option<&ProgramRecoveryReuse<'_>>,
+) -> Result<ControlFlowIndex, ControlFlowRecoveryError> {
+    // Reuse is deliberately limited to an exact unguided predecessor. Guided
+    // byte roles and suppressions are function-local in effect but the prior
+    // program does not retain their normalized input key independently of the
+    // guide receipt yet, so treating them as reusable would be an admission
+    // claim that cannot be revalidated here.
+    if guidance.is_none()
+        && let Some(reuse) = reuse
+        && reuse.prior.guide.is_none()
+        && reuse.prior.pointers.as_ref() == pointers
+        && reuse.prior.exceptions.as_ref() == exceptions
+        && let (Some(prior_functions), Some(prior_control_flow)) = (
+            reuse.prior.functions.as_ref(),
+            reuse.prior.control_flow.as_ref(),
+        )
+    {
+        return ControlFlowIndex::recover_reusing(
+            macho,
+            functions,
+            pointers,
+            exceptions,
+            limits,
+            prior_functions,
+            prior_control_flow,
+            reuse.prior.pointers.as_ref(),
+            reuse.prior.exceptions.as_ref(),
+        )
+        .map(|(control_flow, _)| control_flow);
+    }
+    match guidance {
+        Some(guidance) => ControlFlowIndex::recover_with_guidance(
+            macho, functions, pointers, exceptions, limits, guidance,
+        ),
+        None => {
+            ControlFlowIndex::recover_with_evidence(macho, functions, pointers, exceptions, limits)
+        }
     }
 }
 
@@ -2754,23 +2803,15 @@ impl RecoveredProgram {
                 let functions = functions
                     .as_ref()
                     .expect("resolved control-flow dependency includes functions");
-                Some(match control_flow_guidance {
-                    Some(guidance) => ControlFlowIndex::recover_with_guidance(
-                        macho,
-                        functions,
-                        pointers.as_ref(),
-                        exceptions.as_ref(),
-                        limits.control_flow,
-                        guidance,
-                    )?,
-                    None => ControlFlowIndex::recover_with_evidence(
-                        macho,
-                        functions,
-                        pointers.as_ref(),
-                        exceptions.as_ref(),
-                        limits.control_flow,
-                    )?,
-                })
+                Some(recover_control_flow_stage(
+                    macho,
+                    functions,
+                    pointers.as_ref(),
+                    exceptions.as_ref(),
+                    limits.control_flow,
+                    control_flow_guidance,
+                    reuse.as_ref(),
+                )?)
             }
         } else {
             None
@@ -2795,23 +2836,15 @@ impl RecoveredProgram {
                 let refined = functions
                     .as_ref()
                     .expect("refined function inventory was just installed");
-                let rebuilt = match control_flow_guidance {
-                    Some(guidance) => ControlFlowIndex::recover_with_guidance(
-                        macho,
-                        refined,
-                        pointers.as_ref(),
-                        exceptions.as_ref(),
-                        limits.control_flow,
-                        guidance,
-                    )?,
-                    None => ControlFlowIndex::recover_with_evidence(
-                        macho,
-                        refined,
-                        pointers.as_ref(),
-                        exceptions.as_ref(),
-                        limits.control_flow,
-                    )?,
-                };
+                let rebuilt = recover_control_flow_stage(
+                    macho,
+                    refined,
+                    pointers.as_ref(),
+                    exceptions.as_ref(),
+                    limits.control_flow,
+                    control_flow_guidance,
+                    reuse.as_ref(),
+                )?;
                 control_flow = Some(rebuilt);
             }
         }
@@ -2983,6 +3016,7 @@ impl RecoveredProgram {
             control_flow.as_ref(),
             executable_bytes.as_ref(),
             xrefs.as_ref(),
+            indirect_calls.as_ref(),
             &guided_reference_ownerships,
         );
         let completeness = program_completeness(
@@ -3365,23 +3399,99 @@ impl RecoveredProgram {
         }
     }
 
-    /// Stable unresolved frontier subjects from incomplete stage contracts and
-    /// explicit runtime-open dependency boundaries.
-    pub fn frontier_subjects(&self) -> Vec<ProgramSubjectKey> {
-        let mut frontiers = self
-            .completeness
-            .contracts
-            .iter()
-            .filter(|contract| {
-                !contract.globally_complete
-                    || contract.budget_excluded != 0
-                    || contract.continuation.is_some()
-            })
-            .map(|contract| ProgramSubjectKey::Frontier {
-                layer: format!("program.{}", contract.stage.key()),
-                address: None,
-            })
-            .collect::<Vec<_>>();
+    /// Stable typed unresolved frontiers from local recovery sites, incomplete
+    /// stage contracts, and explicit runtime-open dependency boundaries.
+    pub fn frontiers(&self) -> Vec<RecoveryFrontier> {
+        let mut frontiers = Vec::new();
+        if let Some(indirect_calls) = &self.indirect_calls {
+            for call in indirect_calls
+                .calls()
+                .iter()
+                .filter(|call| call.status != IndirectCallSiteStatus::Complete)
+            {
+                let subject = ProgramSubjectKey::IndirectTransfer {
+                    function_entry: call.source_function,
+                    instruction_address: call.instruction_address,
+                };
+                let reasons = if call.reasons.is_empty() {
+                    vec!["indirect.target_unresolved".to_owned()]
+                } else {
+                    call.reasons.clone()
+                };
+                for reason in reasons {
+                    let requires_runtime_evidence = reason.contains("runtime")
+                        || reason == "indirect.swift_runtime_instantiation_open";
+                    frontiers.push(RecoveryFrontier {
+                        subject: subject.clone(),
+                        kind: if requires_runtime_evidence {
+                            RecoveryFrontierKind::RuntimeDispatch
+                        } else if call.status == IndirectCallSiteStatus::Truncated
+                            || call.omitted_candidate_count != 0
+                        {
+                            RecoveryFrontierKind::Budget
+                        } else {
+                            RecoveryFrontierKind::IndirectTargets
+                        },
+                        reason,
+                        requires_runtime_evidence,
+                        omitted_candidate_count: call.omitted_candidate_count,
+                    });
+                }
+            }
+        }
+        if let Some(control_flow) = &self.control_flow {
+            for graph in
+                control_flow.functions().iter().filter(|graph| {
+                    graph.completeness.reasons.iter().any(|reason| {
+                        reason == "control_flow.computed_branch_transform_unsupported"
+                    })
+                })
+            {
+                for transform in &graph.computed_branch_transforms {
+                    frontiers.push(RecoveryFrontier {
+                        subject: ProgramSubjectKey::IndirectTransfer {
+                            function_entry: graph.function_entry,
+                            instruction_address: transform.instruction_address,
+                        },
+                        kind: RecoveryFrontierKind::ComputedBranchTransform,
+                        reason: "control_flow.computed_branch_transform_unsupported".into(),
+                        requires_runtime_evidence: false,
+                        omitted_candidate_count: 0,
+                    });
+                }
+            }
+        }
+        frontiers.extend(
+            self.completeness
+                .contracts
+                .iter()
+                .filter(|contract| {
+                    !contract.globally_complete
+                        || contract.budget_excluded != 0
+                        || contract.continuation.is_some()
+                })
+                .map(|contract| RecoveryFrontier {
+                    subject: ProgramSubjectKey::Frontier {
+                        layer: format!("program.{}", contract.stage.key()),
+                        address: None,
+                    },
+                    kind: if contract.budget_excluded != 0 || contract.continuation.is_some() {
+                        RecoveryFrontierKind::Budget
+                    } else {
+                        RecoveryFrontierKind::Stage
+                    },
+                    reason: self
+                        .completeness
+                        .stages
+                        .iter()
+                        .find(|receipt| receipt.stage == contract.stage)
+                        .and_then(|receipt| receipt.reasons.first())
+                        .cloned()
+                        .unwrap_or_else(|| format!("program.{}.incomplete", contract.stage.key())),
+                    requires_runtime_evidence: false,
+                    omitted_candidate_count: contract.budget_excluded,
+                }),
+        );
         if let Some(dependencies) = &self.dependencies {
             frontiers.extend(dependencies.frontiers().iter().map(|frontier| {
                 let layer = match frontier.kind {
@@ -3398,15 +3508,39 @@ impl RecoveredProgram {
                         "dependencies.encrypted_code"
                     }
                 };
-                ProgramSubjectKey::Frontier {
-                    layer: layer.to_owned(),
-                    address: None,
+                RecoveryFrontier {
+                    subject: ProgramSubjectKey::Frontier {
+                        layer: layer.to_owned(),
+                        address: None,
+                    },
+                    kind: RecoveryFrontierKind::Dependency,
+                    reason: layer.to_owned(),
+                    requires_runtime_evidence: true,
+                    omitted_candidate_count: 0,
                 }
             }));
         }
-        frontiers.sort();
+        frontiers.sort_by(|left, right| {
+            (&left.subject, left.kind, &left.reason).cmp(&(
+                &right.subject,
+                right.kind,
+                &right.reason,
+            ))
+        });
         frontiers.dedup();
         frontiers
+    }
+
+    /// Stable unresolved frontier subjects for compact identity-only consumers.
+    pub fn frontier_subjects(&self) -> Vec<ProgramSubjectKey> {
+        let mut subjects = self
+            .frontiers()
+            .into_iter()
+            .map(|frontier| frontier.subject)
+            .collect::<Vec<_>>();
+        subjects.sort();
+        subjects.dedup();
+        subjects
     }
 
     /// Validate a neutral recovery guide without applying it or changing this program.

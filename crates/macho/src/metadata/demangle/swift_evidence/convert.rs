@@ -1,9 +1,9 @@
 use swift_demangler::raw::{Node, NodeKind};
 use swift_demangler::{
     Accessor, AccessorKind, AsyncSymbol, AsyncSymbolKind, Closure, ContextComponent, Destructor,
-    DestructorKind, Function, FunctionConvention, HasFunctionSignature, HasGenericSignature,
-    HasModule, ImplFunctionType, ReabstractionThunk, SpecializationKind, SpecializedSymbol, Symbol,
-    Thunk, TypeKind, TypeRef,
+    DestructorKind, Function, FunctionConvention, GenericRequirementKind, GenericSignature,
+    HasFunctionSignature, HasGenericSignature, HasModule, ImplFunctionType, ReabstractionThunk,
+    SpecializationKind, SpecializedSymbol, Symbol, Thunk, TypeKind, TypeRef,
 };
 
 use super::model::*;
@@ -122,15 +122,7 @@ pub(super) fn closure_entity(
     closure: Closure<'_>,
     limits: &SwiftCallableEvidenceLimits,
 ) -> Result<SwiftMangledEntityEvidence, ManglingError> {
-    if closure
-        .generic_signature()
-        .is_some_and(|signature| !signature.requirements().is_empty())
-    {
-        return Err((
-            SwiftManglingGap::UnsupportedRequirement,
-            "generic closure requirements are not yet admitted".into(),
-        ));
-    }
+    let generic_requirements = convert_generic_requirements(closure.generic_signature(), limits)?;
     let module = required_text(closure.module(), "closure module", limits)?;
     let (declaration_path, declaration, _) =
         declaration_context(closure.parent_context().components(), &module, limits)?;
@@ -170,7 +162,7 @@ pub(super) fn closure_entity(
             r#async: signature.is_async(),
             throwing: signature.is_throwing(),
         }),
-        generic_requirements: Vec::new(),
+        generic_requirements,
         variant_role: Some(if signature.is_async() {
             SwiftCallableVariantRole::AsyncEntry
         } else {
@@ -184,15 +176,7 @@ pub(super) fn reabstraction_entity(
     thunk: ReabstractionThunk<'_>,
     limits: &SwiftCallableEvidenceLimits,
 ) -> Result<SwiftMangledEntityEvidence, ManglingError> {
-    if thunk
-        .generic_signature()
-        .is_some_and(|signature| !signature.requirements().is_empty())
-    {
-        return Err((
-            SwiftManglingGap::UnsupportedRequirement,
-            "generic reabstraction requirements are not yet admitted".into(),
-        ));
-    }
+    let generic_requirements = convert_generic_requirements(thunk.generic_signature(), limits)?;
     let module = required_text(thunk.module(), "reabstraction type module", limits)?;
     let target = thunk.target().ok_or_else(|| {
         (
@@ -213,7 +197,7 @@ pub(super) fn reabstraction_entity(
         callable_kind: Some(SwiftCallableKind::Closure),
         base_name: Some("$reabstraction".into()),
         formal_type: Some(impl_function_formal_type(target, limits)?),
-        generic_requirements: Vec::new(),
+        generic_requirements,
         variant_role: Some(SwiftCallableVariantRole::ReabstractionThunk),
         specialization: None,
     })
@@ -351,12 +335,7 @@ pub(super) fn accessor_entity(
     accessor: Accessor<'_>,
     limits: &SwiftCallableEvidenceLimits,
 ) -> Result<SwiftMangledEntityEvidence, ManglingError> {
-    if accessor.generic_signature().is_some() {
-        return Err((
-            SwiftManglingGap::UnsupportedRequirement,
-            "generic accessor requirements are not yet admitted".into(),
-        ));
-    }
+    let generic_requirements = convert_generic_requirements(accessor.generic_signature(), limits)?;
     let (callable_kind, role) = match (accessor.kind(), accessor.is_subscript()) {
         (AccessorKind::Getter, false) => (
             SwiftCallableKind::PropertyGet,
@@ -364,6 +343,14 @@ pub(super) fn accessor_entity(
         ),
         (AccessorKind::Getter | AccessorKind::Subscript, true) => (
             SwiftCallableKind::SubscriptGet,
+            SwiftCallableVariantRole::DirectEntry,
+        ),
+        (AccessorKind::Setter, true) => (
+            SwiftCallableKind::SubscriptSet,
+            SwiftCallableVariantRole::DirectEntry,
+        ),
+        (AccessorKind::Setter, false) => (
+            SwiftCallableKind::PropertySet,
             SwiftCallableVariantRole::DirectEntry,
         ),
         (AccessorKind::Read, false) => (
@@ -398,6 +385,11 @@ pub(super) fn accessor_entity(
     } else {
         SwiftFunctionRepresentation::Thin
     };
+    let property_type = convert_type(property_type, limits)?;
+    let setter = matches!(
+        callable_kind,
+        SwiftCallableKind::PropertySet | SwiftCallableKind::SubscriptSet
+    );
     Ok(SwiftMangledEntityEvidence {
         module,
         declaration_path,
@@ -406,12 +398,25 @@ pub(super) fn accessor_entity(
         base_name: Some(base_name),
         formal_type: Some(SwiftFormalTypeEvidence {
             representation,
-            parameters: Vec::new(),
-            result: convert_type(property_type, limits)?,
+            parameters: setter
+                .then(|| SwiftFormalParameter {
+                    label: None,
+                    r#type: property_type.clone(),
+                    variadic: false,
+                })
+                .into_iter()
+                .collect(),
+            result: if setter {
+                SwiftTypeEvidence::Tuple {
+                    elements: Vec::new(),
+                }
+            } else {
+                property_type
+            },
             r#async: false,
             throwing: false,
         }),
-        generic_requirements: Vec::new(),
+        generic_requirements,
         variant_role: Some(role),
         specialization: None,
     })
@@ -485,15 +490,7 @@ pub(super) fn function_entity(
     function: Function<'_>,
     limits: &SwiftCallableEvidenceLimits,
 ) -> Result<SwiftMangledEntityEvidence, (SwiftManglingGap, String)> {
-    if function
-        .generic_signature()
-        .is_some_and(|signature| !signature.requirements().is_empty())
-    {
-        return Err((
-            SwiftManglingGap::UnsupportedRequirement,
-            "generic function requirements are not yet admitted".into(),
-        ));
-    }
+    let generic_requirements = convert_generic_requirements(function.generic_signature(), limits)?;
     let module = required_text(function.module(), "function module", limits)?;
     let (declaration_path, declaration, callable_kind) =
         function_context(function, &module, limits)?;
@@ -542,7 +539,7 @@ pub(super) fn function_entity(
             r#async: signature.is_async(),
             throwing: signature.is_throwing(),
         }),
-        generic_requirements: Vec::new(),
+        generic_requirements,
         variant_role: Some(if signature.is_async() {
             SwiftCallableVariantRole::AsyncEntry
         } else {
@@ -643,6 +640,60 @@ pub(super) fn representation(
         FunctionConvention::Block => SwiftFunctionRepresentation::Block,
         FunctionConvention::Thin => SwiftFunctionRepresentation::Thin,
     }
+}
+
+fn convert_generic_requirements(
+    signature: Option<GenericSignature<'_>>,
+    limits: &SwiftCallableEvidenceLimits,
+) -> Result<Vec<SwiftGenericRequirementEvidence>, ManglingError> {
+    let Some(signature) = signature else {
+        return Ok(Vec::new());
+    };
+    signature
+        .requirements()
+        .into_iter()
+        .map(|requirement| match requirement.kind() {
+            GenericRequirementKind::Conformance {
+                subject: Some(subject),
+                constraint: Some(constraint),
+            } => {
+                let subject = convert_type(*subject, limits)?;
+                let constraint = convert_type(*constraint, limits)?;
+                let SwiftTypeEvidence::Nominal {
+                    declaration: protocol,
+                    arguments,
+                } = constraint
+                else {
+                    return Err((
+                        SwiftManglingGap::UnsupportedRequirement,
+                        "generic conformance constraint is not a nominal protocol".into(),
+                    ));
+                };
+                if !arguments.is_empty() || protocol.kind != SwiftTypeDeclarationKind::Protocol {
+                    return Err((
+                        SwiftManglingGap::UnsupportedRequirement,
+                        "generic conformance constraint is not an unbound protocol".into(),
+                    ));
+                }
+                Ok(SwiftGenericRequirementEvidence::Conformance { subject, protocol })
+            }
+            GenericRequirementKind::SameType {
+                first: Some(first),
+                second: Some(second),
+            } => Ok(SwiftGenericRequirementEvidence::SameType {
+                left: convert_type(*first, limits)?,
+                right: convert_type(*second, limits)?,
+            }),
+            GenericRequirementKind::Layout { .. } => Err((
+                SwiftManglingGap::UnsupportedRequirement,
+                "generic layout requirement is retained but not yet typed".into(),
+            )),
+            _ => Err((
+                SwiftManglingGap::UnsupportedRequirement,
+                "generic requirement lacks a complete subject or constraint".into(),
+            )),
+        })
+        .collect()
 }
 
 pub(super) fn convert_type(

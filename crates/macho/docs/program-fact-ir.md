@@ -177,10 +177,18 @@ when an exact xref source has multiple recovered range owners. Authored choices
 must select one of those owners (including an owner introduced by a
 `FunctionRanges` decision in the same complete guide).
 
-Stage reuse is a performance optimization only. Dirty roots expand through all
+Reuse is a performance optimization only. Dirty roots expand through all
 declared consumers, and the Functions/ControlFlow extent-refinement feedback is
 treated as a dirty edge in both directions. Optional symbol evidence also
 invalidates Functions whenever both stages are selected. Equivalence tests
-compare selective refine and deepen results to full cold rebuilds. Future
-per-function CFG caches must preserve the same invariant or declare a separate
-approximation tier.
+compare selective refine and deepen results to full cold rebuilds.
+
+Function-local CFG reuse is admitted only for an exact prior image and limits,
+an equal complete `RecoveredFunction`, unchanged pointer/exception inputs, the
+same non-returning fixed-point set, and the same incoming global decoded-byte
+budget. Reused graphs are charged their retained decoded-byte count before the
+next function is considered, so truncation and continuations stay identical to
+a cold fold. Cache admission and hit counts are not serialized and never
+change Fact IR identity, coverage, limitations, or questions. Guided CFGs are
+not currently reusable because their normalized function-local inputs are not
+stored as an independent durable cache key.

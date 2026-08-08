@@ -599,6 +599,7 @@ impl ProjectionContext {
                     format!("objc-record|{kind:?}|{name}").as_bytes(),
                 ))
                 .expect("SHA-256 entity ID"),
+                owner: None,
                 record_kind: *kind,
                 path: NonEmpty::new(vec![wire_name]).unwrap(),
             });

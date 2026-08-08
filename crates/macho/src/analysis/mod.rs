@@ -55,10 +55,10 @@ pub mod executable_bytes;
 pub mod functions;
 /// Offline, bounded, evidence-accountable header hypothesis exchange.
 pub mod header_infer;
-/// Domain-neutral ranked hypotheses and operator selection policy.
-pub mod hypothesis;
 /// Process-free parsing, validation, and rendering for recovered headers.
 pub mod header_syntax;
+/// Domain-neutral ranked hypotheses and operator selection policy.
+pub mod hypothesis;
 /// The image module.
 pub mod image;
 /// Indexed image layout and address translation.
@@ -108,12 +108,15 @@ pub use analyzer::{
     UnsupportedReason, domain_reports,
 };
 pub use control_flow::{
-    ControlFlowEdgeKind, GuidedControlFlowEdgeSuppression, GuidedDirectCallSuppression,
+    ComputedBranchTransformEvidence, ControlFlowEdgeKind, GuidedControlFlowEdgeSuppression,
+    GuidedDirectCallSuppression,
 };
 pub use hypothesis::{
-    DecisionAuthority, EvidenceAuthority, HypothesisCandidate, HypothesisConsequence,
-    HypothesisContractError, HypothesisLedger, HypothesisOverride, HypothesisSelectionPolicy,
-    HypothesisSelectionReceipt, HypothesisSubject, RecoveryHypothesis, SelectionPolicyMode,
+    DecisionAuthority, EvidenceAuthority, HYPOTHESIS_SELECTION_DOCUMENT_VERSION,
+    HypothesisCandidate, HypothesisConsequence, HypothesisContractError, HypothesisEvidenceKind,
+    HypothesisEvidenceRef, HypothesisLedger, HypothesisOverride, HypothesisSelectionDocument,
+    HypothesisSelectionDocumentError, HypothesisSelectionPolicy, HypothesisSelectionReceipt,
+    HypothesisSubject, RecoveryHypothesis, SelectionPolicyMode,
 };
 pub use planner::{
     AnalysisLimits, AnalysisPlan, AuditPlan, AuditRuleSpec, ContainerPlan, DiffPlan,
@@ -137,8 +140,9 @@ pub use recovery::{
     RecoveryDecisionApplication, RecoveryDecisionApplicationStatus, RecoveryDecisionDerivation,
     RecoveryDecisionDerivationKind, RecoveryDecisionValidation, RecoveryDelta, RecoveryDeltaError,
     RecoveryDeltaKind, RecoveryDeltaRecord, RecoveryDeltaSummary, RecoveryEffectEstimate,
-    RecoveryGuide, RecoveryGuideApplicability, RecoveryGuideApplication, RecoveryGuideBuildError,
-    RecoveryGuideBuilder, RecoveryGuideValidation, RecoveryLayer, RecoveryPointKey,
-    RecoveryQuestion, RecoveryQuestionKind, RecoveryReferenceKind, RecoveryReferenceTargetKey,
-    RecoverySignal, RecoverySignalKey, RecoverySignalKind,
+    RecoveryFrontier, RecoveryFrontierKind, RecoveryGuide, RecoveryGuideApplicability,
+    RecoveryGuideApplication, RecoveryGuideBuildError, RecoveryGuideBuilder,
+    RecoveryGuideValidation, RecoveryLayer, RecoveryPointKey, RecoveryQuestion,
+    RecoveryQuestionKind, RecoveryReferenceKind, RecoveryReferenceTargetKey, RecoverySignal,
+    RecoverySignalKey, RecoverySignalKind,
 };

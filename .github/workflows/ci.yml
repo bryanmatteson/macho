@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -27,8 +27,9 @@ jobs:
       - name: Real macOS signing oracle
         if: runner.os == 'macOS'
         run: >-
-          cargo test -p macho-cli --test patch_signing_tests
-          macos_codesign_oracle -- --ignored --exact --nocapture
+          cargo test --locked -p macho --all-features
+          --test patch_signing_tests macos_codesign_oracle
+          -- --ignored --exact --nocapture
       - name: Retain benchmark artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -36,6 +37,15 @@ jobs:
           name: criterion-${{ matrix.os }}
           path: target/criterion
           if-no-files-found: ignore
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked -p macho --no-default-features
+      - run: cargo check --locked -p macho --all-features --lib --bins
 
   fuzz:
     strategy:

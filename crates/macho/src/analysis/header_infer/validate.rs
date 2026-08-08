@@ -302,10 +302,16 @@ fn apply_grouping(
         | HeaderDecl::Variable {
             owner: declaration_owner,
             ..
+        }
+        | HeaderDecl::Record {
+            owner: declaration_owner,
+            ..
+        }
+        | HeaderDecl::Forward {
+            owner: declaration_owner,
+            ..
         } => *declaration_owner = Some(owner.clone()),
-        HeaderDecl::Record { path, .. }
-        | HeaderDecl::Forward { path, .. }
-        | HeaderDecl::Alias { path, .. } => {
+        HeaderDecl::Alias { path, .. } => {
             let mut qualified = owner.path.as_slice().to_vec();
             qualified.extend(path.as_slice().iter().cloned());
             *path = NonEmpty::new(qualified)

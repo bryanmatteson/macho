@@ -364,9 +364,26 @@ impl HypothesisBundle {
                         }
                         id
                     }
-                    HeaderDecl::Record { id, path, .. }
-                    | HeaderDecl::Forward { id, path, .. }
-                    | HeaderDecl::Alias { id, path, .. } => {
+                    HeaderDecl::Record {
+                        id, owner, path, ..
+                    }
+                    | HeaderDecl::Forward {
+                        id, owner, path, ..
+                    } => {
+                        if owner.is_some() {
+                            return Err(ArtifactError::Invalid(
+                                "grouping type template already has an owner".into(),
+                            ));
+                        }
+                        if path.as_slice().len() != 1 {
+                            return Err(ArtifactError::Invalid(
+                                "grouping type template must have one terminal path component"
+                                    .into(),
+                            ));
+                        }
+                        id
+                    }
+                    HeaderDecl::Alias { id, path, .. } => {
                         if path.as_slice().len() != 1 {
                             return Err(ArtifactError::Invalid(
                                 "grouping type template must have one terminal path component"

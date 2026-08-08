@@ -48,20 +48,14 @@ pub fn check(root: &Path, require_tag: bool) -> Result<()> {
 
 fn check_package_preparation(root: &Path) -> Result<()> {
     let status = Command::new("cargo")
-        .args([
-            "package",
-            "--workspace",
-            "--locked",
-            "--no-verify",
-            "--allow-dirty",
-        ])
+        .args(["package", "--locked", "--package", "macho", "--allow-dirty"])
         .current_dir(root)
         .status()
-        .context("run cargo package for workspace")?;
+        .context("build and verify the publishable macho package")?;
     if status.success() {
         Ok(())
     } else {
-        bail!("workspace package preparation failed")
+        bail!("publishable macho package verification failed")
     }
 }
 
@@ -119,19 +113,17 @@ fn check_lockfile_packages(path: &Path, version: &str, names: &[&str]) -> Result
 }
 
 fn check_clean_exact_tag(root: &Path, version: &str, require_tag: bool) -> Result<()> {
-    let paths = ["Cargo.toml", "Cargo.lock", "CHANGELOG.md", "crates"];
     let status = Command::new("git")
         .arg("diff")
         .arg("--quiet")
         .arg("HEAD")
         .arg("--")
-        .args(paths)
         .current_dir(root)
         .status()
-        .context("run git diff for version-bearing files")?;
+        .context("run git diff for the tracked release tree")?;
     if !status.success() {
         if require_tag {
-            bail!("tagged release requires clean version-bearing paths");
+            bail!("tagged release requires a clean tracked release tree");
         }
         return Ok(());
     }

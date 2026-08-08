@@ -122,22 +122,28 @@ pub fn run(args: DyldCacheArgs, format: OutputFormat, out: &mut dyn Write) -> Re
 }
 
 fn map_declared_siblings(primary_path: &Path, cache: &DyldCache) -> Result<Vec<(String, Mmap)>> {
-    cache
+    let mut suffixes = cache
         .subcaches()
         .iter()
-        .map(|entry| {
+        .map(|entry| entry.file_suffix.clone())
+        .collect::<Vec<_>>();
+    if cache.header.symbol_file_uuid != [0; 16] {
+        suffixes.push(".symbols".to_owned());
+    }
+    suffixes
+        .into_iter()
+        .map(|suffix| {
             let mut path = OsString::from(primary_path.as_os_str());
-            path.push(&entry.file_suffix);
+            path.push(&suffix);
             let path = PathBuf::from(path);
             map_input(&path)
                 .with_context(|| {
                     format!(
-                        "required subcache {:?} was declared by {}",
-                        entry.file_suffix,
+                        "required cache family member {suffix:?} was declared by {}",
                         primary_path.display()
                     )
                 })
-                .map(|mmap| (entry.file_suffix.clone(), mmap))
+                .map(|mmap| (suffix, mmap))
         })
         .collect()
 }

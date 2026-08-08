@@ -132,6 +132,28 @@ pub struct MachoSwiftProtocolRequirementRecordV1 {
     pub raw_sha256: EvidenceDigest,
 }
 
+/// One generic signature requirement preceding a protocol's dispatch
+/// requirements. Relative operands remain raw ABI evidence until their full
+/// constraint kind is admitted by the semantic layer.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachoSwiftProtocolSignatureRequirementRecordV1 {
+    /// Owning protocol descriptor.
+    pub protocol_descriptor_va: u64,
+    /// Signature-local requirement index.
+    pub requirement_index: u32,
+    /// Generic requirement descriptor address.
+    pub descriptor_va: u64,
+    /// ABI generic requirement flags.
+    pub flags: u32,
+    /// Raw relative parameter mangling pointer.
+    pub parameter_relative: i32,
+    /// Raw relative constraint pointer or layout payload.
+    pub constraint_relative: i32,
+    /// Digest of the exact 12-byte descriptor.
+    pub raw_sha256: EvidenceDigest,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Macho Swift Class Method Kind V1 evidence.
@@ -273,6 +295,9 @@ pub struct SwiftDecodeBatchV1 {
     pub associated_types: Vec<MachoSwiftAssociatedTypeDescriptorV1>,
     /// protocol requirements.
     pub protocol_requirements: Vec<MachoSwiftProtocolRequirementRecordV1>,
+    /// Protocol generic signature requirements.
+    #[serde(default)]
+    pub protocol_signature_requirements: Vec<MachoSwiftProtocolSignatureRequirementRecordV1>,
     /// class vtable entries.
     pub class_vtable_entries: Vec<MachoSwiftClassVtableEntryV1>,
     /// class overrides.
@@ -303,6 +328,7 @@ impl SwiftDecodeBatchV1 {
             .and_then(|value| value.checked_add(self.conformances.len()))
             .and_then(|value| value.checked_add(self.associated_types.len()))
             .and_then(|value| value.checked_add(self.protocol_requirements.len()))
+            .and_then(|value| value.checked_add(self.protocol_signature_requirements.len()))
             .and_then(|value| value.checked_add(self.class_vtable_entries.len()))
             .and_then(|value| value.checked_add(self.class_overrides.len()))
             .and_then(|value| {

@@ -368,8 +368,11 @@ workflow + cache + header-infer).
 2. **Windows runtime** is a product goal (pure Rust + in-process signing) but
    **CI currently gates Linux + macOS**. Prefer “Linux and macOS verified in CI;
    Windows supported as a Rust target” until a Windows job is green.
-3. **dyld cache** support is deliberately scoped (documented family support;
-   unsupported layouts fail closed rather than emit half-extracted dylibs).
+3. **dyld cache** support is deliberately scoped to Apple's published dyld v1
+   legacy, V1 numeric-subcache, V2 suffix-bearing, and `.symbols` layouts.
+   Unknown commands and future layouts fail closed rather than emit
+   half-extracted dylibs; validated cache locals are reported but are not
+   projected into standalone `LC_SYMTAB` data.
 4. **Header recovery is not source recovery.** Swift/ObjC projections annotate
    what the binary does not encode; treat output as evidence-backed
    reconstruction, not original headers.

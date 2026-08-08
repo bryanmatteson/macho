@@ -48,8 +48,21 @@ pub struct CacheMemberInput<'data> {
 #[derive(Debug)]
 pub struct CacheFamilyMember<'data> {
     name: String,
+    kind: CacheFamilyMemberKind,
     cache: DyldCache,
     data: &'data [u8],
+}
+
+/// Role of one file in a validated dyld cache family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheFamilyMemberKind {
+    /// Primary cache containing the image index and family declarations.
+    Primary,
+    /// VM-mapped sibling declared by the primary subcache table.
+    Subcache,
+    /// Unmapped `.symbols` member declared by `symbolFileUUID`.
+    Symbols,
 }
 
 impl CacheFamilyMember<'_> {
@@ -61,6 +74,11 @@ impl CacheFamilyMember<'_> {
     /// Parsed member metadata.
     pub fn cache(&self) -> &DyldCache {
         &self.cache
+    }
+
+    /// Validated role of this family member.
+    pub fn kind(&self) -> CacheFamilyMemberKind {
+        self.kind
     }
 }
 
@@ -197,11 +215,14 @@ impl<'data> DyldCacheFamily<'data> {
                 )));
             }
         }
-        let expected_names = primary_cache
+        let mut expected_names = primary_cache
             .subcaches
             .iter()
             .map(|entry| entry.file_suffix.as_str())
             .collect::<BTreeSet<_>>();
+        if primary_cache.header.symbol_file_uuid != [0; 16] {
+            expected_names.insert(".symbols");
+        }
         if let Some(unexpected) = supplied
             .keys()
             .find(|name| !expected_names.contains(**name))
@@ -220,6 +241,7 @@ impl<'data> DyldCacheFamily<'data> {
         let arch = primary_cache.arch().to_owned();
         let mut members = vec![CacheFamilyMember {
             name: primary.name.to_owned(),
+            kind: CacheFamilyMemberKind::Primary,
             cache: primary_cache,
             data: primary.data,
         }];
@@ -272,6 +294,63 @@ impl<'data> DyldCacheFamily<'data> {
             }
             members.push(CacheFamilyMember {
                 name: declaration.file_suffix,
+                kind: CacheFamilyMemberKind::Subcache,
+                cache,
+                data,
+            });
+        }
+        let symbol_uuid = members[0].cache.header.symbol_file_uuid;
+        if symbol_uuid != [0; 16] {
+            let data = supplied.get(".symbols").ok_or_else(|| {
+                Error::format("missing required cache family member \".symbols\"")
+            })?;
+            let cache = parse_dyld_cache(data)?;
+            if cache.header.uuid != symbol_uuid {
+                return Err(Error::format(format!(
+                    "cache family member \".symbols\" UUID mismatch: expected {}, found {}",
+                    format_uuid(symbol_uuid),
+                    format_uuid(cache.header.uuid)
+                )));
+            }
+            if cache.arch() != arch {
+                return Err(Error::unsupported(format!(
+                    "cache family member \".symbols\" architecture {:?} does not match {:?}",
+                    cache.arch(),
+                    arch
+                )));
+            }
+            if cache.local_symbols.is_none() {
+                return Err(Error::format(
+                    "cache family member \".symbols\" has no local-symbol store",
+                ));
+            }
+            let indexed_addresses = members[0]
+                .cache
+                .images
+                .iter()
+                .map(|image| image.address)
+                .collect::<BTreeSet<_>>();
+            for (index, entry) in cache
+                .local_symbols
+                .as_ref()
+                .expect("presence checked above")
+                .entries
+                .iter()
+                .enumerate()
+            {
+                let address = primary_base
+                    .checked_add(entry.dylib_offset)
+                    .ok_or_else(|| Error::address("local-symbol image address overflows"))?;
+                if !indexed_addresses.contains(&address) {
+                    return Err(Error::format(format!(
+                        "cache family member \".symbols\" entry[{index}] refers to unindexed image VM offset {:#x}",
+                        entry.dylib_offset
+                    )));
+                }
+            }
+            members.push(CacheFamilyMember {
+                name: ".symbols".to_owned(),
+                kind: CacheFamilyMemberKind::Symbols,
                 cache,
                 data,
             });
@@ -446,6 +525,9 @@ impl<'data> DyldCacheFamily<'data> {
 
     fn mapping_for_va(&self, va: u64) -> Option<(&CacheFamilyMember<'data>, &CacheMapping)> {
         self.members.iter().find_map(|member| {
+            if member.kind == CacheFamilyMemberKind::Symbols {
+                return None;
+            }
             member.cache.mappings.iter().find_map(|mapping| {
                 let end = mapping.address.checked_add(mapping.size)?;
                 (va >= mapping.address && va < end).then_some((member, mapping))
@@ -476,6 +558,9 @@ impl<'data> DyldCacheFamily<'data> {
 fn validate_family_mappings(members: &[CacheFamilyMember<'_>]) -> Result<()> {
     let mut mappings = Vec::new();
     for member in members {
+        if member.kind == CacheFamilyMemberKind::Symbols {
+            continue;
+        }
         for mapping in &member.cache.mappings {
             let end = mapping
                 .address

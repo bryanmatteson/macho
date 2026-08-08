@@ -64,6 +64,7 @@ pub fn decode_swift_strict(
                 conformances: Vec::new(),
                 associated_types: Vec::new(),
                 protocol_requirements: Vec::new(),
+                protocol_signature_requirements: Vec::new(),
                 class_vtable_entries: Vec::new(),
                 class_overrides: Vec::new(),
                 gaps: vec![error.gap],
@@ -140,6 +141,7 @@ pub fn decode_swift_strict(
             conformances: Vec::new(),
             associated_types: Vec::new(),
             protocol_requirements: Vec::new(),
+            protocol_signature_requirements: Vec::new(),
             class_vtable_entries: Vec::new(),
             class_overrides: Vec::new(),
             gaps: Vec::new(),
@@ -180,6 +182,7 @@ pub fn decode_swift_strict(
                 conformances: Vec::new(),
                 associated_types: Vec::new(),
                 protocol_requirements: Vec::new(),
+                protocol_signature_requirements: Vec::new(),
                 class_vtable_entries: Vec::new(),
                 class_overrides: Vec::new(),
                 gaps: vec![gap],
@@ -197,42 +200,29 @@ pub fn decode_swift_strict(
             });
         }
     };
-    let protocol_requirements = match validate_protocol_requirements(macho, &descriptors, limits) {
-        Ok(requirements) => requirements,
-        Err(error) => {
-            let attempted = total_entries.saturating_add(error.attempted);
-            return validated(SwiftDecodeBatchV1 {
-                outcome: SwiftDecodeOutcomeV1::Rejected,
-                records: Vec::new(),
-                conformances: Vec::new(),
-                associated_types: Vec::new(),
-                protocol_requirements: Vec::new(),
-                class_vtable_entries: Vec::new(),
-                class_overrides: Vec::new(),
-                gaps: vec![error.gap],
-                collector_outcomes: vec![
-                    collector(
-                        "nominal_descriptors",
-                        SwiftCollectorStatusV1::Complete,
-                        nominal_entries,
-                    ),
-                    collector(
-                        "protocol_requirements",
-                        SwiftCollectorStatusV1::Rejected,
-                        error.attempted,
-                    ),
-                ],
-                conservation: SwiftObservationConservationV1 {
-                    attempted,
-                    included: 0,
-                    unknown: attempted,
-                    excluded: 0,
-                },
-            });
+    let mut structural_gaps = Vec::new();
+    let mut structural_unknown = 0_u64;
+    let mut protocol_requirements = Vec::new();
+    let mut protocol_signature_requirements = Vec::new();
+    for descriptor in descriptors
+        .iter()
+        .filter(|descriptor| descriptor.section == "__swift5_protos")
+    {
+        match validate_protocol_requirements(macho, std::slice::from_ref(descriptor), limits) {
+            Ok((mut signatures, mut requirements)) => {
+                protocol_signature_requirements.append(&mut signatures);
+                protocol_requirements.append(&mut requirements);
+            }
+            Err(error) => {
+                structural_unknown = structural_unknown.saturating_add(error.attempted);
+                structural_gaps.push(error.gap);
+            }
         }
-    };
-    let protocol_requirement_entries = protocol_requirements.len() as u64;
-    let total_entries = match total_entries.checked_add(protocol_requirement_entries) {
+    }
+    let protocol_requirement_attempted = (protocol_requirements.len() as u64)
+        .saturating_add(protocol_signature_requirements.len() as u64)
+        .saturating_add(structural_unknown);
+    let total_entries = match total_entries.checked_add(protocol_requirement_attempted) {
         Some(total) if total <= limits.max_observations => total,
         _ => {
             return rejected(
@@ -243,27 +233,35 @@ pub fn decode_swift_strict(
             );
         }
     };
-    let (class_vtable_entries, class_overrides, class_dispatch_rejection) =
-        match validate_class_dispatch(macho, &descriptors, limits) {
-            Ok((entries, overrides)) => (entries, overrides, None),
+    let mut class_vtable_entries = Vec::new();
+    let mut class_overrides = Vec::new();
+    let mut class_dispatch_attempted = 0_u64;
+    let mut class_dispatch_rejected = 0_u64;
+    for descriptor in descriptors
+        .iter()
+        .filter(|descriptor| descriptor.section == "__swift5_types")
+    {
+        match validate_class_dispatch(macho, std::slice::from_ref(descriptor), limits) {
+            Ok((mut entries, mut overrides)) => {
+                class_dispatch_attempted = class_dispatch_attempted
+                    .saturating_add(entries.len() as u64)
+                    .saturating_add(overrides.len() as u64);
+                class_vtable_entries.append(&mut entries);
+                class_overrides.append(&mut overrides);
+            }
             Err(error) => {
                 let retained = (error.retained_vtable_entries.len() as u64)
                     .saturating_add(error.retained_overrides.len() as u64);
-                (
-                    error.retained_vtable_entries,
-                    error.retained_overrides,
-                    Some((
-                        error.attempted,
-                        error.attempted.saturating_sub(retained),
-                        *error.gap,
-                    )),
-                )
+                class_dispatch_attempted = class_dispatch_attempted.saturating_add(error.attempted);
+                class_dispatch_rejected = class_dispatch_rejected
+                    .saturating_add(error.attempted.saturating_sub(retained));
+                class_vtable_entries.extend(error.retained_vtable_entries);
+                class_overrides.extend(error.retained_overrides);
+                structural_gaps.push(*error.gap);
             }
-        };
-    let class_dispatch_entries = class_dispatch_rejection.as_ref().map_or_else(
-        || (class_vtable_entries.len() as u64).checked_add(class_overrides.len() as u64),
-        |(attempted, _, _)| Some(*attempted),
-    );
+        }
+    }
+    let class_dispatch_entries = Some(class_dispatch_attempted);
     let total_entries =
         match class_dispatch_entries.and_then(|count| total_entries.checked_add(count)) {
             Some(total) if total <= limits.max_observations => total,
@@ -664,8 +662,8 @@ pub fn decode_swift_strict(
         });
     }
     associated_types.sort_by_key(|record| record.descriptor_va);
-    let mut gaps = Vec::new();
-    let mut unknown = 0_u64;
+    let mut gaps = structural_gaps;
+    let mut unknown = structural_unknown.saturating_add(class_dispatch_rejected);
     let conformance_status = if let Some(gap) = conformance_rejection {
         gaps.push(gap);
         unknown = unknown.saturating_add(conformance_entries);
@@ -675,9 +673,7 @@ pub fn decode_swift_strict(
     } else {
         SwiftCollectorStatusV1::Complete
     };
-    let class_dispatch_status = if let Some((_, rejected, gap)) = class_dispatch_rejection {
-        gaps.push(gap);
-        unknown = unknown.saturating_add(rejected);
+    let class_dispatch_status = if class_dispatch_rejected != 0 {
         SwiftCollectorStatusV1::Rejected
     } else if class_dispatch_entries == Some(0) {
         SwiftCollectorStatusV1::Absent
@@ -689,6 +685,8 @@ pub fn decode_swift_strict(
     } else {
         SwiftDecodeOutcomeV1::Rejected
     };
+    let protocol_requirements_empty =
+        protocol_requirements.is_empty() && protocol_signature_requirements.is_empty();
     validated(SwiftDecodeBatchV1 {
         outcome,
         conservation: SwiftObservationConservationV1 {
@@ -701,6 +699,7 @@ pub fn decode_swift_strict(
         conformances,
         associated_types,
         protocol_requirements,
+        protocol_signature_requirements,
         class_vtable_entries,
         class_overrides,
         gaps,
@@ -730,12 +729,14 @@ pub fn decode_swift_strict(
             ),
             collector(
                 "protocol_requirements",
-                if protocol_requirement_entries == 0 {
+                if structural_unknown != 0 {
+                    SwiftCollectorStatusV1::Rejected
+                } else if protocol_requirements_empty {
                     SwiftCollectorStatusV1::Absent
                 } else {
                     SwiftCollectorStatusV1::Complete
                 },
-                protocol_requirement_entries,
+                protocol_requirement_attempted,
             ),
             collector(
                 "witness_patterns",

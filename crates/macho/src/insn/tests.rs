@@ -231,6 +231,15 @@ fn mkasm_arm64_formatter_contract_is_exact() {
 }
 
 #[test]
+fn mkasm_arm64_invalid_logical_immediate_falls_back_without_panicking() {
+    let word = 0xD225_FEC3u32;
+    assert_eq!(
+        disassemble_one(&word.to_le_bytes(), 0x1000, Arch::Arm64).unwrap(),
+        ".inst 0xd225fec3"
+    );
+}
+
+#[test]
 fn stateful_disassembler_preserves_x86_semantics() {
     let mut disassembler = Disassembler::new(Arch::X86_64);
     for (bytes, va) in [(&[0x90][..], 0x1000), (&[0xC3][..], 0x1001)] {

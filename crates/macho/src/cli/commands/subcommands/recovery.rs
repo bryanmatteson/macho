@@ -2,12 +2,18 @@
 
 mod header;
 
-use header::{project_entity, project_entity_with_owner};
+use header::project_entity_with_owner;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use crate::analysis::hypothesis::{
+    EvidenceAuthority, HYPOTHESIS_SELECTION_DOCUMENT_VERSION, HypothesisCandidate,
+    HypothesisConsequence, HypothesisEvidenceKind, HypothesisEvidenceRef, HypothesisLedger,
+    HypothesisOverride, HypothesisSelectionDocument, HypothesisSelectionPolicy, HypothesisSubject,
+    RecoveryHypothesis, SelectionPolicyMode,
+};
 use crate::analysis::report::{
     AnalysisLevel, CollectorCounts, CollectorExecution, CollectorId, CollectorOutcome, EntityKind,
     Fact, HashedHeaderFile, HashedHeaderRoot, HeaderCorrelationInput, HeaderGap,
@@ -16,11 +22,6 @@ use crate::analysis::report::{
     RecoveryReport, RecoveryScope, RecoveryView, ValidatedGlob, canonical_json,
     execute_header_correlation, execute_recovery_abi, execute_recovery_sources,
     recover_symbol_container, sha256_hex,
-};
-use crate::analysis::hypothesis::{
-    DecisionAuthority, EvidenceAuthority, HypothesisCandidate, HypothesisConsequence,
-    HypothesisLedger, HypothesisSelectionPolicy, HypothesisSubject, RecoveryHypothesis,
-    SelectionPolicyMode,
 };
 use crate::header_syntax::{
     self as syntax, HeaderParser as _, Language, TreeSitterHeaderParser, ValidationLimits,
@@ -32,7 +33,7 @@ use crate::cli::commands::args::{ArchitectureArgs, InputArgs};
 use crate::cli::commands::output::layout;
 use crate::cli::commands::output::{Options as OutputOptions, Style};
 use crate::cli::commands::subcommands::common::map_input;
-use crate::cli::commands::{OutputFormat, usage_message};
+use crate::cli::commands::{OutputFormat, input_message, input_result, usage_message};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ViewArg {
@@ -110,6 +111,12 @@ pub struct RecoveryArgs {
     /// Control whether ranked recovery hypotheses may affect C++ headers.
     #[arg(long = "projection-policy", value_enum, default_value = "strict")]
     pub projection_policy: ProjectionPolicyArg,
+    /// Select an exact suggested candidate as GAP_ID=CANDIDATE_ID.
+    #[arg(long = "hypothesis-selection", value_name = "GAP_ID=CANDIDATE_ID")]
+    pub hypothesis_selections: Vec<String>,
+    /// Load exact selections from a versioned JSON or compact TOML document.
+    #[arg(long = "hypothesis-selection-file", value_name = "PATH")]
+    pub hypothesis_selection_file: Option<PathBuf>,
 }
 
 pub fn run(
@@ -126,13 +133,23 @@ pub fn run(
         ));
     }
     let view = resolved_view(args.view, args.headers)?;
-    if args.projection_policy != ProjectionPolicyArg::Strict
+    if (args.projection_policy != ProjectionPolicyArg::Strict
+        || !args.hypothesis_selections.is_empty()
+        || args.hypothesis_selection_file.is_some())
         && (language != RecoveryLanguage::Cpp || view != ViewArg::Header)
     {
         return Err(usage_message(
-            "--projection-policy suggest|best-effort is currently supported only by C++ header projection",
+            "hypothesis selection is currently supported only by C++ header projection",
         ));
     }
+    let hypothesis_overrides = load_hypothesis_overrides(
+        &args.hypothesis_selections,
+        args.hypothesis_selection_file.as_deref(),
+    )?;
+    let hypothesis_selection_policy = HypothesisSelectionPolicy {
+        mode: args.projection_policy.into(),
+        overrides: hypothesis_overrides,
+    };
     if args.evidence.is_some() && (output.format() != OutputFormat::Text || view == ViewArg::Header)
     {
         return Err(usage_message(
@@ -143,6 +160,7 @@ pub fn run(
     let container =
         crate::parse(&mmap).with_context(|| format!("failed to parse {}", input.path.display()))?;
     let mut report = recover_symbol_container(&container, language, selection.arch.as_deref())?;
+    report.request.hypothesis_selection_policy = hypothesis_selection_policy.clone();
     let kinds = parse_kinds(language, &args.kinds)?;
     let globs = args
         .names
@@ -171,14 +189,7 @@ pub fn run(
                 "header output requires exactly one selected architecture; use a qualified --arch such as arm64e",
             ));
         }
-        project_headers(
-            &mut report,
-            language,
-            HypothesisSelectionPolicy {
-                mode: args.projection_policy.into(),
-                overrides: Vec::new(),
-            },
-        )?;
+        project_headers(&mut report, language, hypothesis_selection_policy)?;
     }
     report.request.view = match view {
         ViewArg::Surface => RecoveryView::Surface,
@@ -219,6 +230,89 @@ fn resolved_view(view: Option<ViewArg>, headers: bool) -> Result<ViewArg> {
         (None, true) => Ok(ViewArg::Header),
         (None, false) => Ok(ViewArg::Surface),
     }
+}
+
+fn parse_hypothesis_overrides(values: &[String]) -> Result<Vec<HypothesisOverride>> {
+    values
+        .iter()
+        .map(|value| {
+            let (key, candidate_id) = value.split_once('=').ok_or_else(|| {
+                usage_message(format!(
+                    "--hypothesis-selection `{value}` must use GAP_ID=CANDIDATE_ID"
+                ))
+            })?;
+            if key.is_empty() || candidate_id.is_empty() {
+                return Err(usage_message(format!(
+                    "--hypothesis-selection `{value}` must use non-empty IDs"
+                )));
+            }
+            Ok(HypothesisOverride {
+                subject: HypothesisSubject {
+                    domain: "cpp_header".to_owned(),
+                    key: key.to_owned(),
+                },
+                candidate_id: candidate_id.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn load_hypothesis_overrides(
+    inline: &[String],
+    document_path: Option<&Path>,
+) -> Result<Vec<HypothesisOverride>> {
+    let mut selections = if let Some(path) = document_path {
+        let extension = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_ascii_lowercase);
+        let document = match extension.as_deref() {
+            Some("json") => {
+                let bytes = input_result(
+                    std::fs::read(path),
+                    format!(
+                        "failed to read hypothesis selection document {}",
+                        path.display()
+                    ),
+                )?;
+                HypothesisSelectionDocument::load_json(&bytes)
+            }
+            Some("toml") => {
+                let source = input_result(
+                    std::fs::read_to_string(path),
+                    format!(
+                        "failed to read hypothesis selection document {}",
+                        path.display()
+                    ),
+                )?;
+                HypothesisSelectionDocument::load_toml(&source)
+            }
+            _ => {
+                return Err(usage_message(
+                    "--hypothesis-selection-file must have a .json or .toml extension",
+                ));
+            }
+        };
+        document
+            .map_err(|error| {
+                input_message(format!(
+                    "failed to load hypothesis selection document {}: {error}",
+                    path.display()
+                ))
+            })?
+            .selections
+    } else {
+        Vec::new()
+    };
+    selections.extend(parse_hypothesis_overrides(inline)?);
+    let document = HypothesisSelectionDocument {
+        schema_version: HYPOTHESIS_SELECTION_DOCUMENT_VERSION,
+        selections,
+    };
+    document
+        .validate()
+        .map_err(|error| input_message(format!("invalid hypothesis selections: {error}")))?;
+    Ok(document.selections)
 }
 
 fn parse_kinds(language: RecoveryLanguage, raw: &[String]) -> Result<Vec<EntityKind>> {
@@ -333,6 +427,7 @@ fn project_headers(
     selection_policy: HypothesisSelectionPolicy,
 ) -> Result<()> {
     for slice in report.slices.as_mut_slice() {
+        let cpp_type_anchors = cpp_type_anchor_paths(&slice.entities);
         let selected = slice.resolved_plan.selected_entity_ids.clone();
         let selected_set = selected
             .iter()
@@ -341,32 +436,125 @@ fn project_headers(
         let mut unresolved = Vec::new();
         let mut declarations = Vec::new();
         let mut syntax_declarations = Vec::new();
+        let mut assumption_ledger = HypothesisLedger::default();
         for entity in slice
             .entities
             .iter()
             .filter(|entity| selected_set.contains(entity.id.as_str()))
         {
-            match project_entity(entity, language) {
-                Ok((wire, syntax)) => {
-                    declarations.push(wire);
-                    syntax_declarations.push(syntax);
+            let mut projection_entity = entity.clone();
+            let mut owner_override = None;
+            let mut actual_projection = true;
+            let mut actual_gap = None;
+            let mut emitted = false;
+            let mut visited = BTreeSet::new();
+            loop {
+                let result = project_entity_with_owner(
+                    &projection_entity,
+                    language,
+                    owner_override.as_ref(),
+                );
+                let blocker = match result {
+                    Ok((wire, _)) if actual_projection => {
+                        let syntax =
+                            crate::analysis::header_infer::syntax::projected_declaration(&wire)
+                                .map_err(anyhow::Error::new)?;
+                        declarations.push(wire);
+                        syntax_declarations.push(syntax);
+                        emitted = true;
+                        break;
+                    }
+                    Ok(_) => break,
+                    Err(blocker) => blocker,
+                };
+                let gap = header_gap(entity, language, blocker);
+                if actual_projection {
+                    actual_gap = Some(gap.clone());
                 }
-                Err(blocker) => unresolved.push(HeaderGap {
-                    id: header_gap_id(&entity.id, blocker.field, blocker.reason),
-                    entity_id: entity.id.clone(),
-                    field: blocker.field,
-                    reason: blocker.reason,
-                    declaration_template: header_declaration_template(entity, language, blocker),
-                    diagnostic_ids: Vec::new(),
-                }),
+                if language != RecoveryLanguage::Cpp
+                    || (selection_policy.mode == SelectionPolicyMode::Strict
+                        && selection_policy.overrides.is_empty())
+                {
+                    break;
+                }
+                if !visited.insert(gap.id.clone()) {
+                    break;
+                }
+
+                let (hypothesis, owners) =
+                    cpp_owner_hypothesis(entity, &gap, blocker, &cpp_type_anchors)
+                        .or_else(|| {
+                            cpp_opaque_return_hypothesis(entity, &gap, blocker)
+                                .map(|hypothesis| (hypothesis, BTreeMap::new()))
+                        })
+                        .or_else(|| {
+                            cpp_opaque_type_name_hypothesis(entity, &gap, blocker)
+                                .map(|hypothesis| (hypothesis, BTreeMap::new()))
+                        })
+                        .unwrap_or_else(|| {
+                            (
+                                unsupported_cpp_projection_hypothesis(&gap, blocker),
+                                BTreeMap::new(),
+                            )
+                        });
+                let selected = selection_policy
+                    .select(&hypothesis)
+                    .map_err(hypothesis_contract_error)?;
+                if let Some((candidate, authority)) = selected
+                    && !candidate.consequences.is_empty()
+                {
+                    assumption_ledger.selections.push(selection_policy.receipt(
+                        &hypothesis,
+                        candidate,
+                        authority,
+                    ));
+                }
+                let candidate = selected.map(|(candidate, _)| candidate).or_else(|| {
+                    (selection_policy.mode == SelectionPolicyMode::Suggest)
+                        .then(|| hypothesis.candidates.first())
+                        .flatten()
+                });
+                assumption_ledger.hypotheses.push(hypothesis.clone());
+                let Some(candidate) = candidate else {
+                    break;
+                };
+                if selected.is_none() {
+                    actual_projection = false;
+                }
+                if let Some(owner) = owners.get(candidate.id.as_str()) {
+                    owner_override = Some(owner.clone());
+                    continue;
+                }
+                if candidate.id == "opaque_return_type" {
+                    projection_entity = cpp_entity_with_opaque_return(&projection_entity, &gap);
+                    continue;
+                }
+                if candidate.id == "opaque_type_name" {
+                    projection_entity = cpp_entity_with_opaque_type_name(
+                        &projection_entity,
+                        &gap,
+                        owner_override.as_ref(),
+                    );
+                    continue;
+                }
+                break;
+            }
+            if let Some(gap) = actual_gap
+                && !emitted
+            {
+                unresolved.push(gap);
             }
         }
+        assumption_ledger
+            .validate(&selection_policy)
+            .map_err(hypothesis_contract_error)?;
         let syntax_language = match language {
             RecoveryLanguage::CAbi => Language::C,
             RecoveryLanguage::Cpp => Language::Cpp,
         };
-        let syntax_declarations = merge_cpp_owner_declarations(syntax_declarations);
-        let source = if syntax_declarations.is_empty() {
+        let syntax_declarations =
+            crate::analysis::header_infer::syntax::merge_owner_declarations(syntax_declarations);
+        let mut source = if syntax_declarations.is_empty() {
             empty_header_source(
                 language,
                 selected.len(),
@@ -381,6 +569,16 @@ fn project_headers(
             })
             .map_err(anyhow::Error::new)?
         };
+        if !assumption_ledger.selections.is_empty() {
+            source = format!(
+                "{}{}",
+                crate::analysis::report::recovery_assumption_preamble(
+                    &assumption_ledger,
+                    &declarations,
+                ),
+                source
+            );
+        }
         let unit = TreeSitterHeaderParser
             .parse(syntax_language, &source)
             .map_err(anyhow::Error::new)?;
@@ -391,6 +589,7 @@ fn project_headers(
             language,
             declarations,
             unresolved,
+            assumption_ledger,
             diagnostics: Vec::new(),
             source,
             validation,
@@ -399,6 +598,7 @@ fn project_headers(
             slice.resolved_plan.projection = Some(HeaderProjectionSpec {
                 target_entity_ids: non_empty,
                 language,
+                selection_policy: selection_policy.clone(),
             });
             let mut executions = slice.executions.clone().into_vec();
             executions.push(CollectorExecution {
@@ -422,103 +622,598 @@ fn project_headers(
     Ok(())
 }
 
-fn merge_cpp_owner_declarations(
-    declarations: Vec<crate::header_syntax::Decl>,
-) -> Vec<crate::header_syntax::Decl> {
-    let mut merged = Vec::new();
-    for declaration in declarations {
-        merge_cpp_owner_declaration(&mut merged, declaration);
+fn cpp_owner_hypothesis(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+    blocker: header::ProjectionBlocker,
+    type_anchors: &BTreeSet<Vec<crate::analysis::report::Identifier>>,
+) -> Option<(
+    RecoveryHypothesis,
+    BTreeMap<String, crate::analysis::report::HeaderOwnerRef>,
+)> {
+    use crate::analysis::report::{
+        Access, Fact, HeaderIneligibilityReason, HeaderOwnerKind, HeaderOwnerRef, RecoveryField,
+    };
+
+    let subject = HypothesisSubject {
+        domain: "cpp_header".to_owned(),
+        key: gap.id.to_string(),
+    };
+    if blocker.field != RecoveryField::Owner
+        || !matches!(
+            blocker.reason,
+            HeaderIneligibilityReason::UnprovenOwner
+                | HeaderIneligibilityReason::IncompleteTemplateContext
+        )
+    {
+        return None;
     }
-    merged
+
+    let recovered_owner = match &entity.owner {
+        Fact::Known { value, .. } => Some(value),
+        Fact::Conflicted { .. } | Fact::Unavailable { .. } => None,
+    };
+    let components = recovered_owner
+        .map(|owner| owner.path.clone())
+        .filter(|path| !path.is_empty())
+        .or_else(|| cpp_symbol_owner_path(entity));
+    let Some(components) = components else {
+        return Some((
+            RecoveryHypothesis {
+                subject,
+                unresolved: "C++ declaration owner could not be recovered".to_owned(),
+                candidates: Vec::new(),
+                abstention: Some(
+                    "no valid source owner path can be derived from retained evidence".to_owned(),
+                ),
+            },
+            BTreeMap::new(),
+        ));
+    };
+    let depth = components.len();
+    let recovered_scope_kinds = recovered_owner
+        .filter(|owner| owner.scope_kinds.len() == depth)
+        .map(|owner| owner.scope_kinds.as_slice());
+    let recovered_scope_access = recovered_owner
+        .filter(|owner| owner.scope_access.len() == depth)
+        .map(|owner| owner.scope_access.as_slice());
+    let anchored_scope_kinds = (0..depth)
+        .map(|index| {
+            type_anchors
+                .contains(&components[..=index])
+                .then_some(HeaderOwnerKind::Class)
+        })
+        .collect::<Vec<_>>();
+    if recovered_scope_kinds.is_some_and(|kinds| {
+        kinds
+            .iter()
+            .zip(&anchored_scope_kinds)
+            .any(|(recovered, anchored)| {
+                *anchored == Some(HeaderOwnerKind::Class)
+                    && *recovered == Some(HeaderOwnerKind::Namespace)
+            })
+    }) {
+        return Some((
+            RecoveryHypothesis {
+                subject,
+                unresolved:
+                    "independent C++ type anchors conflict with the recovered owner scope kinds"
+                        .to_owned(),
+                candidates: Vec::new(),
+                abstention: Some(
+                    "contradictory owner evidence cannot be resolved by projection policy"
+                        .to_owned(),
+                ),
+            },
+            BTreeMap::new(),
+        ));
+    }
+    let has_member_qualifiers = matches!(
+        &entity.signature.qualifiers,
+        Fact::Known { value, .. }
+            if value.is_const == Some(true)
+                || value.is_volatile == Some(true)
+                || value.reference.is_some()
+    );
+    let first_record_anchor = recovered_scope_kinds
+        .and_then(|kinds| {
+            kinds.iter().position(|kind| {
+                matches!(kind, Some(HeaderOwnerKind::Record | HeaderOwnerKind::Class))
+            })
+        })
+        .or_else(|| anchored_scope_kinds.iter().position(Option::is_some))
+        .or_else(|| {
+            recovered_scope_access.and_then(|access| {
+                access
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find_map(|(index, access)| access.is_some().then_some(index - 1))
+            })
+        })
+        .or_else(|| {
+            (recovered_owner.is_some_and(|owner| owner.entity_id.is_some())
+                || entity_kind(entity) == Some(EntityKind::Method)
+                || has_member_qualifiers)
+                .then_some(depth - 1)
+        });
+    let class_anchored = first_record_anchor.is_some();
+    if first_record_anchor.is_some_and(|record_start| {
+        recovered_scope_kinds.is_some_and(|kinds| {
+            kinds.iter().enumerate().any(|(index, kind)| {
+                index >= record_start && *kind == Some(HeaderOwnerKind::Namespace)
+            })
+        })
+    }) {
+        return Some((
+            RecoveryHypothesis {
+                subject,
+                unresolved: "recovered scope kinds conflict with the C++ nesting required by the declaration"
+                    .to_owned(),
+                candidates: Vec::new(),
+                abstention: Some(
+                    "contradictory namespace and record nesting evidence must remain unresolved"
+                        .to_owned(),
+                ),
+            },
+            BTreeMap::new(),
+        ));
+    }
+    let namespace_owner = HeaderOwnerRef {
+        path: NonEmpty::new(components.clone()).ok()?,
+        scope_kinds: NonEmpty::new(vec![HeaderOwnerKind::Namespace; depth]).ok()?,
+        scope_access: NonEmpty::new(vec![None; depth]).ok()?,
+        member_access: None,
+        entity_id: None,
+    };
+    let record_start = first_record_anchor.unwrap_or(depth - 1);
+    let class_kinds = (0..depth)
+        .map(|index| {
+            recovered_scope_kinds
+                .and_then(|kinds| kinds[index])
+                .or(anchored_scope_kinds[index])
+                .unwrap_or(if index >= record_start {
+                    HeaderOwnerKind::Class
+                } else {
+                    HeaderOwnerKind::Namespace
+                })
+        })
+        .collect::<Vec<_>>();
+    let class_access = (0..depth)
+        .map(|index| {
+            if index == 0 || class_kinds[index - 1] == HeaderOwnerKind::Namespace {
+                None
+            } else {
+                recovered_scope_access
+                    .and_then(|access| access[index])
+                    .or(Some(Access::Public))
+            }
+        })
+        .collect::<Vec<_>>();
+    let class_owner = HeaderOwnerRef {
+        path: NonEmpty::new(components.clone()).ok()?,
+        scope_kinds: NonEmpty::new(class_kinds).ok()?,
+        scope_access: NonEmpty::new(class_access).ok()?,
+        member_access: recovered_owner
+            .and_then(|owner| owner.member_access)
+            .or(Some(Access::Public)),
+        entity_id: recovered_owner.and_then(|owner| owner.entity_id.clone()),
+    };
+    let mut candidates = Vec::new();
+    let mut owners = BTreeMap::new();
+    if !class_anchored {
+        candidates.push(HypothesisCandidate {
+            id: "namespace_owner".to_owned(),
+            rank: 1,
+            interpretation: format!(
+                "treat {} as a namespace path",
+                components
+                    .iter()
+                    .map(|part| part.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            ),
+            evidence_authority: EvidenceAuthority::Heuristic,
+            confidence_basis_points: 7_000,
+            evidence: candidate_evidence(
+                entity,
+                gap,
+                "qualified spelling retained from the canonical demangler",
+            ),
+            rule:
+                "unknown owner prefixes default to namespaces unless contrary class evidence exists"
+                    .to_owned(),
+            consequences: vec![HypothesisConsequence {
+                stage: "header_projection".to_owned(),
+                subject: Some(entity.id.to_string()),
+                description: "adds the projected declaration under the assumed namespace path without changing recovered facts"
+                    .to_owned(),
+            }],
+        });
+        owners.insert("namespace_owner".to_owned(), namespace_owner);
+    }
+    candidates.push(HypothesisCandidate {
+            id: "class_owner_public".to_owned(),
+            rank: if class_anchored { 1 } else { 2 },
+            interpretation: format!(
+                "preserve known scope kinds and access, treat the terminal unresolved scope as a record, and default missing record access to public within {}",
+                components
+                    .iter()
+                    .map(|part| part.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::")
+            ),
+            // Even with a correlated class anchor, completing missing scope
+            // kinds and access requires a heuristic. The candidate is
+            // therefore classified at the weakest authority it depends on.
+            evidence_authority: EvidenceAuthority::Heuristic,
+            confidence_basis_points: if class_anchored { 6_500 } else { 3_500 },
+            evidence: candidate_evidence(
+                entity,
+                gap,
+                if class_anchored {
+                    "a retained type anchor supports record ownership; missing access still requires a public default"
+                } else {
+                    "the retained qualified spelling admits a member interpretation"
+                },
+            ),
+            rule: "known scope kinds and access are preserved; anchored or terminal unresolved scopes become classes and missing record access uses the operator-policy public default"
+                .to_owned(),
+            consequences: vec![HypothesisConsequence {
+                stage: "header_projection".to_owned(),
+                subject: Some(entity.id.to_string()),
+                description: "adds the declaration inside a synthetic partial record shell; missing bases, members, layout, and ABI remain unauthoritative"
+                    .to_owned(),
+            }],
+        });
+    owners.insert("class_owner_public".to_owned(), class_owner);
+    candidates.sort_by_key(|candidate| candidate.rank);
+    Some((
+        RecoveryHypothesis {
+            subject,
+            unresolved: "the binary spelling does not fully encode namespace/class ownership and member access"
+                .to_owned(),
+            candidates,
+            abstention: None,
+        },
+        owners,
+    ))
 }
 
-fn merge_cpp_owner_declaration(
-    declarations: &mut Vec<crate::header_syntax::Decl>,
-    declaration: crate::header_syntax::Decl,
-) {
-    use crate::header_syntax::Decl;
+fn cpp_type_anchor_paths(
+    entities: &[crate::analysis::report::RecoveredEntity],
+) -> BTreeSet<Vec<crate::analysis::report::Identifier>> {
+    entities
+        .iter()
+        .filter(|entity| entity_kind(entity) == Some(EntityKind::Type))
+        .filter_map(|entity| {
+            cpp_qualified_components(&entity_name(entity))
+                .into_iter()
+                .map(|component| crate::analysis::report::Identifier::new(component).ok())
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|path| !path.is_empty())
+        .collect()
+}
 
-    match declaration {
-        Decl::Namespace {
-            path,
-            declarations: nested,
-        } => {
-            if let Some(Decl::Namespace { declarations, .. }) = declarations
-                .iter_mut()
-                .find(|item| matches!(item, Decl::Namespace { path: candidate, .. } if candidate == &path))
+fn hypothesis_contract_error(
+    error: crate::analysis::hypothesis::HypothesisContractError,
+) -> anyhow::Error {
+    match error {
+        crate::analysis::hypothesis::HypothesisContractError::UnknownOverride { .. } => {
+            input_message(format!("invalid or stale hypothesis selection: {error}"))
+        }
+        other => anyhow::Error::new(other),
+    }
+}
+
+fn unsupported_cpp_projection_hypothesis(
+    gap: &HeaderGap,
+    blocker: header::ProjectionBlocker,
+) -> RecoveryHypothesis {
+    RecoveryHypothesis {
+        subject: HypothesisSubject {
+            domain: "cpp_header".to_owned(),
+            key: gap.id.to_string(),
+        },
+        unresolved: format!(
+            "{} is blocked by {}; no supported projection hypothesis exists",
+            recovery_field_name(blocker.field),
+            header_reason_name(blocker.reason)
+        ),
+        candidates: Vec::new(),
+        abstention: Some(
+            "Macho has no contract-preserving interpretation for this blocker".to_owned(),
+        ),
+    }
+}
+
+fn cpp_symbol_owner_path(
+    entity: &crate::analysis::report::RecoveredEntity,
+) -> Option<Vec<crate::analysis::report::Identifier>> {
+    use crate::analysis::report::Fact;
+
+    let raw = match &entity.linkage {
+        Fact::Known { value, .. } => value.raw.as_str(),
+        Fact::Conflicted { .. } | Fact::Unavailable { .. } => "",
+    };
+    let candidate = raw.strip_prefix('_').unwrap_or(raw);
+    if candidate.starts_with("_ZZ") || candidate.starts_with("_ZGVZ") {
+        return None;
+    }
+    if let Some(record) = crate::analysis::reconstruct::cpp::symbol::parse_symbol(raw, None, None)
+        && let crate::analysis::reconstruct::cpp::CppSymbolKind::Function { decl } = record.kind
+        && let Some(parent) = decl.name.parent()
+    {
+        return parent
+            .components
+            .iter()
+            .map(|component| crate::analysis::report::Identifier::new(component.clone()).ok())
+            .collect();
+    }
+    let mut components = cpp_qualified_components(&entity_name(entity));
+    if components.len() < 2 {
+        return None;
+    }
+    components.pop();
+    components
+        .into_iter()
+        .map(|component| crate::analysis::report::Identifier::new(component).ok())
+        .collect()
+}
+
+fn cpp_qualified_components(value: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let mut start = 0;
+    let mut angles = 0_u32;
+    let mut parentheses = 0_u32;
+    let mut brackets = 0_u32;
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'<' => angles += 1,
+            b'>' => angles = angles.saturating_sub(1),
+            b'(' => parentheses += 1,
+            b')' => parentheses = parentheses.saturating_sub(1),
+            b'[' => brackets += 1,
+            b']' => brackets = brackets.saturating_sub(1),
+            b':' if angles == 0
+                && parentheses == 0
+                && brackets == 0
+                && bytes.get(index + 1) == Some(&b':') =>
             {
-                for item in nested {
-                    merge_cpp_owner_declaration(declarations, item);
-                }
-            } else {
-                declarations.push(Decl::Namespace {
-                    path,
-                    declarations: merge_cpp_owner_declarations(nested),
-                });
+                components.push(value[start..index].trim().to_owned());
+                index += 1;
+                start = index + 1;
             }
+            _ => {}
         }
-        Decl::Record {
-            kind,
-            path,
-            bases,
-            fields,
-            members,
-        } => {
-            if let Some(index) = declarations.iter().position(
-                |item| matches!(item, Decl::Forward { kind: candidate_kind, path: candidate_path } if candidate_kind == &kind && candidate_path == &path),
-            ) {
-                declarations.remove(index);
-            }
-            if let Some(Decl::Record {
-                bases: existing_bases,
-                fields: existing_fields,
-                members: existing_members,
-                ..
-            }) = declarations.iter_mut().find(|item| {
-                matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path)
-            }) {
-                if existing_bases.is_empty() {
-                    *existing_bases = bases;
-                }
-                if existing_fields.is_empty() {
-                    *existing_fields = fields;
-                }
-                for member in members {
-                    merge_cpp_owner_declaration(existing_members, member);
-                }
-            } else {
-                declarations.push(Decl::Record {
-                    kind,
-                    path,
-                    bases,
-                    fields,
-                    members: merge_cpp_owner_declarations(members),
-                });
-            }
+        index += 1;
+    }
+    components.push(value[start..].trim().to_owned());
+    components
+        .into_iter()
+        .filter(|component| !component.is_empty())
+        .collect()
+}
+
+fn cpp_opaque_return_hypothesis(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+    blocker: header::ProjectionBlocker,
+) -> Option<RecoveryHypothesis> {
+    use crate::analysis::report::{HeaderIneligibilityReason, RecoveryField};
+
+    (blocker.field == RecoveryField::ReturnType
+        && blocker.reason == HeaderIneligibilityReason::UnavailableRequiredFact)
+        .then(|| RecoveryHypothesis {
+            subject: HypothesisSubject {
+                domain: "cpp_header".to_owned(),
+                key: gap.id.to_string(),
+            },
+            unresolved: "the ordinary Itanium function name does not encode a source return type"
+                .to_owned(),
+            candidates: vec![HypothesisCandidate {
+                id: "opaque_return_type".to_owned(),
+                rank: 1,
+                interpretation: "project an explicit generated opaque return placeholder"
+                    .to_owned(),
+                evidence_authority: EvidenceAuthority::Heuristic,
+                confidence_basis_points: 1_000,
+                evidence: candidate_evidence(
+                    entity,
+                    gap,
+                    "the canonical demangler recovered the function shape but no return spelling",
+                ),
+                rule: format!(
+                    "preserve an unavailable return type as {} rather than inventing a concrete ABI type",
+                    opaque_return_identifier(gap).as_str()
+                ),
+                consequences: vec![HypothesisConsequence {
+                    stage: "header_projection".to_owned(),
+                    subject: Some(entity.id.to_string()),
+                    description: "adds a declaration whose return type is intentionally opaque"
+                        .to_owned(),
+                }],
+            }],
+            abstention: None,
+        })
+}
+
+fn cpp_opaque_type_name_hypothesis(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+    blocker: header::ProjectionBlocker,
+) -> Option<RecoveryHypothesis> {
+    use crate::analysis::report::{HeaderIneligibilityReason, RecoveryField};
+
+    (entity_kind(entity) == Some(EntityKind::Type)
+        && blocker.field == RecoveryField::DisplayName
+        && blocker.reason == HeaderIneligibilityReason::IncompleteTemplateContext)
+        .then(|| RecoveryHypothesis {
+            subject: HypothesisSubject {
+                domain: "cpp_header".to_owned(),
+                key: gap.id.to_string(),
+            },
+            unresolved:
+                "the recovered type spelling cannot be represented as a standalone declaration"
+                    .to_owned(),
+            candidates: vec![HypothesisCandidate {
+                id: "opaque_type_name".to_owned(),
+                rank: 1,
+                interpretation:
+                    "project a stable synthetic record name for this recovered type entity"
+                        .to_owned(),
+                evidence_authority: EvidenceAuthority::Heuristic,
+                confidence_basis_points: 500,
+                evidence: candidate_evidence(
+                    entity,
+                    gap,
+                    "the retained type entity remains useful even though its specialization spelling is not declaration-safe",
+                ),
+                rule: format!(
+                    "replace only the unrepresentable declaration leaf with {} and preserve the selected owner",
+                    opaque_type_identifier(gap).as_str()
+                ),
+                consequences: vec![HypothesisConsequence {
+                    stage: "header_projection".to_owned(),
+                    subject: Some(entity.id.to_string()),
+                    description: "adds a synthetic partial class forward declaration; the name, specialization spelling, layout, and ABI remain unauthoritative"
+                        .to_owned(),
+                }],
+            }],
+            abstention: None,
+        })
+}
+
+fn candidate_evidence(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+    description: &str,
+) -> Vec<HypothesisEvidenceRef> {
+    let mut evidence = vec![HypothesisEvidenceRef {
+        kind: HypothesisEvidenceKind::RecoveryGap,
+        id: gap.id.to_string(),
+        description: format!("unresolved {}", recovery_field_name(gap.field)),
+    }];
+    if let Some(source) = entity.evidence.first() {
+        evidence.push(HypothesisEvidenceRef {
+            kind: HypothesisEvidenceKind::Evidence,
+            id: source.id.to_string(),
+            description: description.to_owned(),
+        });
+    } else {
+        evidence.push(HypothesisEvidenceRef {
+            kind: HypothesisEvidenceKind::Entity,
+            id: entity.id.to_string(),
+            description: description.to_owned(),
+        });
+    }
+    evidence
+}
+
+fn cpp_entity_with_opaque_return(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+) -> crate::analysis::report::RecoveredEntity {
+    use crate::analysis::report::{EvidenceStrength, Fact, HeaderType, NamedTypeTag, TypeEvidence};
+
+    let mut projection = entity.clone();
+    let id = match &projection.signature.return_type {
+        Fact::Known { id, .. } | Fact::Conflicted { id, .. } | Fact::Unavailable { id, .. } => {
+            id.clone()
         }
-        Decl::AccessSection {
-            access,
-            declarations: nested,
-        } => {
-            if let Some(Decl::AccessSection { declarations, .. }) = declarations
-                .iter_mut()
-                .find(|item| matches!(item, Decl::AccessSection { access: candidate, .. } if candidate == &access))
-            {
-                for item in nested {
-                    merge_cpp_owner_declaration(declarations, item);
-                }
-            } else {
-                declarations.push(Decl::AccessSection {
-                    access,
-                    declarations: merge_cpp_owner_declarations(nested),
-                });
-            }
+    };
+    let evidence_id = projection
+        .evidence
+        .first()
+        .expect("a recovered entity retains source evidence")
+        .id
+        .clone();
+    projection.signature.return_type = Fact::Known {
+        id,
+        value: TypeEvidence::Source {
+            ty: HeaderType::Named {
+                // The generated preamble declares this name as a class. Use
+                // an unelaborated spelling in the function signature so the
+                // declaration parses unambiguously as `Type function()`.
+                tag: NamedTypeTag::Typedef,
+                path: NonEmpty::new(vec![opaque_return_identifier(gap)])
+                    .expect("one placeholder component"),
+                template_arguments: Vec::new(),
+            },
+        },
+        // This clone exists only long enough to lower a projection. The
+        // serialized receipt, not this temporary strength, is its authority.
+        strength: EvidenceStrength::Exact,
+        evidence_ids: NonEmpty::new(vec![evidence_id]).expect("one source evidence ID"),
+    };
+    projection
+}
+
+fn cpp_entity_with_opaque_type_name(
+    entity: &crate::analysis::report::RecoveredEntity,
+    gap: &HeaderGap,
+    owner: Option<&crate::analysis::report::HeaderOwnerRef>,
+) -> crate::analysis::report::RecoveredEntity {
+    use crate::analysis::report::{EvidenceStrength, Fact};
+
+    let mut projection = entity.clone();
+    let id = match &projection.display_name {
+        Fact::Known { id, .. } | Fact::Conflicted { id, .. } | Fact::Unavailable { id, .. } => {
+            id.clone()
         }
-        Decl::Forward { kind, path }
-            if declarations.iter().any(
-                |item| matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path),
-            ) => {}
-        other => declarations.push(other),
+    };
+    let evidence_id = projection
+        .evidence
+        .first()
+        .expect("a recovered entity retains source evidence")
+        .id
+        .clone();
+    let mut components = owner
+        .map(|owner| {
+            owner
+                .path
+                .as_slice()
+                .iter()
+                .map(|component| component.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let opaque = opaque_type_identifier(gap);
+    components.push(opaque.as_str());
+    projection.display_name = Fact::Known {
+        id,
+        value: components.join("::"),
+        strength: EvidenceStrength::Exact,
+        evidence_ids: NonEmpty::new(vec![evidence_id]).expect("one source evidence ID"),
+    };
+    projection
+}
+
+fn opaque_return_identifier(gap: &HeaderGap) -> crate::analysis::report::Identifier {
+    crate::analysis::report::Identifier::new(format!("macho_unknown_return_{}", gap.id))
+        .expect("a recovery gap hash produces a valid non-reserved C++ identifier")
+}
+
+fn opaque_type_identifier(gap: &HeaderGap) -> crate::analysis::report::Identifier {
+    crate::analysis::report::Identifier::new(format!("macho_unknown_type_{}", gap.id))
+        .expect("a recovery gap hash produces a valid non-reserved C++ identifier")
+}
+
+fn header_gap(
+    entity: &crate::analysis::report::RecoveredEntity,
+    language: RecoveryLanguage,
+    blocker: header::ProjectionBlocker,
+) -> HeaderGap {
+    HeaderGap {
+        id: header_gap_id(&entity.id, blocker.field, blocker.reason),
+        entity_id: entity.id.clone(),
+        field: blocker.field,
+        reason: blocker.reason,
+        declaration_template: header_declaration_template(entity, language, blocker),
+        diagnostic_ids: Vec::new(),
     }
 }
 
@@ -528,7 +1223,12 @@ fn header_gap_id(
     reason: HeaderIneligibilityReason,
 ) -> RecoveryGapId {
     RecoveryGapId::new(sha256_hex(
-        format!("header_projection_gap|{entity_id}|{field:?}|{reason:?}").as_bytes(),
+        format!(
+            "macho.header_projection.gap.v1\0{entity_id}\0{}\0{}",
+            recovery_field_name(field),
+            header_reason_name(reason)
+        )
+        .as_bytes(),
     ))
     .expect("SHA-256 header projection gap ID")
 }
@@ -566,10 +1266,11 @@ fn strip_declaration_owner(declaration: &mut crate::analysis::report::HeaderDecl
     use crate::analysis::report::HeaderDecl;
 
     match declaration {
-        HeaderDecl::Function { owner, .. } | HeaderDecl::Variable { owner, .. } => *owner = None,
-        HeaderDecl::Record { path, .. }
-        | HeaderDecl::Forward { path, .. }
-        | HeaderDecl::Alias { path, .. } => {
+        HeaderDecl::Function { owner, .. }
+        | HeaderDecl::Variable { owner, .. }
+        | HeaderDecl::Record { owner, .. }
+        | HeaderDecl::Forward { owner, .. } => *owner = None,
+        HeaderDecl::Alias { path, .. } => {
             *path = NonEmpty::new(vec![path.as_slice().last()?.clone()]).ok()?;
         }
         HeaderDecl::ObjcInterface { .. }
@@ -1115,5 +1816,19 @@ mod tests {
             ViewArg::Header
         );
         assert!(resolved_view(Some(ViewArg::Surface), true).is_err());
+    }
+
+    #[test]
+    fn header_gap_identity_uses_frozen_wire_tokens() {
+        let entity = crate::analysis::report::EntityId::new("a".repeat(64)).unwrap();
+        let gap = header_gap_id(
+            &entity,
+            crate::analysis::report::RecoveryField::Owner,
+            HeaderIneligibilityReason::UnprovenOwner,
+        );
+        assert_eq!(
+            gap.as_str(),
+            "c2731c1646cfca767a19c769b7e68f0ef58872f34849bec24847521eadec9e8c"
+        );
     }
 }

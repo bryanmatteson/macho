@@ -1,86 +1,63 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use cargo_metadata::MetadataCommand;
+
 #[test]
-fn every_product_feature_combination_compiles() {
+fn every_declared_feature_compiles_independently() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
         .expect("xtask crate is under <workspace>/crates")
         .to_path_buf();
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let combinations = [
-        ("no-default", None),
-        ("evidence", Some("evidence")),
-        ("metadata", Some("metadata")),
-        ("analysis", Some("analysis")),
-        ("mutation", Some("mutation")),
-        ("workflow", Some("workflow")),
-        ("dyld-cache", Some("dyld-cache")),
-        ("header-infer", Some("header-infer")),
-        ("full", Some("full")),
-        ("cli", Some("cli")),
-    ];
-    for (name, feature) in combinations {
-        let mut command = Command::new(&cargo);
-        command
-            .current_dir(&root)
-            .args(["check", "-p", "macho", "--lib", "--no-default-features"]);
-        if let Some(feature) = feature {
-            command.args(["--features", feature]);
-        }
-        assert!(
-            command
-                .status()
-                .expect("run feature compile check")
-                .success(),
-            "product feature combination {name} failed to compile"
-        );
-    }
+    let metadata = MetadataCommand::new()
+        .manifest_path(root.join("Cargo.toml"))
+        .no_deps()
+        .exec()
+        .expect("resolve workspace feature metadata");
+    let product = metadata
+        .packages
+        .iter()
+        .find(|package| package.name.as_str() == "macho")
+        .expect("workspace has a macho package");
+
     assert!(
-        Command::new(cargo)
-            .current_dir(root)
-            .args(["check", "-p", "macho", "--lib"])
+        Command::new(&cargo)
+            .current_dir(&root)
+            .args([
+                "check",
+                "--locked",
+                "-p",
+                "macho",
+                "--lib",
+                "--no-default-features",
+            ])
+            .status()
+            .expect("run empty feature compile check")
+            .success(),
+        "empty feature composition failed to compile"
+    );
+    assert!(
+        Command::new(&cargo)
+            .current_dir(&root)
+            .args(["check", "--locked", "-p", "macho", "--lib"])
             .status()
             .expect("run default feature compile check")
             .success(),
-        "default product features failed to compile"
+        "default feature composition failed to compile"
     );
-}
-
-#[test]
-fn every_low_level_module_feature_compiles_independently() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("xtask crate is under <workspace>/crates")
-        .to_path_buf();
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    for feature in [
-        "insn",
-        "codesign",
-        "demangle",
-        "dwarf",
-        "dyld",
-        "fixups",
-        "strict-rtti",
-        "abi",
-        "itanium-rtti",
-        "objc",
-        "swift",
-        "cpp",
-        "symbols",
-        "dyld-cache",
-        "structural",
-        "patch",
-        "external-signing",
-        "signing",
-    ] {
+    for feature in product
+        .features
+        .keys()
+        .filter(|name| name.as_str() != "default")
+    {
         assert!(
             Command::new(&cargo)
                 .current_dir(&root)
                 .args([
                     "check",
+                    "--locked",
                     "-p",
                     "macho",
                     "--lib",
@@ -89,9 +66,28 @@ fn every_low_level_module_feature_compiles_independently() {
                     feature,
                 ])
                 .status()
-                .expect("run metadata feature compile check")
+                .expect("run feature compile check")
                 .success(),
-            "module feature {feature} failed to compile"
+            "declared feature {feature} failed to compile independently"
         );
     }
+    assert!(
+        Command::new(cargo)
+            .current_dir(root)
+            .args([
+                "check",
+                "--locked",
+                "-p",
+                "macho",
+                "--no-default-features",
+                "--features",
+                "cli",
+                "--bin",
+                "macho",
+            ])
+            .status()
+            .expect("run CLI binary compile check")
+            .success(),
+        "CLI feature failed to compile the shipped binary"
+    );
 }

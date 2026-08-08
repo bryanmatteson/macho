@@ -46,10 +46,15 @@ pub(super) fn completeness_for(
         .load_commands()
         .iter()
         .any(|command| matches!(command.kind(), LoadCommand::CodeSignature(_)));
-    let has_external_locals = family.members().iter().any(|member| {
-        member.cache().header.local_symbols_size != 0
-            || member.cache().header.symbol_file_uuid != [0; 16]
-    });
+    let local_symbol_store = family
+        .members()
+        .iter()
+        .find_map(|member| member.cache().local_symbols.as_ref());
+    let has_external_locals = local_symbol_store.is_some()
+        || family
+            .members()
+            .iter()
+            .any(|member| member.cache().header.symbol_file_uuid != [0; 16]);
     ReconstructionCompleteness {
         segments: complete("all file-backed segments were copied from exact family VA mappings"),
         linkedit: if has_linkedit {
@@ -127,9 +132,14 @@ pub(super) fn completeness_for(
             absent("image declares no rebase stream or chained-fixup table")
         },
         local_symbols: if has_external_locals {
-            unresolved(
-                "cache-level local symbols are external to ordinary image segments and were not projected into LC_SYMTAB",
-            )
+            unresolved(match local_symbol_store {
+                Some(store) => format!(
+                    "validated cache-level local-symbol store contains {} nlists across {} image entries; those locals were not projected into LC_SYMTAB",
+                    store.nlist_count,
+                    store.entries.len()
+                ),
+                None => "cache family declares local-symbol evidence, but no validated store was available for projection".to_owned(),
+            })
         } else {
             absent("cache family declares no separate local-symbol store")
         },

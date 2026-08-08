@@ -19,13 +19,6 @@ fn blocked(
     ProjectionBlocker { field, reason }
 }
 
-pub(super) fn project_entity(
-    entity: &crate::analysis::report::RecoveredEntity,
-    language: RecoveryLanguage,
-) -> ProjectionResult {
-    project_entity_with_owner(entity, language, None)
-}
-
 pub(super) fn project_entity_with_owner(
     entity: &crate::analysis::report::RecoveredEntity,
     language: RecoveryLanguage,
@@ -469,17 +462,13 @@ fn project_type(
             HeaderIneligibilityReason::IncompleteTemplateContext,
         )
     })?;
-    let mut path = owner
-        .as_ref()
-        .map(|owner| owner.path.as_slice().to_vec())
-        .unwrap_or_default();
-    path.push(terminal.clone());
-    let wire_path = crate::analysis::report::NonEmpty::new(path).map_err(|_| {
-        blocked(
-            RecoveryField::DisplayName,
-            HeaderIneligibilityReason::UnsupportedType,
-        )
-    })?;
+    let wire_path =
+        crate::analysis::report::NonEmpty::new(vec![terminal.clone()]).map_err(|_| {
+            blocked(
+                RecoveryField::DisplayName,
+                HeaderIneligibilityReason::UnsupportedType,
+            )
+        })?;
     let syntax_path = syntax::IdentifierPath::new(vec![
         syntax::Identifier::new(terminal.as_str()).ok_or_else(|| {
             blocked(
@@ -540,6 +529,7 @@ fn project_type(
         Ok((
             HeaderDecl::Record {
                 id: entity.id.clone(),
+                owner: owner.clone(),
                 record_kind: RecordKind::Class,
                 path: wire_path,
                 complete: true,
@@ -557,6 +547,7 @@ fn project_type(
         Ok((
             HeaderDecl::Forward {
                 id: entity.id.clone(),
+                owner: owner.clone(),
                 record_kind: RecordKind::Class,
                 path: wire_path,
             },

@@ -177,6 +177,28 @@ pub(crate) fn declaration(value: &wire::HeaderDecl) -> Result<syntax::Decl, Arti
     })
 }
 
+/// Lower one wire declaration through its explicit owner metadata. This is the
+/// single projection path used by rendering and report validation.
+pub(crate) fn projected_declaration(
+    value: &wire::HeaderDecl,
+) -> Result<syntax::Decl, ArtifactError> {
+    let owner = match value {
+        wire::HeaderDecl::Function { owner, .. }
+        | wire::HeaderDecl::Variable { owner, .. }
+        | wire::HeaderDecl::Record { owner, .. }
+        | wire::HeaderDecl::Forward { owner, .. } => owner.as_ref(),
+        wire::HeaderDecl::Alias { .. }
+        | wire::HeaderDecl::ObjcInterface { .. }
+        | wire::HeaderDecl::ObjcCategory { .. }
+        | wire::HeaderDecl::ObjcProtocol { .. }
+        | wire::HeaderDecl::ObjcForward { .. } => None,
+    };
+    owner.map_or_else(
+        || declaration(value),
+        |owner| declaration_in_owner(value, owner),
+    )
+}
+
 pub(crate) fn declaration_in_owner(
     value: &wire::HeaderDecl,
     owner: &wire::HeaderOwnerRef,
@@ -246,6 +268,103 @@ pub(crate) fn declaration_in_owner(
         };
     }
     Ok(declaration)
+}
+
+/// Canonically coalesce repeated namespace/record owner shells emitted while
+/// lowering independently recovered declarations.
+pub(crate) fn merge_owner_declarations(values: Vec<syntax::Decl>) -> Vec<syntax::Decl> {
+    let mut merged = Vec::new();
+    for declaration in values {
+        merge_owner_declaration(&mut merged, declaration);
+    }
+    merged
+}
+
+fn merge_owner_declaration(declarations: &mut Vec<syntax::Decl>, declaration: syntax::Decl) {
+    use syntax::Decl;
+
+    match declaration {
+        Decl::Namespace {
+            path,
+            declarations: nested,
+        } => {
+            if let Some(Decl::Namespace { declarations, .. }) = declarations
+                .iter_mut()
+                .find(|item| matches!(item, Decl::Namespace { path: candidate, .. } if candidate == &path))
+            {
+                for item in nested {
+                    merge_owner_declaration(declarations, item);
+                }
+            } else {
+                declarations.push(Decl::Namespace {
+                    path,
+                    declarations: merge_owner_declarations(nested),
+                });
+            }
+        }
+        Decl::Record {
+            kind,
+            path,
+            bases,
+            fields,
+            members,
+        } => {
+            if let Some(index) = declarations.iter().position(
+                |item| matches!(item, Decl::Forward { kind: candidate_kind, path: candidate_path } if candidate_kind == &kind && candidate_path == &path),
+            ) {
+                declarations.remove(index);
+            }
+            if let Some(Decl::Record {
+                bases: existing_bases,
+                fields: existing_fields,
+                members: existing_members,
+                ..
+            }) = declarations.iter_mut().find(|item| {
+                matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path)
+            }) {
+                if existing_bases.is_empty() {
+                    *existing_bases = bases;
+                }
+                if existing_fields.is_empty() {
+                    *existing_fields = fields;
+                }
+                for member in members {
+                    merge_owner_declaration(existing_members, member);
+                }
+            } else {
+                declarations.push(Decl::Record {
+                    kind,
+                    path,
+                    bases,
+                    fields,
+                    members: merge_owner_declarations(members),
+                });
+            }
+        }
+        Decl::AccessSection {
+            access,
+            declarations: nested,
+        } => {
+            if let Some(Decl::AccessSection { declarations, .. }) = declarations
+                .iter_mut()
+                .find(|item| matches!(item, Decl::AccessSection { access: candidate, .. } if candidate == &access))
+            {
+                for item in nested {
+                    merge_owner_declaration(declarations, item);
+                }
+            } else {
+                declarations.push(Decl::AccessSection {
+                    access,
+                    declarations: merge_owner_declarations(nested),
+                });
+            }
+        }
+        Decl::Forward { kind, path }
+            if declarations.iter().any(
+                |item| matches!(item, Decl::Record { kind: candidate_kind, path: candidate_path, .. } if candidate_kind == &kind && candidate_path == &path),
+            ) => {}
+        other => declarations.push(other),
+    }
 }
 
 fn objc_members(

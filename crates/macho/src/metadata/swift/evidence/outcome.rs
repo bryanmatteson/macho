@@ -29,6 +29,7 @@ pub(super) fn rejected(
         conformances: Vec::new(),
         associated_types: Vec::new(),
         protocol_requirements: Vec::new(),
+        protocol_signature_requirements: Vec::new(),
         class_vtable_entries: Vec::new(),
         class_overrides: Vec::new(),
         gaps: vec![SwiftDecodeGapV1 {

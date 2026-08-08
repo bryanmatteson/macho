@@ -232,8 +232,19 @@ and reuses exact unaffected stages, but its request changes. Consequently,
 transition; lower the deepened state as a new fact-universe revision and
 compare product revisions with Splice's own request-aware logic.
 
-Refine/deepen cache reuse is stage-level and must remain equivalent to a cold
-rebuild. There is no per-function incremental CFG contract yet.
+Refine/deepen cache reuse remains equivalent to a cold rebuild. An unguided
+dirty ControlFlow stage may additionally reuse a prior `FunctionControlFlow`
+record when the selected image, ControlFlow limits, complete recovered
+Function record, pointer and exception inputs, non-returning fixed-point set,
+and incoming global decoded-byte budget are exact matches. A changed Function
+record invalidates its own entry; a changed fixed-point set or shifted global
+budget prevents reuse of every affected graph. Guided recovery currently
+cold-rebuilds CFG because normalized function-local guide inputs are not yet a
+separate durable cache key.
+
+This cache is an implementation receipt only. It does not appear in Fact IR,
+change completeness, or alter the ordered graph. Warm output must remain equal
+to a cold recovery under the same request.
 
 ## Failure handling
 

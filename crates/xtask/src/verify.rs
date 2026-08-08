@@ -9,9 +9,16 @@ pub fn run(root: &Path) -> Result<()> {
     super::release::check(root, false)?;
     for command in [
         &["fmt", "--all", "--", "--check"][..],
-        &["check", "--workspace", "--all-targets", "--all-features"][..],
+        &[
+            "check",
+            "--locked",
+            "--workspace",
+            "--all-targets",
+            "--all-features",
+        ][..],
         &[
             "clippy",
+            "--locked",
             "--workspace",
             "--all-targets",
             "--all-features",
@@ -19,9 +26,21 @@ pub fn run(root: &Path) -> Result<()> {
             "-D",
             "warnings",
         ][..],
-        &["doc", "--workspace", "--all-features", "--no-deps"][..],
-        &["test", "--workspace", "--all-features"][..],
-        &["bench", "--workspace", "--all-features", "--no-run"][..],
+        &[
+            "doc",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--no-deps",
+        ][..],
+        &["test", "--locked", "--workspace", "--all-features"][..],
+        &[
+            "bench",
+            "--locked",
+            "--workspace",
+            "--all-features",
+            "--no-run",
+        ][..],
     ] {
         run_command(root, "cargo", command, command.first() == Some(&"doc"))?;
     }

@@ -538,6 +538,11 @@ fn build_linkedit_layout(
         let u32_at =
             |field, subject| read_macho_u32(bytes, offset + field, endian, subject).map(u64::from);
         match command {
+            LC_SYMSEG => retain(
+                u32_at(8, "obsolete symbol segment offset")?,
+                u32_at(12, "obsolete symbol segment size")?,
+                "obsolete symbol segment",
+            )?,
             LC_SYMTAB => {
                 // Per-image nlists and their referenced strings are rebuilt
                 // below; the shared cache string pool is never copied whole.

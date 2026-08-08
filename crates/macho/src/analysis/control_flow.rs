@@ -96,6 +96,9 @@ pub enum ControlFlowRecoveryError {
     /// The selected CPU tuple has no instruction decoder.
     #[error("control-flow recovery does not support this CPU tuple")]
     UnsupportedArchitecture,
+    /// A retained CFG was presented under different recovery parameters.
+    #[error("prior control-flow reuse inputs differ from the requested recovery")]
+    PriorReuseMismatch,
 }
 
 /// Validated caller byte-role premises used during a cold CFG rebuild.
@@ -656,6 +659,17 @@ pub struct ControlFlowExit {
     pub possible_functions: Vec<RecoveredFunctionTarget>,
 }
 
+/// Retained provenance for an indirect branch whose indexed transform is not
+/// yet admitted as an exact jump-table or strided-table computation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComputedBranchTransformEvidence {
+    /// Indirect branch consuming the computed value.
+    pub instruction_address: u64,
+    /// Bounded preceding instructions carrying indexed-memory operands.
+    pub contributing_instructions: Vec<u64>,
+}
+
 /// How a decoded address relates to a recovered function identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -910,6 +924,10 @@ pub struct FunctionControlFlow {
     pub edges: Vec<ControlFlowEdge>,
     /// Exits from retained intra-procedural coverage.
     pub exits: Vec<ControlFlowExit>,
+    /// Unsupported computed-branch transforms retained with their exact local
+    /// instruction provenance.
+    #[serde(default)]
+    pub computed_branch_transforms: Vec<ComputedBranchTransformEvidence>,
     /// Callsites sorted by instruction address.
     pub calls: Vec<ControlFlowCallsite>,
     /// Exact independently recovered edges omitted by caller guidance.
@@ -957,6 +975,37 @@ pub(crate) struct ControlFlowFoldSummary {
     pub(crate) decoded_bytes: u64,
     pub(crate) truncated_function_count: u64,
     pub(crate) continuation: Option<ControlFlowContinuation>,
+    pub(crate) reused_function_count: u64,
+}
+
+/// Exact prior inputs admitted for function-local CFG reuse.
+///
+/// The caller must separately prove that pointer and exception evidence are
+/// unchanged. The fold revalidates image identity, limits, complete function
+/// records, fixed-point inputs, and the incoming global byte budget before it
+/// clones any retained graph.
+pub(crate) struct ControlFlowReuse<'prior> {
+    pub(crate) functions: &'prior FunctionIndex,
+    pub(crate) control_flow: &'prior ControlFlowIndex,
+    pub(crate) pointers: Option<&'prior PointerIndex>,
+    pub(crate) exceptions: Option<&'prior ExceptionIndex>,
+    pub(crate) guidance: Option<&'prior ControlFlowRecoveryGuidance>,
+}
+
+#[derive(PartialEq, Eq)]
+struct FunctionControlFlowReuseKey<'input> {
+    function: &'input RecoveredFunction,
+    non_returning_functions: &'input BTreeSet<u64>,
+    incoming_decoded_byte_budget: usize,
+    guidance: FunctionControlFlowGuidanceKey,
+}
+
+#[derive(Default, PartialEq, Eq)]
+struct FunctionControlFlowGuidanceKey {
+    non_instruction_ranges: Vec<(u64, u64)>,
+    instruction_ranges: Vec<(u64, u64)>,
+    suppressed_edges: Vec<(u64, u64, ControlFlowEdgeKind)>,
+    suppressed_direct_calls: Vec<(u64, u64)>,
 }
 
 struct CachedControlFlowInstruction {
@@ -1119,6 +1168,7 @@ impl ControlFlowIndex {
             limits,
             guidance,
             None,
+            None,
             FunctionRecoveryProjection::Full,
             Vec::with_capacity,
             |graphs, graph| graphs.push(graph),
@@ -1133,6 +1183,54 @@ impl ControlFlowIndex {
             truncated_function_count: summary.truncated_function_count,
             continuation: summary.continuation,
         })
+    }
+
+    pub(crate) fn recover_reusing(
+        macho: &MachoFile<'_>,
+        functions: &FunctionIndex,
+        pointers: Option<&PointerIndex>,
+        exceptions: Option<&ExceptionIndex>,
+        limits: ControlFlowLimits,
+        guidance: Option<&ControlFlowRecoveryGuidance>,
+        prior_functions: &FunctionIndex,
+        prior_control_flow: &ControlFlowIndex,
+        prior_pointers: Option<&PointerIndex>,
+        prior_exceptions: Option<&ExceptionIndex>,
+        prior_guidance: Option<&ControlFlowRecoveryGuidance>,
+    ) -> Result<(Self, u64), ControlFlowRecoveryError> {
+        let (mut graphs, summary) = Self::fold_internal(
+            macho,
+            functions,
+            pointers,
+            exceptions,
+            limits,
+            guidance,
+            Some(ControlFlowReuse {
+                functions: prior_functions,
+                control_flow: prior_control_flow,
+                pointers: prior_pointers,
+                exceptions: prior_exceptions,
+                guidance: prior_guidance,
+            }),
+            None,
+            FunctionRecoveryProjection::Full,
+            Vec::with_capacity,
+            |graphs, graph| graphs.push(graph),
+        )?;
+        graphs.shrink_to_fit();
+        let reused_function_count = summary.reused_function_count;
+        Ok((
+            Self {
+                image: FunctionImageIdentity::from_macho(macho),
+                limits,
+                functions: graphs,
+                status: summary.status,
+                decoded_bytes: summary.decoded_bytes,
+                truncated_function_count: summary.truncated_function_count,
+                continuation: summary.continuation,
+            },
+            reused_function_count,
+        ))
     }
 
     pub(crate) fn fold_with_pointers<T>(
@@ -1151,6 +1249,7 @@ impl ControlFlowIndex {
             None,
             limits,
             None,
+            None,
             decode_arena,
             FunctionRecoveryProjection::Xrefs,
             initialize,
@@ -1166,6 +1265,7 @@ impl ControlFlowIndex {
         exceptions: Option<&ExceptionIndex>,
         limits: ControlFlowLimits,
         guidance: Option<&ControlFlowRecoveryGuidance>,
+        reuse: Option<ControlFlowReuse<'_>>,
         decode_arena: Option<&RefCell<ControlFlowDecodeArena>>,
         projection: FunctionRecoveryProjection,
         mut initialize: impl FnMut(usize) -> T,
@@ -1180,11 +1280,64 @@ impl ControlFlowIndex {
         {
             return Err(ControlFlowRecoveryError::ImageMismatch);
         }
+        if reuse.as_ref().is_some_and(|prior| {
+            prior.functions.image() != &image || prior.control_flow.image() != &image
+        }) {
+            return Err(ControlFlowRecoveryError::ImageMismatch);
+        }
+        if reuse.as_ref().is_some_and(|prior| {
+            prior.control_flow.limits() != limits
+                || prior.pointers != pointers
+                || prior.exceptions != exceptions
+        }) {
+            return Err(ControlFlowRecoveryError::PriorReuseMismatch);
+        }
         let arch =
             instruction_arch(macho).ok_or(ControlFlowRecoveryError::UnsupportedArchitecture)?;
         let non_returning_stubs = non_returning_stub_symbols(macho, arch, pointers);
         let admitted = functions.functions().len().min(limits.max_functions);
-        let mut non_returning_functions = BTreeSet::new();
+        let prior_non_returning_functions = reuse
+            .as_ref()
+            .map(|prior| {
+                prior
+                    .control_flow
+                    .functions()
+                    .iter()
+                    .filter(|graph| graph_proves_non_returning(graph))
+                    .map(|graph| graph.function_entry)
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let prior_cache = reuse
+            .as_ref()
+            .map(|prior| {
+                let mut remaining = limits.max_decoded_bytes;
+                prior
+                    .control_flow
+                    .functions()
+                    .iter()
+                    .filter_map(|graph| {
+                        let incoming_remaining = remaining;
+                        remaining =
+                            remaining.saturating_sub(graph.completeness.decoded_bytes as usize);
+                        prior
+                            .functions
+                            .by_entry(graph.function_entry)
+                            .map(|function| {
+                                (graph.function_entry, (function, graph, incoming_remaining))
+                            })
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let all_retained_functions_unchanged = reuse
+            .as_ref()
+            .is_some_and(|prior| prior.functions == functions);
+        let mut non_returning_functions = if all_retained_functions_unchanged {
+            prior_non_returning_functions.clone()
+        } else {
+            BTreeSet::new()
+        };
         loop {
             let recovery = FunctionRecoveryContext {
                 macho,
@@ -1206,11 +1359,41 @@ impl ControlFlowIndex {
             let mut any_partial = false;
             let mut continuation = None;
             let mut discovered_non_returning = BTreeSet::new();
+            let mut reused_function_count = 0_u64;
             for function in functions.functions().iter().take(admitted) {
                 if remaining_bytes == 0 {
                     break;
                 }
-                let graph = recover_function(&recovery, function, &mut remaining_bytes);
+                let graph = prior_cache
+                    .get(&function.entry)
+                    .filter(|(prior_function, prior_graph, prior_remaining)| {
+                        FunctionControlFlowReuseKey {
+                            function: prior_function,
+                            non_returning_functions: &prior_non_returning_functions,
+                            incoming_decoded_byte_budget: *prior_remaining,
+                            guidance: function_control_flow_guidance_key(
+                                prior_function,
+                                prior_graph,
+                                reuse.as_ref().and_then(|prior| prior.guidance),
+                            ),
+                        } == FunctionControlFlowReuseKey {
+                            function,
+                            non_returning_functions: &non_returning_functions,
+                            incoming_decoded_byte_budget: remaining_bytes,
+                            guidance: function_control_flow_guidance_key(
+                                function,
+                                prior_graph,
+                                guidance,
+                            ),
+                        }
+                    })
+                    .map(|(_, graph, _)| {
+                        remaining_bytes = remaining_bytes
+                            .saturating_sub(graph.completeness.decoded_bytes as usize);
+                        reused_function_count += 1;
+                        (*graph).clone()
+                    })
+                    .unwrap_or_else(|| recover_function(&recovery, function, &mut remaining_bytes));
                 decoded_bytes = decoded_bytes.saturating_add(graph.completeness.decoded_bytes);
                 graph_count += 1;
                 any_truncated |= graph.completeness.status == FunctionControlFlowStatus::Truncated;
@@ -1260,6 +1443,7 @@ impl ControlFlowIndex {
                         decoded_bytes,
                         truncated_function_count,
                         continuation,
+                        reused_function_count,
                     },
                 ));
             }
@@ -1357,6 +1541,54 @@ impl ControlFlowIndex {
             && self.decoded_bytes <= self.limits.max_decoded_bytes as u64
             && continuation_is_valid
             && self.status == expected_status
+    }
+}
+
+fn function_control_flow_guidance_key(
+    function: &RecoveredFunction,
+    graph: &FunctionControlFlow,
+    guidance: Option<&ControlFlowRecoveryGuidance>,
+) -> FunctionControlFlowGuidanceKey {
+    let Some(guidance) = guidance else {
+        return FunctionControlFlowGuidanceKey::default();
+    };
+    let coverage = function_coverage(function);
+    let overlaps_function = |(start, end): &(u64, u64)| {
+        coverage
+            .iter()
+            .any(|range| *start < range.end_exclusive && *end > range.start)
+    };
+    let overlaps_retained_table = |(start, end): &(u64, u64)| {
+        graph
+            .jump_tables
+            .iter()
+            .any(|table| *start < table.end_exclusive && *end > table.table_address)
+    };
+    FunctionControlFlowGuidanceKey {
+        non_instruction_ranges: guidance
+            .non_instruction_ranges
+            .iter()
+            .copied()
+            .filter(overlaps_function)
+            .collect(),
+        instruction_ranges: guidance
+            .instruction_ranges
+            .iter()
+            .copied()
+            .filter(|range| overlaps_function(range) || overlaps_retained_table(range))
+            .collect(),
+        suppressed_edges: guidance
+            .suppressed_edges
+            .iter()
+            .filter(|(entry, ..)| *entry == function.entry)
+            .map(|(_, source, target, kind)| (*source, *target, *kind))
+            .collect(),
+        suppressed_direct_calls: guidance
+            .suppressed_direct_calls
+            .iter()
+            .filter(|(entry, ..)| *entry == function.entry)
+            .map(|(_, instruction, target)| (*instruction, *target))
+            .collect(),
     }
 }
 
@@ -2411,6 +2643,20 @@ fn recover_function(
     if truncated || reachable_gap {
         mark_reachability(&mut blocks, &edges, function.entry, true);
     }
+    let computed_branch_transforms = exits
+        .iter()
+        .filter(|exit| {
+            exit.kind == ControlFlowExitKind::IndirectBranch
+                && blocks
+                    .get(exit.block as usize)
+                    .filter(|block| block.id == exit.block)
+                    .is_some_and(|block| block.reachability != ControlFlowReachability::Unreachable)
+        })
+        .filter_map(|exit| {
+            exit.instruction_address
+                .and_then(|address| computed_branch_transform(&instructions, address))
+        })
+        .collect::<Vec<_>>();
     if exits.iter().any(|exit| {
         exit.kind == ControlFlowExitKind::IndirectBranch
             && blocks
@@ -2419,12 +2665,7 @@ fn recover_function(
                 .is_some_and(|block| block.reachability != ControlFlowReachability::Unreachable)
     }) {
         reasons.insert("control_flow.indirect_branch_unresolved".into());
-        if exits.iter().any(|exit| {
-            exit.kind == ControlFlowExitKind::IndirectBranch
-                && exit.instruction_address.is_some_and(|address| {
-                    unresolved_computed_branch_transform(&instructions, address)
-                })
-        }) {
+        if !computed_branch_transforms.is_empty() {
             reasons.insert("control_flow.computed_branch_transform_unsupported".into());
         }
     }
@@ -2471,6 +2712,7 @@ fn recover_function(
         blocks,
         edges,
         exits,
+        computed_branch_transforms,
         calls,
         guided_edge_suppressions,
         guided_direct_call_suppressions,
@@ -2491,24 +2733,30 @@ fn recover_function(
     }
 }
 
-fn unresolved_computed_branch_transform(
+fn computed_branch_transform(
     instructions: &[ControlFlowInstruction],
     address: u64,
-) -> bool {
+) -> Option<ComputedBranchTransformEvidence> {
     let Some(index) = instructions
         .iter()
         .position(|instruction| instruction.address == address)
     else {
-        return false;
+        return None;
     };
-    instructions[index.saturating_sub(6)..=index]
+    let contributing_instructions = instructions[index.saturating_sub(6)..=index]
         .iter()
-        .any(|instruction| {
+        .filter_map(|instruction| {
             instruction
                 .operands
                 .iter()
                 .any(|operand| matches!(operand, ControlFlowOperand::IndexedMemory { .. }))
+                .then_some(instruction.address)
         })
+        .collect::<Vec<_>>();
+    (!contributing_instructions.is_empty()).then_some(ComputedBranchTransformEvidence {
+        instruction_address: address,
+        contributing_instructions,
+    })
 }
 
 fn apply_exception_evidence(
@@ -4614,6 +4862,7 @@ fn instruction_arch(macho: &MachoFile<'_>) -> Option<Arch> {
 mod tests {
     use super::*;
     use crate::analysis::functions::FunctionRecoveryLimits;
+    use crate::analysis::pointer_index::PointerRecoveryLimits;
 
     fn instruction_with_operand_count(count: usize) -> ControlFlowInstruction {
         ControlFlowInstruction {
@@ -5045,6 +5294,27 @@ mod tests {
             main.completeness
                 .reasons
                 .contains(&"control_flow.indirect_branch_unresolved".to_owned())
+        );
+    }
+
+    #[test]
+    fn unsupported_computed_branch_retains_local_transform_provenance() {
+        let mut bytes = x86_branching_fixture();
+        bytes[0x100..0x103].copy_from_slice(&[0xff, 0x24, 0xc8]); // jmp [rax+rcx*8]
+        let cfg = recover(&bytes, ControlFlowLimits::default());
+        let main = cfg.by_entry(0x1_0000_0100).unwrap();
+        assert_eq!(
+            main.computed_branch_transforms,
+            vec![ComputedBranchTransformEvidence {
+                instruction_address: 0x1_0000_0100,
+                contributing_instructions: vec![0x1_0000_0100],
+            }]
+        );
+        assert!(
+            main.completeness
+                .reasons
+                .iter()
+                .any(|reason| { reason == "control_flow.computed_branch_transform_unsupported" })
         );
     }
 
@@ -5786,6 +6056,117 @@ mod tests {
                 .reasons
                 .contains(&"control_flow.decode_gap".to_string())
         );
+    }
+
+    #[test]
+    fn exact_function_local_reuse_matches_cold_recovery() {
+        let bytes = x86_branching_fixture();
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let limits = ControlFlowLimits::default();
+        let prior = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
+
+        let (warm, reused) = ControlFlowIndex::recover_reusing(
+            &macho, &functions, None, None, limits, None, &functions, &prior, None, None, None,
+        )
+        .unwrap();
+
+        assert_eq!(warm, prior);
+        assert_eq!(reused as usize, prior.functions().len());
+        assert!(warm.durable_invariants_hold());
+    }
+
+    #[test]
+    fn changed_function_record_invalidates_only_its_exact_cache_entry() {
+        let bytes = x86_branching_fixture();
+        let macho = image(&bytes);
+        let prior_functions =
+            FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let limits = ControlFlowLimits::default();
+        let prior = ControlFlowIndex::recover(&macho, &prior_functions, limits).unwrap();
+        assert!(prior_functions.functions().len() > 1);
+
+        let mut changed_document = serde_json::to_value(&prior_functions).unwrap();
+        changed_document["functions"][0]["identity"] = serde_json::json!({
+            "kind": "named",
+            "primary": "reviewed_name",
+            "aliases": []
+        });
+        let changed_functions: FunctionIndex = serde_json::from_value(changed_document).unwrap();
+        let cold = ControlFlowIndex::recover(&macho, &changed_functions, limits).unwrap();
+        let (warm, reused) = ControlFlowIndex::recover_reusing(
+            &macho,
+            &changed_functions,
+            None,
+            None,
+            limits,
+            None,
+            &prior_functions,
+            &prior,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(warm, cold);
+        assert!(reused > 0);
+        assert!((reused as usize) < warm.functions().len());
+        assert!(warm.durable_invariants_hold());
+    }
+
+    #[test]
+    fn prior_reuse_limits_are_exact_admission_inputs() {
+        let bytes = x86_branching_fixture();
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let prior =
+            ControlFlowIndex::recover(&macho, &functions, ControlFlowLimits::default()).unwrap();
+        let error = ControlFlowIndex::recover_reusing(
+            &macho,
+            &functions,
+            None,
+            None,
+            ControlFlowLimits {
+                max_decoded_bytes: ControlFlowLimits::default().max_decoded_bytes - 1,
+                ..ControlFlowLimits::default()
+            },
+            None,
+            &functions,
+            &prior,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error, ControlFlowRecoveryError::PriorReuseMismatch);
+    }
+
+    #[test]
+    fn prior_reuse_pointer_evidence_is_an_exact_admission_input() {
+        let bytes = x86_branching_fixture();
+        let macho = image(&bytes);
+        let functions = FunctionIndex::recover(&macho, FunctionRecoveryLimits::default()).unwrap();
+        let limits = ControlFlowLimits::default();
+        let prior = ControlFlowIndex::recover(&macho, &functions, limits).unwrap();
+        let pointers = PointerIndex::recover(&macho, PointerRecoveryLimits::default()).unwrap();
+
+        let error = ControlFlowIndex::recover_reusing(
+            &macho,
+            &functions,
+            Some(&pointers),
+            None,
+            limits,
+            None,
+            &functions,
+            &prior,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, ControlFlowRecoveryError::PriorReuseMismatch);
     }
 
     #[test]

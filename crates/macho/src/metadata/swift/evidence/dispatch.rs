@@ -64,27 +64,39 @@ pub(super) fn validate_class_dispatch(
         if flags & 0x1f != 16 {
             continue;
         }
-        if flags & (IS_GENERIC | HAS_RESILIENT_SUPERCLASS | METADATA_INITIALIZATION_MASK) != 0 {
-            if flags & (HAS_VTABLE | HAS_OVERRIDE_TABLE) == 0 {
-                // These flags change the trailing class layout, but there is
-                // no dispatch payload to locate when both dispatch-presence
-                // bits are clear.
-                continue;
-            }
-            let mut error = class_dispatch_unsupported(
-                attempted.saturating_add(1),
-                Some(descriptor.index),
-                "generic, resilient-superclass, or metadata-initialized class layout is not yet admitted",
-            );
-            error.retained_vtable_entries = vtable_entries;
-            error.retained_overrides = overrides;
-            return Err(error);
-        }
         let mut cursor = descriptor.address.checked_add(44).ok_or_else(|| {
             class_dispatch_error(
                 attempted.saturating_add(1),
                 Some(descriptor.index),
                 "Swift class trailing-descriptor address overflowed",
+            )
+        })?;
+        if flags & IS_GENERIC != 0 {
+            cursor = skip_generic_context(macho, cursor, attempted, descriptor.index)?;
+        }
+        if flags & HAS_RESILIENT_SUPERCLASS != 0 {
+            cursor = cursor.checked_add(4).ok_or_else(|| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor.index),
+                    "Swift resilient-superclass trailing record overflowed",
+                )
+            })?;
+        }
+        cursor = match flags & METADATA_INITIALIZATION_MASK {
+            0 => Some(cursor),
+            // Singleton metadata initialization carries cache, incomplete
+            // metadata, and completion-function relative pointers.
+            0x0001_0000 => cursor.checked_add(12),
+            // Foreign metadata initialization carries one completion pointer.
+            0x0002_0000 => cursor.checked_add(4),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            class_dispatch_unsupported(
+                attempted.saturating_add(1),
+                Some(descriptor.index),
+                "Swift class metadata-initialization trailing record is unsupported",
             )
         })?;
         if flags & HAS_VTABLE != 0 {
@@ -346,6 +358,83 @@ pub(super) fn validate_class_dispatch(
     Ok((vtable_entries, overrides))
 }
 
+fn skip_generic_context(
+    macho: &MachoFile<'_>,
+    cursor: u64,
+    attempted: u64,
+    descriptor_index: u64,
+) -> Result<u64, ClassDispatchValidationError> {
+    let header = macho.read_bytes_at_va(Va(cursor), 8).map_err(|error| {
+        class_dispatch_error(
+            attempted.saturating_add(1),
+            Some(descriptor_index),
+            format!("Swift generic context header is truncated: {error}"),
+        )
+    })?;
+    let parameter_count = u64::from(
+        macho
+            .endian()
+            .read_u16(header[0..2].try_into().expect("generic parameter count")),
+    );
+    let requirement_count = u64::from(
+        macho
+            .endian()
+            .read_u16(header[2..4].try_into().expect("generic requirement count")),
+    );
+    let parameter_bytes = parameter_count
+        .checked_add(3)
+        .map(|value| value & !3)
+        .ok_or_else(|| {
+            class_dispatch_error(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                "Swift generic parameter descriptor length overflowed",
+            )
+        })?;
+    let requirement_bytes = requirement_count.checked_mul(12).ok_or_else(|| {
+        class_dispatch_error(
+            attempted.saturating_add(1),
+            Some(descriptor_index),
+            "Swift generic requirement descriptor length overflowed",
+        )
+    })?;
+    let length = 8_u64
+        .checked_add(parameter_bytes)
+        .and_then(|value| value.checked_add(requirement_bytes))
+        .ok_or_else(|| {
+            class_dispatch_error(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                "Swift generic context length overflowed",
+            )
+        })?;
+    macho
+        .read_bytes_at_va(
+            Va(cursor),
+            usize::try_from(length).map_err(|_| {
+                class_dispatch_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor_index),
+                    "Swift generic context exceeds host limits",
+                )
+            })?,
+        )
+        .map_err(|error| {
+            class_dispatch_error(
+                attempted.saturating_add(1),
+                Some(descriptor_index),
+                format!("Swift generic context is truncated: {error}"),
+            )
+        })?;
+    cursor.checked_add(length).ok_or_else(|| {
+        class_dispatch_error(
+            attempted.saturating_add(1),
+            Some(descriptor_index),
+            "Swift generic context end overflowed",
+        )
+    })
+}
+
 fn class_method_kind(
     flags: u32,
     attempted: u64,
@@ -460,7 +549,14 @@ pub(super) fn validate_protocol_requirements(
     macho: &MachoFile<'_>,
     descriptors: &[ValidatedDescriptor],
     limits: &SwiftEvidenceLimits,
-) -> Result<Vec<MachoSwiftProtocolRequirementRecordV1>, ProtocolRequirementValidationError> {
+) -> Result<
+    (
+        Vec<MachoSwiftProtocolSignatureRequirementRecordV1>,
+        Vec<MachoSwiftProtocolRequirementRecordV1>,
+    ),
+    ProtocolRequirementValidationError,
+> {
+    let mut signature_requirements = Vec::new();
     let mut requirements = Vec::new();
     let mut attempted = 0_u64;
     for descriptor in descriptors
@@ -490,11 +586,14 @@ pub(super) fn validate_protocol_requirements(
                     .expect("protocol requirement count"),
             ),
         );
-        if signature_count != 0 {
-            return Err(protocol_requirement_unsupported(
-                signature_count,
+        if signature_count > limits.max_protocol_requirements
+            || signature_requirements.len() as u64
+                > limits.max_protocol_requirements - signature_count
+        {
+            return Err(protocol_requirement_budget_error(
+                attempted.saturating_add(1),
                 Some(descriptor.index),
-                "generic protocol requirement signatures are retained as unsupported",
+                "Swift protocol signature requirements exceed the selected limit",
             ));
         }
         if requirement_count > limits.max_protocol_requirements
@@ -532,13 +631,91 @@ pub(super) fn validate_protocol_requirements(
                     gap,
                 })?;
         }
-        let requirements_start = descriptor.address.checked_add(24).ok_or_else(|| {
+        let signature_start = descriptor.address.checked_add(24).ok_or_else(|| {
             protocol_requirement_error(
                 attempted.saturating_add(1),
                 Some(descriptor.index),
-                "Swift protocol requirement array address overflowed",
+                "Swift protocol signature-requirement array address overflowed",
             )
         })?;
+        for requirement_index in 0..signature_count {
+            attempted = attempted.checked_add(1).ok_or_else(|| {
+                protocol_requirement_budget_error(
+                    u64::MAX,
+                    Some(descriptor.index),
+                    "Swift protocol signature-requirement count overflowed",
+                )
+            })?;
+            let descriptor_va = signature_start
+                .checked_add(requirement_index.checked_mul(12).ok_or_else(|| {
+                    protocol_requirement_budget_error(
+                        attempted,
+                        Some(descriptor.index),
+                        "Swift protocol signature-requirement coordinate overflowed",
+                    )
+                })?)
+                .ok_or_else(|| {
+                    protocol_requirement_error(
+                        attempted,
+                        Some(descriptor.index),
+                        "Swift protocol signature-requirement address overflowed",
+                    )
+                })?;
+            let raw = macho.read_bytes_at_va(Va(descriptor_va), 12).map_err(|error| {
+                protocol_requirement_error(
+                    attempted,
+                    Some(descriptor.index),
+                    format!("Swift protocol signature requirement is truncated: {error}"),
+                )
+            })?;
+            signature_requirements.push(MachoSwiftProtocolSignatureRequirementRecordV1 {
+                protocol_descriptor_va: descriptor.address,
+                requirement_index: u32::try_from(requirement_index).map_err(|_| {
+                    protocol_requirement_budget_error(
+                        attempted,
+                        Some(descriptor.index),
+                        "Swift protocol signature-requirement index exceeds u32",
+                    )
+                })?,
+                descriptor_va,
+                flags: macho
+                    .endian()
+                    .read_u32(raw[0..4].try_into().expect("generic requirement flags")),
+                parameter_relative: macho.endian().read_i32(
+                    raw[4..8]
+                        .try_into()
+                        .expect("generic requirement parameter"),
+                ),
+                constraint_relative: macho.endian().read_i32(
+                    raw[8..12]
+                        .try_into()
+                        .expect("generic requirement constraint"),
+                ),
+                raw_sha256: EvidenceDigest::of(raw),
+            });
+        }
+        // Generic signature requirements precede ordinary protocol
+        // requirements and use the ABI's 12-byte generic-requirement record.
+        // Their raw constraints remain represented by the protocol descriptor;
+        // advancing over them preserves exact ordinary requirement coordinates.
+        let signature_bytes = signature_count.checked_mul(12).ok_or_else(|| {
+            protocol_requirement_budget_error(
+                attempted.saturating_add(1),
+                Some(descriptor.index),
+                "Swift protocol signature-requirement length overflowed",
+            )
+        })?;
+        let requirements_start = descriptor
+            .address
+            .checked_add(24)
+            .and_then(|address| address.checked_add(signature_bytes))
+            .ok_or_else(|| {
+                protocol_requirement_error(
+                    attempted.saturating_add(1),
+                    Some(descriptor.index),
+                    "Swift protocol requirement array address overflowed",
+                )
+            })?;
         for requirement_index in 0..requirement_count {
             attempted = attempted.checked_add(1).ok_or_else(|| {
                 protocol_requirement_budget_error(
@@ -639,7 +816,7 @@ pub(super) fn validate_protocol_requirements(
             });
         }
     }
-    Ok(requirements)
+    Ok((signature_requirements, requirements))
 }
 
 fn protocol_requirement_error(

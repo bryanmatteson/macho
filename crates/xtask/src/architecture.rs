@@ -160,6 +160,7 @@ fn check_feature_authority(features: &BTreeMap<String, Vec<String>>) -> Result<(
             "analysis",
             BTreeSet::from([
                 "dep:serde_json",
+                "dep:toml",
                 "dep:tree-sitter",
                 "dep:tree-sitter-c",
                 "dep:tree-sitter-cpp",

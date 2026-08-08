@@ -442,6 +442,44 @@ mod tests {
     }
 
     #[test]
+    fn add_section_creates_an_aligned_segment_without_moving_existing_payload() {
+        let input = macho_test_support::signable_thin64_arm64(2);
+        let original_text = input[0x400..0x404].to_vec();
+        let original_len = input.len() as u64;
+        let container = crate::core::parse(&input).expect("fixture parses");
+        let mut transaction = PatchTransaction::new(container.first_macho().unwrap());
+        transaction.add_section(
+            AddSection::new("__SPLICE", "__payload", &[1, 2, 3, 4])
+                .expect("valid new-segment request")
+                .with_alignment(4)
+                .expect("valid section alignment"),
+        );
+
+        let output = transaction.commit().expect("new segment commits");
+        let reparsed = crate::core::parse(&output).expect("output reparses");
+        let macho = reparsed.first_macho().expect("thin Mach-O");
+        let segment = macho
+            .segments()
+            .iter()
+            .find(|segment| segment.name() == "__SPLICE")
+            .expect("new segment is present");
+        let section = macho
+            .section("__SPLICE", "__payload")
+            .expect("new section is present");
+
+        assert_eq!(segment.file_offset().0 % 0x4000, 0);
+        assert_eq!(segment.vm_addr().0 % 0x4000, 0);
+        assert!(segment.file_offset().0 >= original_len);
+        assert_eq!(section.offset().0, segment.file_offset().0);
+        assert_eq!(section.addr().0, segment.vm_addr().0);
+        assert_eq!(
+            macho.section_bytes("__SPLICE", "__payload").unwrap(),
+            &[1, 2, 3, 4]
+        );
+        assert_eq!(&output[0x400..0x404], original_text.as_slice());
+    }
+
+    #[test]
     fn add_sections_reject_load_command_payload_relocation() {
         let input = macho_test_support::signable_thin64_arm64(2);
         let original = input.clone();

@@ -60,9 +60,10 @@ use crate::mutate::model::macho_file::MachoFile;
 
 /// A structural editor for Mach-O binaries.
 ///
-/// Allows adding, removing, and replacing load commands, then rebuilding
-/// the binary without relocating existing payload. Segment data is copied
-/// verbatim, and command growth fails if existing header slack is insufficient.
+/// Allows adding, removing, and replacing load commands, then rebuilding the
+/// binary without relocating existing payload. A section whose named segment
+/// is absent is placed in a new, aligned segment after the existing image.
+/// Command growth still fails if existing header slack is insufficient.
 pub struct MachoEditor<'image, 'section> {
     original: &'image MachoFile<'image>,
     commands: Vec<LoadCommand>,
@@ -161,18 +162,39 @@ impl<'image, 'section> MachoEditor<'image, 'section> {
             .retain(|cmd| !matches!(cmd, LoadCommand::CodeSignature(_)));
     }
 
-    /// Add a section to an existing segment.
+    /// Add a section to an existing segment, or create its named segment.
     ///
-    /// Placement consumes only free file and virtual-address space. The edit
-    /// fails rather than relocating a later segment or overwriting unrelated
-    /// bytes.
+    /// Placement consumes only free file and virtual-address space. When the
+    /// segment is absent, a new aligned segment command is appended and the
+    /// payload is placed after every existing file and VM range.
     pub fn add_section(&mut self, request: AddSection<'section>) -> Result<()> {
-        section::place_section(
-            &mut self.segments,
-            self.original.bytes().len(),
-            self.original.bitness(),
-            request,
-        )
+        if self
+            .segments
+            .iter()
+            .any(|segment| segment.original.name() == request.segment_name())
+        {
+            section::place_section(
+                &mut self.segments,
+                self.original.bytes().len(),
+                self.original.bitness(),
+                request,
+            )
+        } else {
+            let index = section::create_segment_with_section(
+                &mut self.segments,
+                self.original.bytes().len(),
+                self.original.bitness(),
+                request,
+            )?;
+            let command = SegmentCommandData {
+                segment_index: index,
+            };
+            self.commands.push(match self.original.bitness() {
+                crate::core::model::header::Bitness::Bits32 => LoadCommand::Segment32(command),
+                crate::core::model::header::Bitness::Bits64 => LoadCommand::Segment64(command),
+            });
+            Ok(())
+        }
     }
 
     /// Build the modified binary, returning the new bytes.

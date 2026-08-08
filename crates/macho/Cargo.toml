@@ -2,7 +2,7 @@
 name = "macho"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.88"
+rust-version.workspace = true
 license.workspace = true
 readme.workspace = true
 homepage.workspace = true
@@ -45,8 +45,9 @@ evidence = ["cpp", "dyld", "objc", "swift", "symbols"]
 metadata = ["evidence", "codesign", "dwarf", "symbols"]
 dyld-cache = ["dyld", "dep:serde"]
 analysis = [
-  "metadata", "dyld-cache", "insn", "dep:serde_json", "dep:tree-sitter",
-  "dep:tree-sitter-c", "dep:tree-sitter-cpp", "dep:tree-sitter-objc",
+  "metadata", "dyld-cache", "insn", "dep:serde_json", "dep:toml",
+  "dep:tree-sitter", "dep:tree-sitter-c", "dep:tree-sitter-cpp",
+  "dep:tree-sitter-objc",
 ]
 structural = ["codesign", "dep:serde", "dep:thiserror"]
 patch = ["structural", "insn"]
@@ -82,6 +83,7 @@ signature = { workspace = true, optional = true }
 swift-demangler = { workspace = true, optional = true }
 termosaic = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 tree-sitter = { workspace = true, optional = true }
 tree-sitter-c = { workspace = true, optional = true }
 tree-sitter-cpp = { workspace = true, optional = true }

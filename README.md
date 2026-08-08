@@ -5,7 +5,7 @@
 [![CI](https://github.com/bryanmatteson/macho/actions/workflows/ci.yml/badge.svg)](https://github.com/bryanmatteson/macho/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/macho.svg)](https://crates.io/crates/macho)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Rust 1.88+](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust 1.91.1+](https://img.shields.io/badge/rust-1.91.1%2B-orange.svg)](https://www.rust-lang.org)
 
 `macho` is what you reach for when you have an Apple binary and a question. It reads the header, walks the load commands, recovers Objective-C and Swift declarations that were compiled away, disassembles the code, diffs two builds, audits the code signature, patches an rpath, re-signs the result, and cracks open a dyld shared cache — from a single static binary that runs the same on macOS, Linux, and Windows.
 
@@ -63,7 +63,7 @@ cargo add macho
 cargo install macho --features cli  # installs the `macho` binary
 ```
 
-The unified package requires Rust 1.88. From a checkout, use `cargo install --path crates/macho --features cli` to install that exact source tree.
+The unified package requires Rust 1.91.1. From a checkout, use `cargo install --path crates/macho --features cli` to install that exact source tree.
 
 Then, from a clone:
 
@@ -149,17 +149,37 @@ unsupported owner shapes remain in the unresolved ledger. Use
 `header-infer validate` before `header-infer apply`; applying writes both the
 projected header and its authority sidecar.
 
-`macho cache` opens the primary cache and every UUID-validated sibling named by
-its subcache table. Extraction selects exactly one image, reconstructs a compact
+C++ header projection also exposes a reusable ranked-hypothesis policy:
+`--projection-policy strict|suggest|best-effort`. Suggest preserves strict
+source while reporting every reached blocker; best-effort may project the
+top-ranked interpretation and emits a conspicuous source preamble plus
+`slices[].header.assumption_ledger` receipts. Evidence authority remains
+separate from the operator decision that authorized a guess. Exact
+`--hypothesis-selection GAP_ID=CANDIDATE_ID` overrides win over automatic
+ranking and reject stale IDs. Versioned JSON and compact TOML selection
+documents are accepted with `--hypothesis-selection-file PATH`; file and inline
+selections may be combined, with duplicate subjects rejected. The shared
+contract is documented in
+[`crates/macho/docs/hypothesis-selection.md`](crates/macho/docs/hypothesis-selection.md).
+
+`macho cache` opens the primary cache, every UUID-validated V1 numeric or V2
+suffix-bearing sibling named by its subcache table, and the separately declared
+`.symbols` member when `symbolFileUUID` is nonzero. Embedded and separate
+local-symbol chunks are bounds-checked with their generation-specific entry
+layout. Extraction selects exactly one image, reconstructs a compact
 standalone Mach-O from mapped segment bytes, rebuilds its per-image symbol and
-string tables, rewrites file-coordinate load commands, and reparses the result
-before writing it atomically. Existing outputs are never replaced unless
+string tables, exhaustively classifies load commands before rewriting known
+file coordinates, and reparses the result before writing it atomically. Unknown
+commands and future cache generations fail as typed unsupported input before an
+artifact is delivered. Existing outputs are never replaced unless
 `--force` is explicit. The JSON result includes a per-domain completeness
 ledger; cache-level local symbols and cache-resident signatures are reported as
 unresolved, absent, or rejected rather than presented as standalone evidence.
-Current support targets dyld v1 cache families with legacy numeric or modern
-explicit subcache suffixes. Valid layouts that cannot be reconstructed safely
-fail as unsupported instead of producing a partial artifact.
+Current support targets Apple's published dyld v1 legacy, subcache V1, subcache
+V2, and local-symbol layouts. Valid layouts that cannot be reconstructed safely
+fail as unsupported instead of producing a partial artifact; validated
+cache-level locals remain explicit unresolved evidence because they are not
+silently merged into the standalone image's `LC_SYMTAB`.
 
 `macho diff` compares architecture slices, binary structure, relocations,
 symbols and dynamic-link surfaces, code signatures and audit findings, strings,
@@ -481,10 +501,14 @@ The workspace keeps product code in one feature-gated package. Module ownership 
 
 - `cargo xtask architecture` enforces dependency direction and source ownership.
 - `cargo xtask docs --check` binds this command reference and the diagnostic registry to the code.
-- `cargo xtask release --check` binds workspace packaging, CLI, changelog, and lockfiles (`--require-tag` additionally demands clean version-bearing inputs and an exact matching `vX.Y.Z` tag).
-- `cargo xtask verify` runs the stable format, lint, docs, test, and benchmark gate.
+- `cargo xtask release --check` builds and verifies the publishable crate and binds its CLI, changelog, and lockfiles (`--require-tag` additionally demands a clean tracked tree and an exact matching `vX.Y.Z` tag).
+- `cargo xtask verify` checks every declared feature composition before the locked all-feature format, lint, docs, test, and benchmark gate.
 - `cargo xtask verify-fuzz` builds every fuzz target (nightly Rust).
 - `mise run verify` composes both gates, scoping nightly to fuzzing only.
+
+The [1.x stability policy](crates/macho/docs/stability.md) defines which Rust
+APIs, feature names, machine documents, diagnostics, platforms, and MSRV claims
+are compatibility contracts.
 
 The workspace contains three packages: `macho` for all shipped library and CLI
 functionality, private `xtask` for repository automation, and private
@@ -494,7 +518,11 @@ for offline Rust builds and refreshed through `scripts/generate-mkasm-codecs.sh`
 
 ## Contributing
 
-Run `mise run verify` before opening a PR — it's the same gate CI runs. See [CHANGELOG.md](CHANGELOG.md) for release history and [docs/diagnostic-codes.md](docs/diagnostic-codes.md) for the stable machine-readable diagnostic codes.
+Run `mise run verify` before opening a PR. CI repeats the stable and fuzz gates
+on supported hosts, checks Rust 1.91.1 exactly, and runs the real macOS signing
+oracle. See [CHANGELOG.md](CHANGELOG.md) for release history and
+[docs/diagnostic-codes.md](docs/diagnostic-codes.md) for the stable
+machine-readable diagnostic codes.
 
 ## License
 

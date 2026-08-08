@@ -28,7 +28,7 @@ fn onboarding_distinguishes_installation_msrv_and_machine_output_contracts() {
 
     assert!(readme.contains("cargo add macho"));
     assert!(readme.contains("cargo install macho --features cli"));
-    assert!(readme.contains("unified package requires Rust 1.88"));
+    assert!(readme.contains("unified package requires Rust 1.91.1"));
     assert!(readme.contains("disassemble --format json"));
     assert!(readme.contains("exactly one self-contained instruction object per line"));
     assert!(readme.contains("header-infer export"));

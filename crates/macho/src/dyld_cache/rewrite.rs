@@ -228,6 +228,7 @@ pub(super) fn patch_file_offsets_for_command(
             }
         };
     match command {
+        LC_SYMSEG => patch_sized_u32(bytes, 8, 12)?,
         LC_SYMTAB => {
             let old_stroff = read_macho_u32(bytes, offset + 16, endian, "string table offset")?;
             let nsyms = read_macho_u32(bytes, offset + 12, endian, "symbol count")?;
@@ -325,7 +326,51 @@ pub(super) fn patch_file_offsets_for_command(
                 "LC_FILESET_ENTRY cache images require fileset-aware reconstruction",
             ));
         }
-        _ => {}
+        // These commands contain VM coordinates, command-relative strings,
+        // scalar metadata, or thread state. VM topology and command byte
+        // positions are preserved by standalone reconstruction, so no file
+        // coordinate rewrite is required.
+        LC_SEGMENT
+        | LC_THREAD
+        | LC_UNIXTHREAD
+        | LC_LOADFVMLIB
+        | LC_IDFVMLIB
+        | LC_IDENT
+        | LC_FVMFILE
+        | LC_PREPAGE
+        | LC_LOAD_DYLIB
+        | LC_ID_DYLIB
+        | LC_LOAD_DYLINKER
+        | LC_ID_DYLINKER
+        | LC_PREBOUND_DYLIB
+        | LC_ROUTINES
+        | LC_SUB_FRAMEWORK
+        | LC_SUB_UMBRELLA
+        | LC_SUB_CLIENT
+        | LC_SUB_LIBRARY
+        | LC_PREBIND_CKSUM
+        | LC_LOAD_WEAK_DYLIB
+        | LC_SEGMENT_64
+        | LC_ROUTINES_64
+        | LC_UUID
+        | LC_RPATH
+        | LC_REEXPORT_DYLIB
+        | LC_LAZY_LOAD_DYLIB
+        | LC_LOAD_UPWARD_DYLIB
+        | LC_VERSION_MIN_MACOSX
+        | LC_VERSION_MIN_IPHONEOS
+        | LC_DYLD_ENVIRONMENT
+        | LC_SOURCE_VERSION
+        | LC_LINKER_OPTION
+        | LC_VERSION_MIN_TVOS
+        | LC_VERSION_MIN_WATCHOS
+        | LC_BUILD_VERSION
+        | LC_TARGET_TRIPLE => {}
+        _ => {
+            return Err(Error::unsupported(format!(
+                "unhandled Mach-O load command {command:#x} may contain file coordinates"
+            )));
+        }
     }
     Ok(())
 }

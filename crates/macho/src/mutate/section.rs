@@ -1,5 +1,8 @@
 use crate::core::format::constants::SectionAttributes;
+use crate::core::format::constants::{SegmentFlags, VmProtection};
+use crate::core::model::addr::{ThinFileOffset, Va};
 use crate::core::model::header::Bitness;
+use crate::core::model::names::SegmentName;
 use crate::core::model::section::SectionType;
 use crate::core::model::segment::Segment;
 
@@ -8,6 +11,7 @@ use crate::mutate::{Error, Result};
 const MAX_MACHO_NAME_LEN: usize = 16;
 const MAX_ALIGNMENT_EXPONENT: u32 = 31;
 const MAX_FILE_PADDING: u64 = 16 * 1024 * 1024;
+const NEW_SEGMENT_ALIGNMENT: u64 = 16 * 1024;
 
 /// Bytes or virtual storage carried by a newly added section.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,6 +55,7 @@ pub struct AddSection<'data> {
     align: u32,
     section_type: SectionType,
     attributes: SectionAttributes,
+    new_segment_protection: Option<VmProtection>,
     reserved1: u32,
     reserved2: u32,
     reserved3: u32,
@@ -104,6 +109,7 @@ impl<'data> AddSection<'data> {
             align: 0,
             section_type,
             attributes: SectionAttributes::empty(),
+            new_segment_protection: None,
             reserved1: 0,
             reserved2: 0,
             reserved3: 0,
@@ -135,6 +141,19 @@ impl<'data> AddSection<'data> {
     pub fn with_attributes(mut self, attributes: SectionAttributes) -> Self {
         self.attributes = attributes;
         self
+    }
+
+    /// Set the exact initial and maximum protection for a newly created
+    /// segment. This value is ignored when the named segment already exists,
+    /// because an operation may not silently alter an existing mapping.
+    pub fn with_new_segment_protection(mut self, protection: VmProtection) -> Result<Self> {
+        if protection.is_empty() {
+            return Err(Error::invalid(
+                "new segment protection must grant at least one permission",
+            ));
+        }
+        self.new_segment_protection = Some(protection);
+        Ok(self)
     }
 
     /// Set the three type-specific reserved words.
@@ -460,6 +479,110 @@ pub(crate) fn place_section<'data>(
         file_offset,
     });
     Ok(())
+}
+
+/// Create a new segment containing exactly one requested section.
+///
+/// A new segment is the safe boundary when no existing segment has room: it
+/// leaves every existing file and VM coordinate untouched. Both coordinates
+/// are rounded to 16 KiB so the result is valid on the strictest currently
+/// supported Mach-O page geometry. The caller must append the corresponding
+/// segment load command after this succeeds.
+pub(crate) fn create_segment_with_section<'data>(
+    segments: &mut Vec<EditableSegment<'data>>,
+    input_len: usize,
+    bitness: Bitness,
+    request: AddSection<'data>,
+) -> Result<usize> {
+    validate_content_type(&request)?;
+    if bitness == Bitness::Bits32 && request.reserved3 != 0 {
+        return Err(Error::invalid(
+            "reserved3 is not representable in a 32-bit Mach-O section",
+        ));
+    }
+    if segments
+        .iter()
+        .any(|segment| segment.original.name() == request.segment_name())
+    {
+        return Err(Error::invalid(format!(
+            "segment {} already exists",
+            request.segment_name()
+        )));
+    }
+
+    let alignment = 1u64
+        .checked_shl(request.alignment())
+        .ok_or_else(|| Error::invalid("section alignment overflow"))?
+        .max(NEW_SEGMENT_ALIGNMENT);
+    let input_len =
+        u64::try_from(input_len).map_err(|_| Error::invalid("input length exceeds u64"))?;
+    let file_offset = align_up(input_len, alignment)?;
+    if file_offset > u64::from(u32::MAX) {
+        return Err(Error::invalid(
+            "new segment file offset exceeds Mach-O's section u32 field",
+        ));
+    }
+    let vm_floor = segments.iter().try_fold(0u64, |end, segment| {
+        segment
+            .original
+            .vm_addr()
+            .0
+            .checked_add(segment.vm_size)
+            .map(|candidate| end.max(candidate))
+            .ok_or_else(|| Error::invalid("existing segment VM range overflow"))
+    })?;
+    let vm_addr = align_up(vm_floor, alignment)?;
+    let (file_size, vm_size, section_file_offset) = match request.content() {
+        SectionContent::FileBacked(bytes) => {
+            let size = u64::try_from(bytes.len())
+                .map_err(|_| Error::invalid("new section length exceeds u64"))?;
+            (size, size, file_offset)
+        }
+        SectionContent::ZeroFill(size) => (0, *size, 0),
+    };
+    if bitness == Bitness::Bits32
+        && (vm_addr > u64::from(u32::MAX) || vm_size > u64::from(u32::MAX))
+    {
+        return Err(Error::invalid(
+            "new segment VM range is not representable in a 32-bit Mach-O",
+        ));
+    }
+
+    let mut name = [0u8; MAX_MACHO_NAME_LEN];
+    name[..request.segment_name().len()].copy_from_slice(request.segment_name().as_bytes());
+    let executable = request
+        .attributes()
+        .intersects(SectionAttributes::PURE_INSTRUCTIONS | SectionAttributes::SOME_INSTRUCTIONS);
+    let protection = request.new_segment_protection.unwrap_or_else(|| {
+        if executable {
+            VmProtection::READ | VmProtection::EXECUTE
+        } else {
+            VmProtection::READ | VmProtection::WRITE
+        }
+    });
+    let original = Segment {
+        name: SegmentName::from_bytes(name),
+        vm_addr: Va(vm_addr),
+        vm_size,
+        file_offset: ThinFileOffset(file_offset),
+        file_size,
+        max_prot: protection,
+        init_prot: protection,
+        flags: SegmentFlags::empty(),
+        sections: Vec::new(),
+    };
+    let index = segments.len();
+    segments.push(EditableSegment {
+        original,
+        vm_size,
+        file_size,
+        added_sections: vec![PlacedSection {
+            request,
+            address: vm_addr,
+            file_offset: section_file_offset,
+        }],
+    });
+    Ok(index)
 }
 
 fn validate_content_type(request: &AddSection<'_>) -> Result<()> {

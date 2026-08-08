@@ -374,6 +374,8 @@ pub enum HeaderDecl {
     },
     Record {
         id: EntityId,
+        /// Source owner scopes, kept separate from the record's local path.
+        owner: Option<HeaderOwnerRef>,
         record_kind: RecordKind,
         path: NonEmpty<Identifier>,
         complete: bool,
@@ -383,6 +385,8 @@ pub enum HeaderDecl {
     },
     Forward {
         id: EntityId,
+        /// Source owner scopes, kept separate from the record's local path.
+        owner: Option<HeaderOwnerRef>,
         record_kind: RecordKind,
         path: NonEmpty<Identifier>,
     },

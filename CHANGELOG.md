@@ -2,6 +2,23 @@
 
 ## 1.0.0
 
+- Add the reusable facts/hypotheses/decisions projection contract with strict,
+  suggest, and best-effort C++ header policies, complete two-dimensional
+  assumption receipts, and exact JSON, TOML, or inline operator selections.
+  The canonical request digest binds the complete selection policy and
+  validators reject projected assumptions without matching receipts. As a
+  prerelease contract, recovery remains at schema version 2 and is updated in
+  place rather than accumulating development-only schema versions.
+
+- Freeze the 1.x stability boundary around the public Rust API, declared
+  feature compositions, versioned machine documents, diagnostic codes, and a
+  truthful Rust 1.91.1 minimum. Release verification now builds every feature
+  in isolation, verifies the actual packaged crate, and runs on Linux, macOS,
+  and Windows; macOS additionally exercises the real `codesign` oracle.
+- Make malformed AArch64 logical-immediate encodings fall back to `.inst`
+  instead of panicking during disassembly. The checked decoder is also fixed
+  in the upstream mkasm Rust formatter template and guarded by a generator test.
+
 - Make `disassemble --format json` a strict instruction-only NDJSON stream:
   every line is one self-contained decoded instruction with architecture,
   location, mnemonic, operands, classification, and instruction-local symbol

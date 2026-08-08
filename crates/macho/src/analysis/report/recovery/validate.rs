@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
+use crate::analysis::header_syntax::{
+    HeaderParser as _, Language, TreeSitterHeaderParser, ValidationLimits,
+};
 
 /// Semantic validation failure after strict wire decoding.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -59,8 +62,17 @@ impl RecoveryReport {
             return Err(RecoveryValidationError::ArchitectureSelection);
         }
         self.request.limits.validate()?;
+        if (self.language != RecoveryLanguage::Cpp || self.request.view != RecoveryView::Header)
+            && self.request.hypothesis_selection_policy
+                != crate::analysis::hypothesis::HypothesisSelectionPolicy::default()
+        {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
         let expected_digest = canonical_request_digest(&self.request)?;
         for slice in self.slices.as_slice() {
+            if (self.request.view == RecoveryView::Header) != slice.header.is_some() {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
             if slice.resolved_plan.request_digest != expected_digest
                 || slice
                     .executions
@@ -70,7 +82,12 @@ impl RecoveryReport {
             {
                 return Err(RecoveryValidationError::RequestDigestMismatch);
             }
-            validate_slice(slice, self.language, self.request.limits)?;
+            validate_slice(
+                slice,
+                self.language,
+                self.request.limits,
+                &self.request.hypothesis_selection_policy,
+            )?;
         }
         Ok(())
     }
@@ -101,6 +118,7 @@ pub(super) fn validate_slice(
     slice: &SliceRecovery,
     language: RecoveryLanguage,
     limits: RecoveryLimits,
+    request_policy: &crate::analysis::hypothesis::HypothesisSelectionPolicy,
 ) -> Result<(), RecoveryValidationError> {
     let observations = unique_ids(
         "observation",
@@ -222,25 +240,52 @@ pub(super) fn validate_slice(
     validate_diagnostics(&slice.diagnostics, &observations, &entities, &evidence)?;
     validate_plan_and_executions(slice, &entities, &diagnostics)?;
     if let Some(header) = &slice.header {
-        if !slice.resolved_plan.selected_entity_ids.is_empty()
-            && slice.resolved_plan.projection.is_none()
-        {
-            return Err(RecoveryValidationError::HeaderProjection);
+        if let Some(projection) = &slice.resolved_plan.projection {
+            if projection.language != language
+                || projection.target_entity_ids.as_slice()
+                    != slice.resolved_plan.selected_entity_ids.as_slice()
+                || &projection.selection_policy != request_policy
+            {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+            validate_header(
+                header,
+                &HeaderValidationContext {
+                    language,
+                    selection_policy: &projection.selection_policy,
+                    recovered_entities: &slice.entities,
+                    entities: &entities,
+                    facts: &facts,
+                    evidence: &evidence,
+                    observations: &observations,
+                    slice_diagnostics: &diagnostics,
+                    recovery_gaps: &gaps,
+                    targets: &slice.resolved_plan.selected_entity_ids,
+                },
+            )?;
+        } else {
+            if !slice.resolved_plan.selected_entity_ids.is_empty()
+                || !header.assumption_ledger.hypotheses.is_empty()
+                || !header.assumption_ledger.selections.is_empty()
+            {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+            validate_header(
+                header,
+                &HeaderValidationContext {
+                    language,
+                    selection_policy: request_policy,
+                    recovered_entities: &slice.entities,
+                    entities: &entities,
+                    facts: &facts,
+                    evidence: &evidence,
+                    observations: &observations,
+                    slice_diagnostics: &diagnostics,
+                    recovery_gaps: &gaps,
+                    targets: &[],
+                },
+            )?;
         }
-        validate_header(
-            header,
-            language,
-            &slice
-                .resolved_plan
-                .projection
-                .as_ref()
-                .expect("checked projection")
-                .selection_policy,
-            &entities,
-            &diagnostics,
-            &gaps,
-            &slice.resolved_plan.selected_entity_ids,
-        )?;
     } else if slice.resolved_plan.projection.is_some() {
         return Err(RecoveryValidationError::HeaderProjection);
     }
@@ -520,25 +565,37 @@ fn validate_diagnostics(
     Ok(())
 }
 
+struct HeaderValidationContext<'a> {
+    language: RecoveryLanguage,
+    selection_policy: &'a crate::analysis::hypothesis::HypothesisSelectionPolicy,
+    recovered_entities: &'a [RecoveredEntity],
+    entities: &'a BTreeSet<String>,
+    facts: &'a BTreeSet<String>,
+    evidence: &'a BTreeSet<String>,
+    observations: &'a BTreeSet<String>,
+    slice_diagnostics: &'a BTreeSet<String>,
+    recovery_gaps: &'a BTreeSet<String>,
+    targets: &'a [EntityId],
+}
+
 fn validate_header(
     header: &HeaderProjection,
-    language: RecoveryLanguage,
-    selection_policy: &crate::analysis::hypothesis::HypothesisSelectionPolicy,
-    entities: &BTreeSet<String>,
-    slice_diagnostics: &BTreeSet<String>,
-    recovery_gaps: &BTreeSet<String>,
-    targets: &[EntityId],
+    context: &HeaderValidationContext<'_>,
 ) -> Result<(), RecoveryValidationError> {
-    if header.language != language
-        || !header.validation.syntax_valid
-        || !header.validation.semantic_valid
-    {
+    if header.language != context.language {
         return Err(RecoveryValidationError::HeaderProjection);
     }
     header
         .assumption_ledger
-        .validate(selection_policy)
-        .map_err(|_| RecoveryValidationError::HeaderProjection)?;
+        .validate(context.selection_policy)
+        .map_err(|error| {
+            eprintln!("hypothesis ledger: {error}");
+            RecoveryValidationError::HeaderProjection
+        })?;
+    validate_header_source(header).inspect_err(|error| eprintln!("header source: {error}"))?;
+    if !header.validation.syntax_valid || !header.validation.semantic_valid {
+        return Err(RecoveryValidationError::HeaderProjection);
+    }
     let header_diagnostics = unique_ids(
         "header diagnostic",
         header
@@ -546,7 +603,7 @@ fn validate_header(
             .iter()
             .map(|diagnostic| diagnostic.id.as_str()),
     )?;
-    let mut gap_ids = recovery_gaps.clone();
+    let mut gap_ids = context.recovery_gaps.clone();
     let mut unresolved_entities = BTreeSet::new();
     for gap in &header.unresolved {
         if !gap_ids.insert(gap.id.as_str().to_owned()) {
@@ -555,12 +612,12 @@ fn validate_header(
                 id: gap.id.to_string(),
             });
         }
-        require(entities, gap.entity_id.as_str(), "entity")?;
+        require(context.entities, gap.entity_id.as_str(), "entity")?;
         if let Some(template) = &gap.declaration_template {
             if gap.reason != HeaderIneligibilityReason::UnprovenOwner {
                 return Err(RecoveryValidationError::HeaderProjection);
             }
-            validate_declaration_entity(template, entities)?;
+            validate_declaration_entity(template, context.entities)?;
             let mut template_entities = BTreeSet::new();
             collect_declaration_entities(template, &mut template_entities)?;
             if template_entities.len() != 1 || !template_entities.contains(gap.entity_id.as_str()) {
@@ -569,7 +626,8 @@ fn validate_header(
         }
         unresolved_entities.insert(gap.entity_id.as_str().to_owned());
         for id in &gap.diagnostic_ids {
-            if !header_diagnostics.contains(id.as_str()) && !slice_diagnostics.contains(id.as_str())
+            if !header_diagnostics.contains(id.as_str())
+                && !context.slice_diagnostics.contains(id.as_str())
             {
                 return Err(RecoveryValidationError::DanglingId {
                     kind: "diagnostic",
@@ -578,9 +636,11 @@ fn validate_header(
             }
         }
     }
+    validate_hypothesis_evidence(&header.assumption_ledger, context, &gap_ids)
+        .inspect_err(|error| eprintln!("hypothesis evidence: {error}"))?;
     let mut declared_entities = BTreeSet::new();
     for declaration in &header.declarations {
-        validate_declaration_entity(declaration, entities)?;
+        validate_declaration_entity(declaration, context.entities)?;
         collect_declaration_entities(declaration, &mut declared_entities)?;
     }
     if !declared_entities.is_disjoint(&unresolved_entities) {
@@ -590,14 +650,435 @@ fn validate_header(
         .union(&unresolved_entities)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let expected = targets
+    let expected = context
+        .targets
         .iter()
         .map(|id| id.as_str().to_owned())
         .collect::<BTreeSet<_>>();
     if covered != expected {
         return Err(RecoveryValidationError::HeaderProjection);
     }
+    validate_declaration_assumptions(
+        &header.declarations,
+        context.recovered_entities,
+        &header.assumption_ledger,
+        &covered,
+    )
+    .inspect_err(|error| eprintln!("declaration assumptions: {error}"))?;
     Ok(())
+}
+
+fn validate_hypothesis_evidence(
+    ledger: &crate::analysis::hypothesis::HypothesisLedger,
+    context: &HeaderValidationContext<'_>,
+    recovery_gaps: &BTreeSet<String>,
+) -> Result<(), RecoveryValidationError> {
+    use crate::analysis::hypothesis::HypothesisEvidenceKind;
+
+    let hypothesis_gaps = ledger
+        .hypotheses
+        .iter()
+        .map(|hypothesis| hypothesis.subject.key.as_str())
+        .collect::<BTreeSet<_>>();
+    for reference in ledger
+        .hypotheses
+        .iter()
+        .flat_map(|hypothesis| &hypothesis.candidates)
+        .flat_map(|candidate| &candidate.evidence)
+    {
+        let valid = match reference.kind {
+            HypothesisEvidenceKind::Entity => context.entities.contains(&reference.id),
+            HypothesisEvidenceKind::Fact => context.facts.contains(&reference.id),
+            HypothesisEvidenceKind::Evidence => context.evidence.contains(&reference.id),
+            HypothesisEvidenceKind::Observation => context.observations.contains(&reference.id),
+            HypothesisEvidenceKind::RecoveryGap => {
+                recovery_gaps.contains(&reference.id)
+                    || hypothesis_gaps.contains(reference.id.as_str())
+            }
+        };
+        if !valid {
+            return Err(RecoveryValidationError::DanglingId {
+                kind: "hypothesis evidence",
+                id: reference.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_header_source(header: &HeaderProjection) -> Result<(), RecoveryValidationError> {
+    let language = match header.language {
+        RecoveryLanguage::CAbi => Language::C,
+        RecoveryLanguage::Cpp => Language::Cpp,
+    };
+    let expected_preamble = (!header.assumption_ledger.selections.is_empty()).then(|| {
+        super::recovery_assumption_preamble(&header.assumption_ledger, &header.declarations)
+    });
+    match expected_preamble.as_deref() {
+        Some(prefix) if !header.source.starts_with(prefix) => {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+        None if header
+            .source
+            .starts_with("/*\n * GENERATED BY MACHO USING EXPLICITLY AUTHORIZED ASSUMPTIONS.") =>
+        {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+        Some(_) | None => {}
+    }
+
+    let parsed = TreeSitterHeaderParser
+        .parse(language, &header.source)
+        .map_err(|_| RecoveryValidationError::HeaderProjection)?;
+    let recomputed = crate::analysis::header_syntax::validate(&parsed, ValidationLimits::default())
+        .map_err(|_| RecoveryValidationError::HeaderProjection)?;
+    if HeaderValidationReport::from(&recomputed) != header.validation {
+        return Err(RecoveryValidationError::HeaderProjection);
+    }
+
+    let mut expected = if let Some(prefix) = expected_preamble {
+        TreeSitterHeaderParser
+            .parse(language, &prefix)
+            .map_err(|_| RecoveryValidationError::HeaderProjection)?
+            .declarations
+    } else {
+        Vec::new()
+    };
+    for declaration in &header.declarations {
+        let lowered = crate::analysis::header_infer::syntax::projected_declaration(declaration)
+            .map_err(|_| RecoveryValidationError::HeaderProjection)?;
+        expected.push(lowered);
+    }
+    let expected = crate::analysis::header_infer::syntax::merge_owner_declarations(expected);
+    if parsed.declarations != expected {
+        return Err(RecoveryValidationError::HeaderProjection);
+    }
+    Ok(())
+}
+
+fn validate_declaration_assumptions(
+    declarations: &[HeaderDecl],
+    recovered_entities: &[RecoveredEntity],
+    ledger: &crate::analysis::hypothesis::HypothesisLedger,
+    covered_entities: &BTreeSet<String>,
+) -> Result<(), RecoveryValidationError> {
+    let recovered = recovered_entities
+        .iter()
+        .map(|entity| (entity.id.as_str(), entity))
+        .collect::<BTreeMap<_, _>>();
+    for receipt in &ledger.selections {
+        for consequence in &receipt.consequences {
+            if consequence.stage == "header_projection"
+                && !consequence
+                    .subject
+                    .as_ref()
+                    .is_some_and(|subject| covered_entities.contains(subject))
+            {
+                return Err(RecoveryValidationError::HeaderProjection);
+            }
+        }
+    }
+    for declaration in declarations {
+        validate_declaration_assumption(declaration, &recovered, &ledger.selections)?;
+    }
+    Ok(())
+}
+
+fn validate_declaration_assumption(
+    declaration: &HeaderDecl,
+    recovered: &BTreeMap<&str, &RecoveredEntity>,
+    receipts: &[crate::analysis::hypothesis::HypothesisSelectionReceipt],
+) -> Result<(), RecoveryValidationError> {
+    let entity_id =
+        declaration_entity_id(declaration).ok_or(RecoveryValidationError::HeaderProjection)?;
+    let entity = recovered
+        .get(entity_id.as_str())
+        .ok_or(RecoveryValidationError::HeaderProjection)?;
+    let has_receipt = |candidate_id: &str| {
+        receipts.iter().any(|receipt| {
+            receipt.chosen_candidate_id == candidate_id
+                && receipt
+                    .consequences
+                    .iter()
+                    .any(|consequence| consequence.subject.as_deref() == Some(entity_id.as_str()))
+        })
+    };
+    if declaration_uses_assumed_owner(declaration, entity) {
+        let matching_receipt = match declaration {
+            HeaderDecl::Function {
+                owner: Some(owner), ..
+            }
+            | HeaderDecl::Variable {
+                owner: Some(owner), ..
+            }
+            | HeaderDecl::Record {
+                owner: Some(owner), ..
+            }
+            | HeaderDecl::Forward {
+                owner: Some(owner), ..
+            } => {
+                (has_receipt("namespace_owner")
+                    && selected_owner_matches(entity, owner, "namespace_owner"))
+                    || (has_receipt("class_owner_public")
+                        && selected_owner_matches(entity, owner, "class_owner_public"))
+            }
+            HeaderDecl::Function { owner: None, .. }
+            | HeaderDecl::Variable { owner: None, .. }
+            | HeaderDecl::Record { owner: None, .. }
+            | HeaderDecl::Forward { owner: None, .. }
+            | HeaderDecl::Alias { .. }
+            | HeaderDecl::ObjcInterface { .. }
+            | HeaderDecl::ObjcCategory { .. }
+            | HeaderDecl::ObjcProtocol { .. }
+            | HeaderDecl::ObjcForward { .. } => false,
+        };
+        if !matching_receipt {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+    }
+    let mut opaque_subjects = BTreeSet::new();
+    collect_opaque_return_subjects(declaration, &mut opaque_subjects);
+    for subject in opaque_subjects {
+        if !receipts.iter().any(|receipt| {
+            receipt.subject.key == subject
+                && receipt.chosen_candidate_id == "opaque_return_type"
+                && receipt
+                    .consequences
+                    .iter()
+                    .any(|consequence| consequence.subject.as_deref() == Some(entity_id.as_str()))
+        }) {
+            return Err(RecoveryValidationError::HeaderProjection);
+        }
+    }
+    if let HeaderDecl::Record { path, .. } | HeaderDecl::Forward { path, .. } = declaration
+        && let [name] = path.as_slice()
+        && let Some(subject) = name.as_str().strip_prefix("macho_unknown_type_")
+        && !receipts.iter().any(|receipt| {
+            receipt.subject.key == subject
+                && receipt.chosen_candidate_id == "opaque_type_name"
+                && receipt
+                    .consequences
+                    .iter()
+                    .any(|consequence| consequence.subject.as_deref() == Some(entity_id.as_str()))
+        })
+    {
+        return Err(RecoveryValidationError::HeaderProjection);
+    }
+    if let HeaderDecl::Record { members, .. } = declaration {
+        for member in members {
+            validate_declaration_assumption(&member.declaration, recovered, receipts)?;
+        }
+    }
+    Ok(())
+}
+
+fn selected_owner_matches(
+    entity: &RecoveredEntity,
+    owner: &HeaderOwnerRef,
+    candidate_id: &str,
+) -> bool {
+    let structural_match = match candidate_id {
+        "namespace_owner" => {
+            owner
+                .scope_kinds
+                .as_slice()
+                .iter()
+                .all(|kind| *kind == HeaderOwnerKind::Namespace)
+                && owner.scope_access.as_slice().iter().all(Option::is_none)
+                && owner.member_access.is_none()
+                && owner.entity_id.is_none()
+        }
+        "class_owner_public" => {
+            matches!(
+                owner.terminal_kind(),
+                HeaderOwnerKind::Record | HeaderOwnerKind::Class
+            ) && owner.member_access.is_some()
+        }
+        _ => false,
+    };
+    if !structural_match {
+        return false;
+    }
+    let Fact::Known { value, .. } = &entity.owner else {
+        return candidate_id != "class_owner_public" || owner.member_access == Some(Access::Public);
+    };
+    if value.path.as_slice() != owner.path.as_slice()
+        || value.scope_kinds.len() != owner.scope_kinds.as_slice().len()
+        || value.scope_access.len() != owner.scope_access.as_slice().len()
+        || value.entity_id != owner.entity_id
+    {
+        return false;
+    }
+    if value
+        .scope_kinds
+        .iter()
+        .zip(owner.scope_kinds.as_slice())
+        .any(|(recovered, projected)| recovered.is_some_and(|kind| kind != *projected))
+        || value
+            .scope_access
+            .iter()
+            .zip(owner.scope_access.as_slice())
+            .any(|(recovered, projected)| recovered.is_some() && recovered != projected)
+    {
+        return false;
+    }
+    match candidate_id {
+        "namespace_owner" => value.member_access.is_none(),
+        "class_owner_public" => owner.member_access == value.member_access.or(Some(Access::Public)),
+        _ => false,
+    }
+}
+
+fn declaration_entity_id(declaration: &HeaderDecl) -> Option<&EntityId> {
+    match declaration {
+        HeaderDecl::Function { id, .. }
+        | HeaderDecl::Variable { id, .. }
+        | HeaderDecl::Record { id, .. }
+        | HeaderDecl::Forward { id, .. }
+        | HeaderDecl::Alias { id, .. } => Some(id),
+        HeaderDecl::ObjcInterface { .. }
+        | HeaderDecl::ObjcCategory { .. }
+        | HeaderDecl::ObjcProtocol { .. }
+        | HeaderDecl::ObjcForward { .. } => None,
+    }
+}
+
+fn declaration_uses_assumed_owner(declaration: &HeaderDecl, entity: &RecoveredEntity) -> bool {
+    match declaration {
+        HeaderDecl::Function {
+            owner: Some(owner), ..
+        }
+        | HeaderDecl::Variable {
+            owner: Some(owner), ..
+        }
+        | HeaderDecl::Record {
+            owner: Some(owner), ..
+        }
+        | HeaderDecl::Forward {
+            owner: Some(owner), ..
+        } => !recovered_owner_matches(entity, owner),
+        HeaderDecl::Alias { path, .. } if path.as_slice().len() > 1 => {
+            !recovered_owner_path_matches(entity, &path.as_slice()[..path.as_slice().len() - 1])
+        }
+        _ => false,
+    }
+}
+
+fn recovered_owner_matches(entity: &RecoveredEntity, owner: &HeaderOwnerRef) -> bool {
+    let Fact::Known { value, .. } = &entity.owner else {
+        return false;
+    };
+    value.path.as_slice() == owner.path.as_slice()
+        && value.scope_kinds.len() == owner.scope_kinds.as_slice().len()
+        && value
+            .scope_kinds
+            .iter()
+            .zip(owner.scope_kinds.as_slice())
+            .all(|(recovered, projected)| recovered == &Some(*projected))
+        && value.scope_access.as_slice() == owner.scope_access.as_slice()
+        && value.member_access == owner.member_access
+        && value.entity_id == owner.entity_id
+}
+
+fn recovered_owner_path_matches(entity: &RecoveredEntity, path: &[Identifier]) -> bool {
+    let Fact::Known { value, .. } = &entity.owner else {
+        return false;
+    };
+    if value.path.as_slice() != path
+        || value.scope_kinds.len() != path.len()
+        || value.scope_access.len() != path.len()
+        || value.scope_access.first().is_some_and(Option::is_some)
+    {
+        return false;
+    }
+    let Some(kinds) = value
+        .scope_kinds
+        .iter()
+        .copied()
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    for index in 1..kinds.len() {
+        match kinds[index - 1] {
+            HeaderOwnerKind::Namespace if value.scope_access[index].is_some() => return false,
+            HeaderOwnerKind::Record | HeaderOwnerKind::Class
+                if !matches!(
+                    value.scope_access[index],
+                    Some(Access::Public | Access::Protected | Access::Private)
+                ) =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+    }
+    match kinds.last() {
+        Some(HeaderOwnerKind::Namespace) => value.member_access.is_none(),
+        Some(HeaderOwnerKind::Record | HeaderOwnerKind::Class) => matches!(
+            value.member_access,
+            Some(Access::Public | Access::Protected | Access::Private)
+        ),
+        None => false,
+    }
+}
+
+fn collect_opaque_return_subjects(declaration: &HeaderDecl, subjects: &mut BTreeSet<String>) {
+    match declaration {
+        HeaderDecl::Function { signature, .. } => collect_opaque_type_subjects(signature, subjects),
+        HeaderDecl::Variable { ty, .. } | HeaderDecl::Alias { target: ty, .. } => {
+            collect_opaque_type_subjects(ty, subjects);
+        }
+        HeaderDecl::Record { bases, fields, .. } => {
+            for base in bases {
+                collect_opaque_type_subjects(&base.ty, subjects);
+            }
+            for field in fields {
+                collect_opaque_type_subjects(&field.ty, subjects);
+            }
+        }
+        HeaderDecl::Forward { .. }
+        | HeaderDecl::ObjcInterface { .. }
+        | HeaderDecl::ObjcCategory { .. }
+        | HeaderDecl::ObjcProtocol { .. }
+        | HeaderDecl::ObjcForward { .. } => {}
+    }
+}
+
+fn collect_opaque_type_subjects(ty: &HeaderType, subjects: &mut BTreeSet<String>) {
+    match ty {
+        HeaderType::Named {
+            path,
+            template_arguments,
+            ..
+        } => {
+            if let [name] = path.as_slice()
+                && let Some(subject) = name.as_str().strip_prefix("macho_unknown_return_")
+            {
+                subjects.insert(subject.to_owned());
+            }
+            for argument in template_arguments {
+                if let HeaderTemplateArgument::Type { value } = argument {
+                    collect_opaque_type_subjects(value, subjects);
+                }
+            }
+        }
+        HeaderType::Pointer { pointee, .. } => collect_opaque_type_subjects(pointee, subjects),
+        HeaderType::Reference { target, .. } => collect_opaque_type_subjects(target, subjects),
+        HeaderType::Array { element, .. } => collect_opaque_type_subjects(element, subjects),
+        HeaderType::Function {
+            return_type,
+            parameters,
+            ..
+        } => {
+            collect_opaque_type_subjects(return_type, subjects);
+            for parameter in parameters {
+                collect_opaque_type_subjects(&parameter.ty, subjects);
+            }
+        }
+        HeaderType::ObjcBlock { signature } => collect_opaque_type_subjects(signature, subjects),
+        HeaderType::Builtin { .. } | HeaderType::ObjcObject { .. } => {}
+    }
 }
 
 fn collect_declaration_entities(
@@ -636,6 +1117,12 @@ fn validate_declaration_entity(
         owner: Some(owner), ..
     }
     | HeaderDecl::Variable {
+        owner: Some(owner), ..
+    }
+    | HeaderDecl::Record {
+        owner: Some(owner), ..
+    }
+    | HeaderDecl::Forward {
         owner: Some(owner), ..
     } = declaration
     {

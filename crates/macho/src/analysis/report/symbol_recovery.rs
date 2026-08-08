@@ -287,6 +287,7 @@ fn recovery_request(
         },
         analysis: AnalysisLevel::Sources,
         header_roots: Vec::new(),
+        hypothesis_selection_policy: Default::default(),
         limits: RecoveryLimits::default(),
     }
 }
@@ -540,6 +541,8 @@ fn classify_role(
     classification: LinkageClassification,
     section: Option<&Section>,
 ) -> (EntityRole, EvidenceStrength) {
+    use crate::core::format::constants::SectionAttributes;
+
     if classification == LinkageClassification::Plain && is_runtime_artifact(symbol.name) {
         return (EntityRole::RuntimeArtifact, EvidenceStrength::Exact);
     }
@@ -579,10 +582,21 @@ fn classify_role(
             })
         {
             (EntityRole::CppStaticData, EvidenceStrength::Exact)
-        } else if symbol.is_defined() {
+        } else if symbol.is_defined()
+            && section.is_some_and(|section| {
+                section.attributes().intersects(
+                    SectionAttributes::PURE_INSTRUCTIONS | SectionAttributes::SOME_INSTRUCTIONS,
+                )
+            })
+        {
             // A qualified Itanium name alone cannot prove class ownership, but an
             // executable section does prove a callable entity.
             (EntityRole::Function, EvidenceStrength::Correlated)
+        } else if symbol.is_defined() {
+            // Itanium local names may contain the enclosing function signature
+            // even when the symbol itself is a function-local data object.
+            // Non-executable placement is therefore part of the role evidence.
+            (EntityRole::CppStaticData, EvidenceStrength::Correlated)
         } else {
             (EntityRole::Unknown, EvidenceStrength::Inferred)
         };
@@ -815,6 +829,31 @@ mod tests {
                 .iter()
                 .any(|gap| gap.field == RecoveryField::ValueType)
         );
+    }
+
+    #[test]
+    fn itanium_function_local_static_in_data_is_not_classified_as_a_function() {
+        let bytes = macho_test_support::thin64_x86_64_with_data_symbols(&[
+            macho_test_support::SymbolFixture {
+                name: "__ZZN6Base646encodeERKNSt3__112basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEEE12sBase64Table",
+                external: false,
+                defined: true,
+            },
+        ]);
+        let container = crate::core::parse(&bytes).unwrap();
+        let report =
+            recover_symbol_surface(container.first_macho().unwrap(), RecoveryLanguage::Cpp)
+                .unwrap();
+        let entity = &report.slices.as_slice()[0].entities[0];
+        assert!(matches!(
+            entity.role,
+            Fact::Known {
+                value: EntityRole::CppStaticData,
+                strength: EvidenceStrength::Correlated,
+                ..
+            }
+        ));
+        report.validate().unwrap();
     }
 
     #[test]

@@ -130,7 +130,7 @@ pub fn disassembly_objc_duplicate_class() -> Vec<u8> {
     let image_base = 0x1_0000_0000u64;
 
     let mut bytes = disassembly_objc_boundary();
-    while bytes.len() % 8 != 0 {
+    while !bytes.len().is_multiple_of(8) {
         bytes.push(0);
     }
     let table_offset = bytes.len() as u64;

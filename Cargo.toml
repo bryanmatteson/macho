@@ -13,7 +13,7 @@
     license      = "MIT"
     readme       = "README.md"
     repository   = "https://github.com/bryanmatteson/macho.git"
-    rust-version = "1.85"
+    rust-version = "1.91.1"
     version      = "1.0.0"
 
 [workspace.dependencies]
@@ -40,6 +40,7 @@
     tempfile         = "3"
     termosaic        = { version = "=0.3.0", default-features = false }
     thiserror        = "2"
+    toml             = "1"
     tree-sitter      = "0.26.11"
     tree-sitter-c    = "0.24.2"
     tree-sitter-cpp  = "0.23.4"
